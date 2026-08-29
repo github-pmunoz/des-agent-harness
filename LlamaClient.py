@@ -18,7 +18,9 @@ Fixtures for offline tests: ~/platform/lib/fixtures/{stream_think.sse, stream_pl
 from __future__ import annotations
 
 import json
+import pathlib
 import sys
+from datetime import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -407,8 +409,24 @@ class CodeFence(Stage):
 
 
 class Logger:
-    def __init__(self, path: str = "~/pablo/llama-server.jsonl"): ...
-    def record(self, req: Request, completion: Completion, port: int) -> None: ...
+    """
+    One JSONL record per completion, same layout send_direct.sh writes
+    ({timestamp, port, payload, response}) so existing jq queries over the file keep working.
+    Errors are not recorded (design choice from the bash version: one record = one completion).
+    """
+    def __init__(self, path: str = "~/pablo/llama-server.jsonl"):
+        self.path = pathlib.Path(path).expanduser()
+
+    def record(self, req: Request, completion: Completion, port: int) -> None:
+        rec = {
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "port": port,
+            "payload": req.payload(),
+            "response": completion.to_dict(),
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +434,6 @@ class Logger:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import pathlib
     fx = pathlib.Path(__file__).parent / "fixtures"
 
     r = Completion.from_response(json.loads((fx / "response_think.json").read_text()))
