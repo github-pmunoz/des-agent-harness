@@ -7,59 +7,70 @@ import argparse
 import sys
 
 from dataclasses import dataclass, field
-from LlamaClient import (Request, LlamaServer, Logger, LlamaServerError, LlamaUnreachable,
-                         Seam, CodeFence, Terminal)
+from LlamaClient import (Request, LlamaServer, Logger, Seam, CodeFence, Terminal)
 from esc_watcher import ESCWatcher
 
+#TODO better token estimation
 def estimate_tokens(text: str) -> int:
     """Estimate token count based on character count."""
     return len(text) // 4  # Approximate token estimation
 
+@dataclass(frozen=True)
+class Turn:
+    user: str
+    assistant: str
+    tokens: int = 0
+    cancelled: bool = False
+
+    def __post_init__(self):
+        if self.tokens == 0:
+            object.__setattr__(self, 'tokens', estimate_tokens(self.user) + estimate_tokens(self.assistant)) 
+
+    def messages(self):
+        return [ {"role": "user", "content": self.user}, {"role": "assistant", "content": self.assistant} ]
+
 @dataclass
 class History:
-    messages: list = field(default_factory=list)
-    max_tokens: int = 16138
+    turns: list[Turn] = field(default_factory=list)
+    max_tokens: int = 16384
 
-    def append(self, message):
-        """Add a message and automatically truncate if needed."""
-        if estimate_tokens(message['content']) > self.max_tokens:
-            raise ValueError("Message exceeds max_tokens")
-        self.messages.append(message)
-        self._truncate_if_needed()
+    def append(self, turn: Turn):
+        if turn.tokens > self.max_tokens:
+            raise ValueError("Turn exceeds max_tokens")
+        self.turns.append(turn)
 
-    def _truncate_if_needed(self):
-        """Truncate history if total tokens exceed max_tokens."""
-        # Find longest tail that fits within limit
-        tail_tokens = 0
-        for i, msg in enumerate(reversed(self.messages)):
-            msg_tokens = estimate_tokens(msg['content'])
-            if tail_tokens + msg_tokens > self.max_tokens:
-                # Remove messages from the beginning
-                self.messages = self.messages[len(self.messages) - i:]  # Keep last i messages
+    def view(self, extra_tokens: int = 0) -> list[dict]:
+        """Return the longest tail of turns which in addition to the extra_tokens fits within max_tokens."""
+        budget = self.max_tokens - extra_tokens
+        view, used  = [], 0
+        for turn in reversed(self.turns):
+            if used + turn.tokens > budget:
                 break
-            tail_tokens += msg_tokens
-
-    def view(self):
-        """Return a copy of the messages --- not the mutable list."""
-        return self.messages.copy()
+            used += turn.tokens
+            view.append(turn)
+        return [msg for t in reversed(view) for msg in t.messages()]
 
     def clear(self):
-        """Clear all messages."""
-        self.messages.clear()
+        """Clear all turns."""
+        self.turns.clear()
 
     def get_total_tokens(self):
         """Return total tokens in history."""
-        return sum(estimate_tokens(msg['content']) for msg in self.messages) if self.messages else 0
+        return sum(turn.tokens for turn in self.turns)
+
+    def messages(self):
+        """Return all messages in history."""
+        return [msg for turn in self.turns for msg in turn.messages()] 
 
     def __len__(self):
-        return len(self.messages)
+        return len(self.turns)
 
 
 def main():
     ap = argparse.ArgumentParser(description="Simple chatbot using LlamaClient")
     ap.add_argument("-p", "--port", type=int, default=8012)
     ap.add_argument("-t", "--temperature", type=float, default=0.7)
-    ap.add_argument("-c", "--context", type=int, default=8192, help="context window size")
+    ap.add_argument("-c", "--context", type=int, default=16384, help="context window size")
     ap.add_argument("-mt", "--max_tokens", type=int, default=8192, help="max tokens per turn")
     ap.add_argument("-sp", "--system-prompt", default="You are a helpful assistant. Reply concisely.")
     ap.add_argument("-th", "--think", action="store_true", help="enable thinking")
@@ -126,7 +137,7 @@ def main():
                             print(c("banner", f"Model {model} not found."))
                     case ['/history']:
                         print(c("banner", "Conversation history:"))
-                        for msg in history.view():
+                        for msg in history.messages():
                             if msg['role'] == 'user':
                                 print(c("history-user", f"  {msg['content']}"))
                             elif msg['role'] == 'assistant':
@@ -150,22 +161,15 @@ def main():
                     case ['/nothink']:
                         args.think = False
                         print(c("banner", "Thinking disabled.")) 
-
-
-                        
-
-
                     case _:
                         print(c("banner", "Unknown command."))
                 continue
 
-
-            # Add user message to history
-            history.append({"role": "user", "content": user_input})
-
             # Get response from the model (streaming)
+            user_message = {"role": "user", "content": user_input}
+            used_tokens = estimate_tokens(user_input) + sys_prompt_tokens
             req = Request(
-                messages=[{"role": "system", "content": sys_prompt}] + history.view(),
+                messages=[{"role": "system", "content": sys_prompt}] + history.view(used_tokens) + [user_message],
                 model=args.model,
                 temperature=args.temperature,
                 max_tokens=args.max_tokens,
@@ -180,8 +184,16 @@ def main():
             watcher.start()
             completion = server.stream(req, Seam(CodeFence(term)), cancelled=lambda: watcher.interrupted)
             watcher.stop()
-            history.append({"role": "assistant", "content": completion.content})
             print()  # Final newline
+
+            # Add to history
+            cancelled = completion.finish_reason == "cancelled"
+            turn = Turn(user_input, completion.content, cancelled=cancelled)
+            history.append(turn)  # Add to history
+
+            if cancelled:
+                print(c("banner", "Response cancelled by user.")) 
+                continue
 
             # Display stats
             total_tokens = sys_prompt_tokens + history.get_total_tokens()
@@ -191,9 +203,8 @@ def main():
             print("\nGoodbye!")
             break
         except Exception as e:
-            print(f"Error: {e}")
+            raise e
 
-            continue
         finally:
             print(c("stats", "-" * 50))
             if watcher:
