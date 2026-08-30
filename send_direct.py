@@ -26,7 +26,6 @@ def prompt_from_file(path: str) -> str:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Send one request directly to a llama-server.")
     ap.add_argument("-p", "--port", type=int, default=8012)
-    ap.add_argument("-e", "--endpoint", default="/v1/chat/completions", help=argparse.SUPPRESS)
     ap.add_argument("-t", "--temperature", type=float, default=0.7)
     ap.add_argument("-mt", "--max-tokens", type=int, default=256)
     ap.add_argument("-sp", "--system-prompt", default="")
@@ -42,7 +41,7 @@ def main(argv=None) -> int:
     ap.add_argument("-m", "--model", help="model id (router mode)")
     a = ap.parse_args(argv)
 
-    req = Request(
+    req = Request.single(
         user=prompt_from_file(a.prompt_file) if a.prompt_file else a.user_prompt,
         system=a.system_prompt, model=a.model, temperature=a.temperature,
         max_tokens=a.max_tokens, think=a.think, stream=a.stream,
