@@ -28,6 +28,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Iterator, Optional
 
 
+
 # ---------------------------------------------------------------------------
 # Request
 # ---------------------------------------------------------------------------
@@ -273,15 +274,24 @@ class LlamaServer:
                     raise LlamaServerError(err.get("code"), err.get("type"), err.get("message"))
                 yield frame
 
-    def stream(self, req: Request, renderer: "Stage") -> Completion:
+    def stream(self, req: Request, renderer: "Stage", cancelled=lambda: False) -> Completion:
         """Streaming T-junction: every frame is kept for the fold AND turned into events for the renderer."""
         frames = []
         for frame in self.stream_raw(req):
+            if cancelled():
+                break
             frames.append(frame)
             for channel, text in events(frame):
                 renderer.feed(channel, text)
         renderer.flush()
-        return Completion.from_frames(frames)
+        completion = Completion.from_frames(frames) if frames else Completion(
+            id="", model=req.model or "", created=0, system_fingerprint="",
+            content="", reasoning="", finish_reason="cancelled",
+            usage=None, timings=None, streamed=True,
+        )
+        if cancelled():
+            completion.finish_reason = "cancelled"
+        return completion
 
     def models(self) -> list[dict]:
         """Router: GET /models -> [{id, status:{value, args, preset}, ...}]. Single-model: one entry."""
