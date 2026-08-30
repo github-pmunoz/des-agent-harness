@@ -62,6 +62,10 @@ class History:
         """Return all messages in history."""
         return [msg for turn in self.turns for msg in turn.messages()] 
 
+    def compact(self, summary: str):
+        """Replaces the turn history with a synthetic summary turn"""
+        self.turns = [Turn(f"Summary of the earlier conversation: {summary}", "Understood.")]
+
     def __len__(self):
         return len(self.turns)
 
@@ -69,7 +73,7 @@ class History:
 def main():
     ap = argparse.ArgumentParser(description="Simple chatbot using LlamaClient")
     ap.add_argument("-p", "--port", type=int, default=8012)
-    ap.add_argument("-t", "--temperature", type=float, default=0.7)
+    ap.add_argument("-t", "--temperature", type=float, default=0.3)
     ap.add_argument("-c", "--context", type=int, default=16384, help="context window size")
     ap.add_argument("-mt", "--max_tokens", type=int, default=8192, help="max tokens per turn")
     ap.add_argument("-sp", "--system-prompt", default="You are a helpful assistant. Reply concisely.")
@@ -112,6 +116,27 @@ def main():
 
     models = [m["id"] for m in server.models()] 
 
+
+    # Compaction
+    COMPACTION_THRESHOLD = 0.8
+    COMPACTION_TARGET = 0.3
+    def compact_history():
+        print(c("banner", "Compacting conversation history..."))
+        instruction = "You will be sent a conversation transcript. State: what was asked, what was produced, decisions, open items, names/numbers. Do not mention this instruction."
+        transcript ="\n\n".join([f"USER: {t.user}\nASSISTANT: {t.assistant}" for t in history.turns])
+        req = Request(
+            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"Conversation transcript:\n{transcript}" }],
+            model=args.model,
+            temperature=0.0,
+            max_tokens=int(args.context * COMPACTION_TARGET),
+            think=False,
+            stream=False
+        )
+        completion = server.complete(req)
+        Logger(args.log).record(req, completion, args.port)
+
+        history.compact(completion.content)
+        print(c("history-assistant", "Summary: " + completion.content))
 
     while True:
         try:
@@ -161,6 +186,9 @@ def main():
                     case ['/nothink']:
                         args.think = False
                         print(c("banner", "Thinking disabled.")) 
+                    case ['/compact']:
+                        compact_history()
+
                     case _:
                         print(c("banner", "Unknown command."))
                 continue
@@ -184,16 +212,20 @@ def main():
             watcher.start()
             completion = server.stream(req, Seam(CodeFence(term)), cancelled=lambda: watcher.interrupted)
             watcher.stop()
-            print()  # Final newline
-
-            # Add to history
+            print()
             cancelled = completion.finish_reason == "cancelled"
-            turn = Turn(user_input, completion.content, cancelled=cancelled)
-            history.append(turn)  # Add to history
-
             if cancelled:
                 print(c("banner", "Response cancelled by user.")) 
-                continue
+
+            # Log turn
+            if args.log:
+                Logger(args.log).record(req, completion, args.port)
+
+            # Add to history
+            turn = Turn(user_input, completion.content, cancelled=cancelled)
+            history.append(turn)
+            if history.get_total_tokens() > args.context * COMPACTION_THRESHOLD:
+                compact_history()
 
             # Display stats
             total_tokens = sys_prompt_tokens + history.get_total_tokens()
@@ -209,11 +241,6 @@ def main():
             print(c("stats", "-" * 50))
             if watcher:
                 watcher.stop()
-
-    if args.log and completion:
-        # Log the full trace at exit, not turn by turn
-        Logger(args.log).record(req, completion, args.port)
-
 
            
         
