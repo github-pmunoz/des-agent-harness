@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass, field
 from LlamaClient import (Request, LlamaServer, Logger, LlamaServerError, LlamaUnreachable,
                          Seam, CodeFence, Terminal)
+from esc_watcher import ESCWatcher
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count based on character count."""
@@ -96,6 +97,7 @@ def main():
 
     completion = None
     req = None
+    watcher = None
 
     models = [m["id"] for m in server.models()] 
 
@@ -106,39 +108,55 @@ def main():
             if not user_input:
                 continue
 
-            if user_input.lower() in ['/quit', '/exit']:
-                print(c("banner", "Goodbye!"))
-                break
-            elif user_input.lower() == '/clear':
-                history.clear()
-                print(c("banner", "Conversation history cleared."))
-                continue
-            elif user_input.lower() == '/history':
-                print(c("banner", "Conversation history:"))
-                for msg in history.view():
-                    if msg['role'] == 'user':
-                        print(c("history-user", f"  {msg['content']}"))
-                    elif msg['role'] == 'assistant':
-                        print(c("history-assistant", f"  {msg['content']}"))
-                continue
-            elif user_input.lower().startswith('/models'):
-                # get list of models from server
-                print(c("banner", "Available models:"))
-                for model in models:
-                    print(c("banner", f"  {model}"))
-                continue
-            elif user_input.lower().startswith('/model'):
-                # get list of models from server
-                print(c("banner", f"Current model: {args.model}"))  
-                continue
-            elif user_input.lower().startswith('/model '):
-                # change model
-                model_id = user_input.split(' ', 1)[1]
-                if model_id in models:
-                    args.model = model_id
-                    print(c("banner", f"Model changed to {model_id}"))
-                else:
-                    print(c("banner", f"Model {model_id} not found."))
+            # Handle commands
+            if user_input[0] == '/':
+                match user_input.split(' ', 1):
+                    case ['/model']:
+                        print(c("banner", "Current model: " + args.model))
+                    case ['/models']:
+                        print(c("banner", "Available models:"))
+                        for model in models:
+                            print(f"  {model}")
+                    case ['/model', model]:
+                        model = model.strip()  # Remove leading/trailing whitespace
+                        if model in models:
+                            args.model = model
+                            print(c("banner", f"Switched to model: {model}"))
+                        else:
+                            print(c("banner", f"Model {model} not found."))
+                    case ['/history']:
+                        print(c("banner", "Conversation history:"))
+                        for msg in history.view():
+                            if msg['role'] == 'user':
+                                print(c("history-user", f"  {msg['content']}"))
+                            elif msg['role'] == 'assistant':
+                                print(c("history-assistant", f"  {msg['content']}"))
+                    case ['/quit'] | ['/exit']:
+                        print(c("banner", "Goodbye!"))
+                        break
+                    case ['/clear']:
+                        print(c("banner", "Conversation history cleared."))
+                        history.clear()
+                    case ['/temperature', temp]:
+                        temp = float(temp)
+                        if 0.0 <= temp <= 2.0:
+                            args.temperature = temp
+                            print(c("banner", f"Temperature set to {temp}"))
+                        else:
+                            print(c("banner", "Temperature must be between 0.0 and 2.0.")) 
+                    case ['/think']:
+                        args.think = True
+                        print(c("banner", "Thinking enabled.")) 
+                    case ['/nothink']:
+                        args.think = False
+                        print(c("banner", "Thinking disabled.")) 
+
+
+                        
+
+
+                    case _:
+                        print(c("banner", "Unknown command."))
                 continue
 
 
@@ -156,9 +174,12 @@ def main():
             )
 
             # Stream response
+            watcher = ESCWatcher()
             term = Terminal(out=sys.stdout, colour=_TTY)
-            print(c("assistant", "Assistant: "), end="", flush=True)  # Print assistant prefix
-            completion = server.stream(req, Seam(CodeFence(term)))
+            print(c("assistant", "\nAssistant: "), end="", flush=True)  # Print assistant prefix
+            watcher.start()
+            completion = server.stream(req, Seam(CodeFence(term)), cancelled=lambda: watcher.interrupted)
+            watcher.stop()
             history.append({"role": "assistant", "content": completion.content})
             print()  # Final newline
 
@@ -171,9 +192,12 @@ def main():
             break
         except Exception as e:
             print(f"Error: {e}")
+
             continue
         finally:
             print(c("stats", "-" * 50))
+            if watcher:
+                watcher.stop()
 
     if args.log and completion:
         # Log the full trace at exit, not turn by turn
