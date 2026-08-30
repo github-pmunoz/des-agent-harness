@@ -34,23 +34,24 @@ from typing import Iterator, Optional
 
 @dataclass
 class Request:
-    user: str = "Reply with a single word: OK"
-    system: str = ""
+    messages: list[dict] = field(default_factory=list)  # [ {role, content}, ... ]
     model: Optional[str] = None          # router mode: section id from the preset INI
     temperature: float = 0.7
     max_tokens: int = 256
     think: bool = False
     stream: bool = False
 
+    @classmethod
+    def single(cls, user: str, system: str = "", **params) -> "Request":
+        """Build a request with a single user message and optional system prompt."""
+        messages = [{"role": "system", "content": system}] if system else []
+        messages.append({"role": "user", "content": user})
+        return cls(messages=messages, **params)
+
     def payload(self) -> dict:
         """Build the /v1/chat/completions body. Mirrors send_direct.sh Stage 2."""
-        messages = []
-        if self.system:
-            messages.append({"role": "system", "content": self.system})
-        messages.append({"role": "user", "content": self.user})
-
         body = {
-            "messages": messages,
+            "messages": self.messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "stream": self.stream,
@@ -467,4 +468,12 @@ if __name__ == "__main__":
     for ch, t in [("reasoning", "a"), ("reasoning", "b"), ("content", "x"), ("content", "y")]: seam.feed(ch, t)
     assert cap.got == [("reasoning", "a"), ("reasoning", "b"), ("content", "\n---\n"), ("content", "x"), ("content", "y")], cap.got
     print("seam           ok")
+
+    assert Request.single("hi", "sys").payload()["messages"] == [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+    print("Request.single ok")
+
+    assert Request().messages is not Request().messages  # not a shared default
+    print("not shared default        ok")
+
+    print("All self-checks passed.")
 
