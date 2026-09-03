@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 from desh.engine import Event
 from desh.render import Palette, c_out
-from desh.llama.client import Request, Seam, CodeFence, Terminal
+from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_tokens
 from desh_chat.state import ChatState, Turn
@@ -169,6 +169,17 @@ class Command(Event):
 # ---------------------
 
 @dataclass(frozen=True)
+class LogCompletion(Event):
+    request: Request
+    completion: Completion
+    port: int
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        if state.completions_log is not None:
+            state.completions_log.record(self.request, self.completion, self.port)
+        return state, []
+
+
+@dataclass(frozen=True)
 class StreamCompletion(Event):
     request: Request
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
@@ -183,7 +194,11 @@ class StreamCompletion(Event):
                 print(c_out(Palette.CHROME, "Response cancelled by user."))
         finally:
             watcher.stop()
-        return state, [AppendTurn(user_msg=self.request.messages[-1]["content"], assistant_msg=completion.content, cancelled=cancelled)]
+        new_events: list[Event] = [AppendTurn(user_msg=self.request.messages[-1]["content"], assistant_msg=completion.content, cancelled=cancelled)]
+        if state.completions_log is not None:
+            new_events.append(LogCompletion(request=self.request, completion=completion, port=state.inference.port))
+        return state, new_events
+
 
 @dataclass(frozen=True)
 class AppendTurn(Event):

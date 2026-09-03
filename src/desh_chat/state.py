@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, replace
-from desh.llama.client import LlamaServer
+from desh.llama.client import LlamaServer, Logger
 from desh.llama.tokens import estimate_tokens
 from desh.engine import State
 from typing import Any
@@ -24,6 +24,7 @@ class InferenceEngine:
     models: list[str]
     max_context: dict[str, int]
     server: LlamaServer = field(repr=False)
+    port: int = field(repr=False)
 
 @dataclass(frozen=True)
 class ChatState(State):
@@ -32,13 +33,11 @@ class ChatState(State):
     history: ChatHistory
     running: bool
     system_prompt: str
-    completions_log: str
+    completions_log: Logger | None = field(repr=False) 
     inference: InferenceEngine = field(repr=False)
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
-                return replace(self, settings=replace(self.settings, **{setting: value}))
-
-
+        return replace(self, settings=replace(self.settings, **{setting: value}))
 
 
 # -----------------------

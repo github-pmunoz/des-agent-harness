@@ -11,8 +11,7 @@ import uuid
 import traceback
 
 from desh_chat.state import ChatState
-from desh.llama.client import LlamaServer
-from desh.llama.tokens import estimate_tokens
+from desh.llama.client import LlamaServer, Logger
 from desh.render import Palette, c_out
 from desh.engine import Engine, Event
 from desh_chat.events import Exit, MaybeRegenerate, PromptUser
@@ -67,13 +66,14 @@ def main():
         ),
         inference=InferenceEngine(
             server=client,
+            port=args.port,
             models=client.models(),
             max_context=client.max_context()
         ),
         history=ChatHistory(),
         running=True,
         system_prompt=args.system_prompt,
-        completions_log=args.completions_log
+        completions_log=Logger(args.completions_log) if args.completions_log else None,
     )
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
     log_header = {
