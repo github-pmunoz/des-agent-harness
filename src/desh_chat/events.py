@@ -270,7 +270,6 @@ class CompactHistory(Event):
             MaybeRegenerate()]
 
 
-
 @dataclass(frozen=True)
 class UserMessage(Event):
     message: str
