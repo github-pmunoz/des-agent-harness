@@ -1,8 +1,14 @@
 from dataclasses import dataclass, replace
-from desh.engine import Event, Priority
+from desh.engine import Event
 from desh.render import Palette, c_out
-from desh_chat.state import ChatState
-from typing import Any
+from desh.llama.client import Request, Seam, CodeFence, Terminal
+from desh.llama.esc_watcher import ESCWatcher
+from desh.llama.tokens import estimate_tokens
+from desh_chat.state import ChatState, Turn
+import sys
+
+_TTY = sys.stdout.isatty()
+
 
 
 @dataclass(frozen=True)
@@ -40,7 +46,7 @@ class PromptUser(Event):
             else:
                 c, s = user_input[1:], ""
             return state, [Command(command=c.strip(), args=s.strip())]
-        return state, [MaybeRegenerate()]
+        return state, [UserMessage(user_input)]
 
 
 @dataclass(frozen=True)
@@ -59,6 +65,7 @@ class Warn(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         print(c_out(Palette.WARNING, self.text))
         return state, [MaybeRegenerate()]
+
 
 # ---------------------
 # Commands
@@ -155,3 +162,61 @@ class Command(Event):
         if not lo <= v <= hi:
             raise CommandError(f"/{self.command}: must be in [{lo}, {hi}]")
         return v
+
+
+# ---------------------
+# Turn logic
+# ---------------------
+
+@dataclass(frozen=True)
+class StreamCompletion(Event):
+    request: Request
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        watcher = ESCWatcher()
+        term = Terminal(out=sys.stdout, colour=_TTY)
+        print(c_out(Palette.CHROME_ASSISTANT, "Assistant: "), end="", flush=True)
+        try:
+            watcher.start()
+            completion = state.inference.server.stream(self.request, Seam(CodeFence(term)), cancelled=lambda: watcher.interrupted)
+            cancelled = completion.finish_reason == "cancelled"
+            if cancelled:
+                print(c_out(Palette.CHROME, "Response cancelled by user."))
+        finally:
+            watcher.stop()
+        return state, [AppendTurn(user_msg=self.request.messages[-1]["content"], assistant_msg=completion.content, cancelled=cancelled)]
+
+@dataclass(frozen=True)
+class AppendTurn(Event):
+    user_msg: str
+    assistant_msg: str
+    cancelled: bool
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        turn = Turn(self.user_msg, self.assistant_msg, cancelled=self.cancelled)
+        if not turn.cancelled and state.history.window_tokens() + turn.tokens >= state.settings.compaction_threshold * state.settings.context:
+            pass #TODO trigger compaction; cancelled turns cannot trigger a compaction
+        return replace(state, history=state.history.append(turn)), [MaybeRegenerate()]
+
+@dataclass(frozen=True)
+class UserMessage(Event):
+    message: str
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        user_message = {"role": "user", "content": self.message}
+        sys_prompt_tokens = estimate_tokens(state.system_prompt)
+        msg_tokens = estimate_tokens(self.message)
+        used_tokens = msg_tokens + sys_prompt_tokens
+        gen_budget = int(min(
+            state.settings.max_turn_tokens,
+            state.settings.context - used_tokens - state.history.window_tokens(),
+            state.settings.turn_token_cap * state.settings.context))
+        reserved = sys_prompt_tokens + msg_tokens + gen_budget
+        if gen_budget <= 0:
+            print(c_out(Palette.ERROR, "Request exceeds context window."))
+            return state, [MaybeRegenerate()]
+        return state, [StreamCompletion(request=Request(
+                messages=[{"role": "system", "content": state.system_prompt}] + state.history.view(state.settings.context - reserved) + [user_message],
+                model=state.settings.model,
+                temperature=state.settings.temperature,
+                max_tokens=gen_budget,
+                think=state.settings.think,
+                stream=True
+                ))]

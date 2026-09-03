@@ -72,6 +72,8 @@ class ChatHistory:
         """Return the longest tail of turns which in addition to the extra_tokens fits within max_tokens."""
         view, used  = [], 0
         for turn in reversed(self.turns):
+            if turn.cancelled:
+                continue
             if used + turn.tokens > budget:
                 break
             used += turn.tokens
@@ -81,7 +83,7 @@ class ChatHistory:
         return [msg for t in reversed(view) for msg in t.messages()]
 
     def get_total_tokens(self) -> int:
-        """Return total tokens in history."""
+        """Return total tokens in history. Includes cancelled turns."""
         return sum(turn.tokens for turn in self.turns)
 
     def window_tokens(self) -> int:
@@ -100,6 +102,8 @@ class ChatHistory:
         """Return all turns since the last summary."""
         view = []
         for turn in reversed(self.turns):
+            if turn.cancelled:
+                continue
             view.append(turn)
             if turn.summary:
                 break

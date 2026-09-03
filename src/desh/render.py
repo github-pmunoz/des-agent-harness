@@ -12,6 +12,8 @@ class Palette:
     ERROR   = "\033[31m"    # red
     WARNING = "\033[38;5;208m"    # orange
     CHROME_USER = "\033[1m\033[32m"  # bright green
+    CHROME_ASSISTANT = "\033[1m\033[33m"  # bright yellow
+
 
     def __init__(self, enabled: bool):
         self.enabled = enabled
