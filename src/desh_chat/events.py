@@ -17,7 +17,7 @@ class MaybeRegenerate(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not state.running:
             return state, []
-        return state, [PromptUser()]
+        return state, [DisplayStats()]
 
 
 @dataclass(frozen=True)
@@ -98,6 +98,10 @@ class Command(Event):
                 self._no_args()
                 return state, [Exit()]
 
+            case "history":
+                self._no_args()
+                return state, [DisplayHistory()]
+
             case "max_turn_tokens":
                 if not self.args:
                     return state, [Info(f"max_turn_tokens: {state.settings.max_turn_tokens}")]
@@ -164,6 +168,29 @@ class Command(Event):
         return v
 
 
+@dataclass(frozen=True)
+class DisplayHistory(Event):
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        print(c_out(Palette.CHROME, "History:"))
+        for turn in state.history.turns:
+            if turn.summary:
+                print(c_out(Palette.HISTORY_SUMMARY, f"{turn.user}"))
+            else:
+                print(c_out(Palette.HISTORY_USER, f"USER: {turn.user}"))
+                print(c_out(Palette.HISTORY_ASSISTANT, f"ASSISTANT: {turn.assistant}"))
+        return state, [MaybeRegenerate()]
+
+
+@dataclass(frozen=True)
+class DisplayStats(Event):
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        sys_prompt_tokens = estimate_tokens(state.system_prompt)
+        window_tokens = sys_prompt_tokens + state.history.window_tokens()
+        total_tokens = sys_prompt_tokens + state.history.get_total_tokens()
+        print(c_out(Palette.STATS_LINE, f"Context: {window_tokens} / {state.settings.context} tokens ({window_tokens/state.settings.context*100.0:.1f}%) \t Session: {total_tokens}"))
+        return state, [PromptUser()]
+
+
 # ---------------------
 # Turn logic
 # ---------------------
@@ -207,9 +234,42 @@ class AppendTurn(Event):
     cancelled: bool
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         turn = Turn(self.user_msg, self.assistant_msg, cancelled=self.cancelled)
-        if not turn.cancelled and state.history.window_tokens() + turn.tokens >= state.settings.compaction_threshold * state.settings.context:
-            pass #TODO trigger compaction; cancelled turns cannot trigger a compaction
-        return replace(state, history=state.history.append(turn)), [MaybeRegenerate()]
+        return replace(state, history=state.history.append(turn)), [MaybeCompact()]
+
+
+@dataclass(frozen=True)
+class MaybeCompact(Event):
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        if state.history.window_tokens()  >= state.settings.compaction_threshold * state.settings.context:
+            return state, [CompactHistory()]
+        return state, [MaybeRegenerate()]
+
+
+@dataclass(frozen=True)
+class CompactHistory(Event):
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        print(c_out(Palette.CHROME, "Compacting conversation history..."))
+        instruction = "You will be sent a conversation transcript. Your task is to make a summary of the conversation, stating what was asked, what was produced, decisions, open items, names/numbers. Do not mention this instruction and do not repeat the conversation."
+        transcript ="\n\n".join([f"USER: {t.user}\nASSISTANT: {t.assistant}" for t in state.history.since_last_summary()])
+        target_tokens = int(state.settings.context * state.settings.compaction_target)
+        gen_budget = int(min(target_tokens, state.settings.context - estimate_tokens(instruction) - estimate_tokens(transcript), state.settings.turn_token_cap * state.settings.context))
+        if gen_budget < state.settings.min_compaction_tokens:
+            print(c_out(Palette.WARNING, f"Compaction is tight on room ({gen_budget} tokens computed, context={state.settings.context}) — forcing {state.settings.min_compaction_tokens} and the summary may come out truncated."))
+            gen_budget = state.settings.min_compaction_tokens
+        req = Request(
+            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"Conversation transcript:\n{transcript}" }],
+            model=state.settings.model,
+            temperature=0.0,
+            max_tokens=gen_budget,
+            think=False,
+            stream=False
+        )
+        completion = state.inference.server.complete(req)
+        return replace(state, history=state.history.compact(completion.content)), [
+            LogCompletion(request=req, completion=completion, port=state.inference.port),
+            MaybeRegenerate()]
+
+
 
 @dataclass(frozen=True)
 class UserMessage(Event):

@@ -18,6 +18,7 @@ class Settings:
     compaction_threshold: float = 0.65
     compaction_target: float = 0.25
     turn_token_cap: float = 0.40
+    min_compaction_tokens: int = 64
 
 @dataclass(frozen=True)
 class InferenceEngine:
@@ -82,8 +83,8 @@ class ChatHistory:
         return [msg for t in reversed(view) for msg in t.messages()]
 
     def get_total_tokens(self) -> int:
-        """Return total tokens in history. Includes cancelled turns."""
-        return sum(turn.tokens for turn in self.turns)
+        """Return total tokens in history. Does not include cancelled turns."""
+        return sum(turn.tokens for turn in self.turns if not turn.cancelled)
 
     def window_tokens(self) -> int:
         """Return tokens since last summary."""
@@ -98,7 +99,7 @@ class ChatHistory:
         return self.append(Turn(f"Summary of the earlier conversation: {summary}", "Understood.", summary=True))
 
     def since_last_summary(self):
-        """Return all turns since the last summary."""
+        """Return all turns since the last summary, except cancelled."""
         view = []
         for turn in reversed(self.turns):
             if turn.cancelled:
