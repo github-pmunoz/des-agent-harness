@@ -10,6 +10,7 @@ class Palette:
     RESET   = "\033[0m"     # reset white
     CHROME  = "\033[33m"    # yellow
     ERROR   = "\033[31m"    # red
+    WARNING = "\033[38;5;208m"    # orange
     CHROME_USER = "\033[1m\033[32m"  # bright green
 
     def __init__(self, enabled: bool):

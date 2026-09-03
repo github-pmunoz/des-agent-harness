@@ -302,14 +302,25 @@ class LlamaServer:
             completion.finish_reason = "cancelled"
         return completion
 
-    def models(self) -> list[dict]:
+    def _models(self) -> list[dict]:
         """Router: GET /models -> [{id, status:{value, args, preset}, ...}]. Single-model: one entry."""
         return self._json("/models")["data"]
+
+    def models(self) -> list[str]:
+        return [m["id"] for m in self._models()]
 
     def props(self, model: Optional[str] = None) -> dict:
         """GET /props, or /props?model=<id> in router mode (the child's real launch config)."""
         path = "/props" + (f"?model={urllib.parse.quote(model, safe='')}" if model else "")
         return self._json(path)
+
+    def max_context(self) -> dict[str, int]:
+        result = {}
+        for m in self._models():
+            args = m.get("status", {}).get("args", [])
+            if "--ctx-size" in args:
+                result[m["id"]] = int(args[args.index("--ctx-size") + 1])
+        return result
 
 
 class Stage:

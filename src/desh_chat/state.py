@@ -2,24 +2,43 @@ from dataclasses import dataclass, field, replace
 from desh.llama.client import LlamaServer
 from desh.llama.tokens import estimate_tokens
 from desh.engine import State
+from typing import Any
 
 # -----------------------
 # Chat DES State
 # -----------------------
 
 @dataclass(frozen=True)
-class ChatState(State):
-    """Immutable chat state."""
-    history: ChatHistory
+class Settings:
     model: str
     temperature: float
     think: bool
+    context: int
+    max_turn_tokens: int
+    compaction_threshold: float = 0.65
+    compaction_target: float = 0.25
+    turn_token_cap: float = 0.40
+
+@dataclass(frozen=True)
+class InferenceEngine:
+    models: list[str]
+    max_context: dict[str, int]
+    server: LlamaServer = field(repr=False)
+
+@dataclass(frozen=True)
+class ChatState(State):
+    """Immutable chat state."""
+    settings: Settings
+    history: ChatHistory
     running: bool
     system_prompt: str
-    context: int
-    max_tokens: int
-    log_path: str
-    server: LlamaServer = field(repr=False)
+    completions_log: str
+    inference: InferenceEngine = field(repr=False)
+
+    def change_setting(self, setting: str, value: Any) -> ChatState:
+                return replace(self, settings=replace(self.settings, **{setting: value}))
+
+
 
 
 # -----------------------
@@ -45,16 +64,12 @@ class Turn:
 @dataclass(frozen=True)
 class ChatHistory:
     turns: tuple[Turn, ...] = ()
-    max_tokens: int = 16384
 
     def append(self, turn: Turn) -> ChatHistory:
-        if turn.tokens > self.max_tokens:
-            raise ValueError("Turn exceeds max_tokens")
         return replace(self, turns=self.turns+(turn,))
 
-    def view(self, extra_tokens: int = 0) -> list[dict]:
+    def view(self, budget: int = 0) -> list[dict]:
         """Return the longest tail of turns which in addition to the extra_tokens fits within max_tokens."""
-        budget = self.max_tokens - extra_tokens
         view, used  = [], 0
         for turn in reversed(self.turns):
             if used + turn.tokens > budget:
