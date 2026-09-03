@@ -1,0 +1,17 @@
+  [build-system]
+  requires = ["setuptools>=68"]
+  build-backend = "setuptools.build_meta"
+
+  [project]
+  name = "des-agent-harness"
+  version = "0.1.0"
+  description = "Discrete-event agentic harness with a chat CLI built on it"
+  requires-python = ">=3.12"
+  dependencies = []
+
+  [project.scripts]
+  chat-des = "desh_chat.cli:main"
+  send-direct = "desh.llama.send_direct:main"
+
+  [tool.setuptools.packages.find]
+  where = ["src"]

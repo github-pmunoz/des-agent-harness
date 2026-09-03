@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-send_direct.py — CLI over LlamaClient; python port of ~/platform/scripts/send_direct.sh.
+send_direct.py — CLI over LlamaClient; python port of an earlier bash prototype (send_direct.sh)
 
 Same flags where they exist there (-p -t -mt -sp -up -pf -th -o -fo -to -n -s -l -m).
 Rendering: with --stream the chain Seam -> CodeFence -> Terminal draws reasoning dim,
@@ -11,7 +11,7 @@ import json
 import sys
 from urllib.parse import urlparse
 
-from LlamaClient import (Request, LlamaServer, Logger, LlamaServerError, LlamaUnreachable,
+from desh.llama.client import (Request, LlamaServer, Logger, LlamaServerError, LlamaUnreachable,
                          Seam, CodeFence, Terminal)
 
 
@@ -37,7 +37,7 @@ def main(argv=None) -> int:
     ap.add_argument("-to", "--timeout", type=float, default=30)
     ap.add_argument("-n", "--no-op", action="store_true", help="print the payload, send nothing")
     ap.add_argument("-s", "--stream", action="store_true")
-    ap.add_argument("-l", "--log", default="~/pablo/llama-server.jsonl", help="JSONL telemetry file ('' to disable)")
+    ap.add_argument("-l", "--log", default="", help="JSONL telemetry file")
     ap.add_argument("-m", "--model", help="model id (router mode)")
     a = ap.parse_args(argv)
 

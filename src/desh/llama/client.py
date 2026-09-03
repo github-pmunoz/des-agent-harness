@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-LlamaClient — thin typed client for a local llama-server (single-model or router mode).
+Thin typed client for a local llama-server (single-model or router mode).
 
-Port of ~/platform/scripts/send_direct.sh with explicit boundaries:
+Port of an easrlier bash prototype (send_direct.sh)
 
     Request      builds the payload; the ONLY place optional keys are decided
     Completion   the settled chat.completion; built from a JSON response OR folded from SSE frames
@@ -13,7 +13,15 @@ Port of ~/platform/scripts/send_direct.sh with explicit boundaries:
 No Delta type (yet): frames flow as raw dicts; the renderer adapter turns them into events.
 No queue awareness: that is another project (QueueManager.py).
 
-Fixtures for offline tests: ~/platform/lib/fixtures/{stream_think.sse, stream_plain.sse, response_think.json}
+TODO(transport):
+  - Extract Transport Protocol (complete, stream(req, renderer, cancelled), models, props) into
+    desh/transport.py; LlamaServer becomes its first impl. Engine depends on the protocol only.
+  - Request.seed optional field + payload() emission 
+  - Completion.from_frames per-index tool_calls fold 
+  - Fixture-based self-check became orphaned when fixtures went — replace with
+    tests/test_client.py using inline minimal SSE frames (3–4 lines each), so the fold logic
+    keeps a regression test without binary fixtures in the repo.
+
 """
 from __future__ import annotations
 
@@ -24,7 +32,7 @@ from datetime import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
 
@@ -106,7 +114,7 @@ class Completion:
         """
         Streaming: fold the SSE frames (already parsed, [DONE] excluded) into one Completion.
 
-        Frame anatomy (llama-server b10643, see fixtures/stream_think.sse):
+        Frame anatomy (llama-server b10643)
           - every frame carries the envelope: id, model, created, system_fingerprint
           - content frames:   choices[0].delta.content            (never with reasoning in the same frame)
           - reasoning frames: choices[0].delta.reasoning_content
@@ -126,6 +134,7 @@ class Completion:
                 usage = frame.get("usage")
                 timings = frame.get("timings")
                 continue
+            B
             finish_reason = frame["choices"][0].get("finish_reason") or finish_reason
             delta = frame["choices"][0]["delta"]
             content += delta.get("content") or ""
@@ -164,7 +173,7 @@ class Completion:
 
 
 # ---------------------------------------------------------------------------
-# SSE helpers (pure; used by LlamaServer.stream_raw and by tests on fixtures)
+# SSE helpers (pure; used by LlamaServer.stream_raw 
 # ---------------------------------------------------------------------------
 
 def parse_sse(lines: Iterator[str]) -> Iterator[dict]:
@@ -425,7 +434,7 @@ class Logger:
     ({timestamp, port, payload, response}) so existing jq queries over the file keep working.
     Errors are not recorded (design choice from the bash version: one record = one completion).
     """
-    def __init__(self, path: str = "~/pablo/llama-server.jsonl"):
+    def __init__(self, path: str):
         self.path = pathlib.Path(path).expanduser()
 
     def record(self, req: Request, completion: Completion, port: int) -> None:
@@ -438,52 +447,3 @@ class Logger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-
-# ---------------------------------------------------------------------------
-# Self-check against fixtures:  python3 LlamaClient.py
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    fx = pathlib.Path(__file__).parent / "fixtures"
-
-    r = Completion.from_response(json.loads((fx / "response_think.json").read_text()))
-    assert r.content == "391" and r.reasoning and r.finish_reason == "stop" and not r.streamed
-    print("from_response  ok:", r.usage["completion_tokens"], "tokens")
-
-    for name in ("stream_think.sse", "stream_plain.sse"):
-        with open(fx / name) as f:
-            frames = list(parse_sse(f))
-        c = Completion.from_frames(frames)
-        assert c.streamed and c.usage and c.timings and c.finish_reason == "stop", c
-        print(f"from_frames    ok: {name}: {len(frames)} frames -> {len(c.reasoning)} reasoning chars, {len(c.content)} content chars")
-
-    c = Completion.from_frames(frames[:-1])
-    assert c.finish_reason == "stop" and c.usage is None, "folder must not depend on the trailing frame"
-    print("from_frames    ok: no trailing frame")
-
-    with open(fx / "stream_think.sse") as f:
-        frames = list(parse_sse(f))
-    c = Completion.from_frames(frames)
-    ev = [e for f in frames for e in events(f)]
-    assert {ch for ch, _ in ev} == {"reasoning", "content"}
-    assert "".join(t for ch, t in ev if ch == "content") == c.content
-    assert "".join(t for ch, t in ev if ch == "reasoning") == c.reasoning
-    print("events         ok:", len(ev), "events from", len(frames), "frames")
-
-    class Capture(Stage):
-        def __init__(self): super().__init__(None); self.got = []
-        def feed(self, ch, t): self.got.append((ch, t))
-    cap = Capture(); seam = Seam(cap)
-    for ch, t in [("reasoning", "a"), ("reasoning", "b"), ("content", "x"), ("content", "y")]: seam.feed(ch, t)
-    assert cap.got == [("reasoning", "a"), ("reasoning", "b"), ("content", "\n---\n"), ("content", "x"), ("content", "y")], cap.got
-    print("seam           ok")
-
-    assert Request.single("hi", "sys").payload()["messages"] == [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
-    print("Request.single ok")
-
-    assert Request().messages is not Request().messages  # not a shared default
-    print("not shared default        ok")
-
-    print("All self-checks passed.")
-

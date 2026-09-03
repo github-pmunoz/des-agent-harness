@@ -8,8 +8,8 @@ import traceback
 import sys
 
 from dataclasses import dataclass, field
-from LlamaClient import (Request, LlamaServer, Logger, Seam, CodeFence, Terminal)
-from esc_watcher import ESCWatcher
+from desh.llama.client import (Request, LlamaServer, Logger, Seam, CodeFence, Terminal)
+from desh.llama.esc_watcher import ESCWatcher
 
 from ChatHistory import ChatHistory as History
 from ChatHistory import Turn
