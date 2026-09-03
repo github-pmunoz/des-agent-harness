@@ -134,7 +134,6 @@ class Completion:
                 usage = frame.get("usage")
                 timings = frame.get("timings")
                 continue
-            B
             finish_reason = frame["choices"][0].get("finish_reason") or finish_reason
             delta = frame["choices"][0]["delta"]
             content += delta.get("content") or ""
