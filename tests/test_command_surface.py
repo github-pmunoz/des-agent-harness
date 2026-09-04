@@ -7,30 +7,50 @@ from desh_chat.events import Command, DisplayHistory, Exit, Info, MaybeRegenerat
 
 
 def run_command(make_state, command, args, **state_overrides):
-    """Unit-level: resolves Command.execute's two-hop chain by hand
-    (Command -> Info|Warn|Exit -> MaybeRegenerate) instead of going
-    through the Engine, which would hit real input() at the next PromptUser
-    step. Returns (final_state, first_event, terminal_event):
-      first_event    Info on success / current-value display, Warn on a
-                      rejected command, or Exit for /exit /quit.
-      terminal_event Always MaybeRegenerate or Exit
+    """Unit-level: drives Command.execute() and resolves its immediate shape
+    by hand instead of going through the Engine, which would hit real
+    input() at the next PromptUser step.
+
+    Two shapes, not one chain:
+      /exit, /quit  — a real chain: Command -> [Exit] -> [Info] -> [].
+        Exit sets running=False and never touches MaybeRegenerate.
+      everything else — a 2-fan in one Command.execute() step:
+        [display, MaybeRegenerate()], display in (Info, Warn, DisplayHistory).
+        display is executed here (a leaf, settles at []); MaybeRegenerate is
+        NOT executed — running it would hit real input() at the next
+        PromptUser when state.running is True — only its type is checked.
+        (See TestMaybeRegenerate for direct coverage of its own execute().)
+
+    Returns (final_state, first_event, terminal_event):
+      first_event    Info/Warn/DisplayHistory on the normal path, or Exit
+                      for /exit /quit.
+      terminal_event MaybeRegenerate (unexecuted) on the normal path, or
+                      the same Exit instance as first_event.
     """
     state = make_state(**state_overrides)
     state, events = Command(command=command, args=args).execute(state)
-    assert len(events) == 1, f"/{command} {args!r} emitted {len(events)} events: {events}"
-    first = events[0]
 
-    if isinstance(first, Exit):
-        state, events = first.execute(state)
-        assert events == [], f"Exit emitted further events: {events}"
-        return state, first, first
+    if len(events) == 1 and isinstance(events[0], Exit):
+        exit_event = events[0]
+        state, events = exit_event.execute(state)
+        assert len(events) == 1 and isinstance(events[0], Info), (
+            f"/{command} {args!r} Exit emitted unexpected {events}"
+        )
+        state, events = events[0].execute(state)
+        assert events == [], f"/{command} {args!r} Exit's Info emitted further events: {events}"
+        return state, exit_event, exit_event
 
-    assert isinstance(first, (Info, Warn)), f"/{command} {args!r} emitted unexpected {first}"
-    state, events = first.execute(state)
-    assert len(events) == 1 and isinstance(events[0], MaybeRegenerate), (
-        f"/{command} {args!r} did not settle at MaybeRegenerate: {events}"
+    assert len(events) == 2, f"/{command} {args!r} emitted {len(events)} events: {events}"
+    display, regen = events
+    assert isinstance(display, (Info, Warn, DisplayHistory)), (
+        f"/{command} {args!r} emitted unexpected {display}"
     )
-    return state, first, events[0]
+    assert isinstance(regen, MaybeRegenerate), (
+        f"/{command} {args!r} did not pair with MaybeRegenerate: {events}"
+    )
+    state, further = display.execute(state)
+    assert further == [], f"/{command} {args!r} {display} emitted further events: {further}"
+    return state, display, regen
 
 
 class TestModel:
@@ -141,28 +161,21 @@ class TestThink:
 
 
 class TestHistory:
-    """/history dispatches to DisplayHistory, not Info/Warn — a third
-    terminal-ish shape run_command() doesn't cover, so this drives Command
-    and DisplayHistory by hand instead of reusing that helper.
+    """/history dispatches to DisplayHistory, which fans exactly like
+    Info/Warn now (DisplayHistory settles at [], MaybeRegenerate is the
+    sibling) — run_command() covers it like every other command.
     """
 
     def test_takes_no_arg(self, make_state):
-        state = make_state()
-        _, events = Command(command="history", args="all").execute(state)
-        assert len(events) == 1
-        assert isinstance(events[0], Warn)
+        _, first, _ = run_command(make_state, "history", "all")
+        assert isinstance(first, Warn)
 
     def test_empty_history_prints_header_only(self, make_state, capsys):
-        state = make_state()
-        _, events = Command(command="history", args="").execute(state)
-        assert len(events) == 1
-        assert isinstance(events[0], DisplayHistory)
-
-        state, events = events[0].execute(state)
+        _, first, _ = run_command(make_state, "history", "")
+        assert isinstance(first, DisplayHistory)
         out = capsys.readouterr().out
         assert "History:" in out
         assert "USER:" not in out and "ASSISTANT:" not in out
-        assert len(events) == 1 and isinstance(events[0], MaybeRegenerate)
 
     def test_lists_turns_in_order(self, make_state, capsys):
         from desh_chat.state import ChatHistory, Turn
@@ -176,7 +189,7 @@ class TestHistory:
         assert "ASSISTANT: first answer" in out
         assert "USER: second question" in out
         assert "ASSISTANT: second answer" in out
-        assert isinstance(events[0], MaybeRegenerate)
+        assert events == []  # pure sink now — MaybeRegenerate is Command's job, not DisplayHistory's
 
     def test_summary_turn_shown_without_user_assistant_prefix(self, make_state, capsys):
         from desh_chat.state import ChatHistory, Turn

@@ -17,15 +17,14 @@ class MaybeRegenerate(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not state.running:
             return state, []
-        return state, [DisplayStats()]
+        return state, [DisplayStats(), PromptUser()]
 
 
 @dataclass(frozen=True)
 class Exit(Event):
     """Exit the simulation."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        print(c_out(Palette.CHROME, "Goodbye!"))
-        return replace(state, running=False), []
+        return replace(state, running=False), [Info(f"Goodbye!")]
 
 
 @dataclass(frozen=True)
@@ -49,13 +48,17 @@ class PromptUser(Event):
         return state, [UserMessage(user_input)]
 
 
+# ---------------------
+# Display
+# ---------------------
+
 @dataclass(frozen=True)
 class Info(Event):
     """Display information in chrome"""
     text: str
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         print(c_out(Palette.CHROME, self.text))
-        return state, [MaybeRegenerate()]
+        return state, []
 
 
 @dataclass(frozen=True)
@@ -64,7 +67,30 @@ class Warn(Event):
     text: str
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         print(c_out(Palette.WARNING, self.text))
-        return state, [MaybeRegenerate()]
+        return state, []
+
+
+@dataclass(frozen=True)
+class DisplayHistory(Event):
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        print(c_out(Palette.CHROME, "History:"))
+        for turn in state.history.turns:
+            if turn.summary:
+                print(c_out(Palette.HISTORY_SUMMARY, f"{turn.user}"))
+            else:
+                print(c_out(Palette.HISTORY_USER, f"USER: {turn.user}"))
+                print(c_out(Palette.HISTORY_ASSISTANT, f"ASSISTANT: {turn.assistant}"))
+        return state, []
+
+
+@dataclass(frozen=True)
+class DisplayStats(Event):
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        sys_prompt_tokens = estimate_tokens(state.system_prompt)
+        window_tokens = sys_prompt_tokens + state.history.window_tokens()
+        total_tokens = sys_prompt_tokens + state.history.get_total_tokens()
+        print(c_out(Palette.STATS_LINE, f"Context: {window_tokens} / {state.settings.context} tokens ({window_tokens/state.settings.context*100.0:.1f}%) \t Session: {total_tokens}"))
+        return state, []
 
 
 # ---------------------
@@ -84,15 +110,15 @@ class Command(Event):
         try:
             return self._dispatch(state)
         except CommandError as e:
-            return state, [Warn(str(e))]
+            return state, [Warn(str(e)), MaybeRegenerate()]
         
     def _dispatch(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         match self.command:
             case "context":
                 if not self.args:
-                    return state, [Info(f"context: {state.settings.context}")]
+                    return state, [Info(f"context: {state.settings.context}"), MaybeRegenerate()]
                 value = self._int(0, state.inference.max_context[state.settings.model])
-                return state.change_setting("context", value), [Info(f"\u21aa context set to: {value}")]
+                return state.change_setting("context", value), [Info(f"\u21aa context set to: {value}"), MaybeRegenerate()]
             
             case "exit" | "quit":
                 self._no_args()
@@ -100,42 +126,41 @@ class Command(Event):
 
             case "history":
                 self._no_args()
-                return state, [DisplayHistory()]
+                return state, [DisplayHistory(), MaybeRegenerate()]
 
             case "max_turn_tokens":
                 if not self.args:
-                    return state, [Info(f"max_turn_tokens: {state.settings.max_turn_tokens}")]
+                    return state, [Info(f"max_turn_tokens: {state.settings.max_turn_tokens}"), MaybeRegenerate()]
                 value = self._int(0, state.settings.max_turn_tokens)
-                return state.change_setting("max_turn_tokens", value), [Info(f"\u21aa max_turn_tokens set to: {value}")]
+                return state.change_setting("max_turn_tokens", value), [Info(f"\u21aa max_turn_tokens set to: {value}"), MaybeRegenerate()]
             
             case "models":
                 self._no_args()
-                return state, [Info("\n".join(state.inference.models))]
+                return state, [Info("\n".join(state.inference.models)), MaybeRegenerate()]
             
             case "model":
                 if not self.args:
-                    return state, [Info(f"model: {state.settings.model}")]
+                    return state, [Info(f"model: {state.settings.model}"), MaybeRegenerate()]
                 model = self._single_arg()
                 if model not in state.inference.models:
                     raise CommandError(f"Model {model} not found.")
-                return state.change_setting("model", model), [Info(f"\u21aa model set to: {model}")]
+                return state.change_setting("model", model), [Info(f"\u21aa model set to: {model}"), MaybeRegenerate()]
             
             case "temperature":
                 if not self.args:
-                    return state, [Info(f"temperature: {state.settings.temperature}")]
+                    return state, [Info(f"temperature: {state.settings.temperature}"), MaybeRegenerate()]
                 value = self._float(lo=0.0, hi=2.0)
-                return state.change_setting("temperature", value), [Info(f"\u21aa temperature set to: {value}")]
+                return state.change_setting("temperature", value), [Info(f"\u21aa temperature set to: {value}"), MaybeRegenerate()]
             
             case "think":
                 self._no_args()
-                return state.change_setting("think", True), [Info(f"\u21aa thinking mode enabled")]
+                return state.change_setting("think", True), [Info(f"\u21aa thinking mode enabled"), MaybeRegenerate()]
                 
             case "nothink":
                 self._no_args()
-                return state.change_setting("think", False), [Info(f"\u21aa thinking mode disabled")]
+                return state.change_setting("think", False), [Info(f"\u21aa thinking mode disabled"), MaybeRegenerate()]
             
             case _:
-                
                 raise CommandError(f"Unknown command: /{self.command}")
 
     def _no_args(self):
@@ -166,29 +191,6 @@ class Command(Event):
         if not lo <= v <= hi:
             raise CommandError(f"/{self.command}: must be in [{lo}, {hi}]")
         return v
-
-
-@dataclass(frozen=True)
-class DisplayHistory(Event):
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        print(c_out(Palette.CHROME, "History:"))
-        for turn in state.history.turns:
-            if turn.summary:
-                print(c_out(Palette.HISTORY_SUMMARY, f"{turn.user}"))
-            else:
-                print(c_out(Palette.HISTORY_USER, f"USER: {turn.user}"))
-                print(c_out(Palette.HISTORY_ASSISTANT, f"ASSISTANT: {turn.assistant}"))
-        return state, [MaybeRegenerate()]
-
-
-@dataclass(frozen=True)
-class DisplayStats(Event):
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        sys_prompt_tokens = estimate_tokens(state.system_prompt)
-        window_tokens = sys_prompt_tokens + state.history.window_tokens()
-        total_tokens = sys_prompt_tokens + state.history.get_total_tokens()
-        print(c_out(Palette.STATS_LINE, f"Context: {window_tokens} / {state.settings.context} tokens ({window_tokens/state.settings.context*100.0:.1f}%) \t Session: {total_tokens}"))
-        return state, [PromptUser()]
 
 
 # ---------------------
@@ -266,6 +268,7 @@ class CompactHistory(Event):
         )
         completion = state.inference.server.complete(req)
         return replace(state, history=state.history.compact(completion.content)), [
+            Info(f"{completion.content}"),
             LogCompletion(request=req, completion=completion, port=state.inference.port),
             MaybeRegenerate()]
 

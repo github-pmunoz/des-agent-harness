@@ -1,8 +1,13 @@
 """Unit tests for the ported desh_chat turn chain:
 
   UserMessage -> StreamCompletion -> [AppendTurn, LogCompletion] -> AppendTurn
-    -> MaybeCompact -> (CompactHistory -> LogCompletion ->) MaybeRegenerate
-    -> DisplayStats -> PromptUser
+    -> MaybeCompact -> (CompactHistory -> [Info, LogCompletion] ->) MaybeRegenerate
+    -> [DisplayStats, PromptUser]
+
+MaybeRegenerate is a 2-fan, not a chain link: it schedules DisplayStats and
+PromptUser directly, as siblings. DisplayStats/DisplayHistory/Info/Warn are
+pure sinks (execute() returns [] — no further events); MaybeRegenerate is
+the only thing that reschedules PromptUser.
 
 Each event is driven directly (state, events = Event(...).execute(state)),
 same style as test_command_surface.py's Command tests, plus one full
@@ -17,7 +22,7 @@ from desh.engine import Engine
 from desh.llama.client import Logger, Request
 from desh.llama.tokens import estimate_tokens
 from desh_chat.events import (
-    AppendTurn, CompactHistory, DisplayStats, Exit, LogCompletion,
+    AppendTurn, CompactHistory, DisplayStats, Exit, Info, LogCompletion,
     MaybeCompact, MaybeRegenerate, PromptUser, StreamCompletion, UserMessage,
 )
 from desh_chat.state import ChatHistory, InferenceEngine, Settings, Turn
@@ -299,7 +304,7 @@ class TestMaybeCompact:
 # ---------------------
 
 class TestCompactHistory:
-    def test_happy_path_replaces_history_and_logs(self, make_state):
+    def test_happy_path_replaces_history_and_logs(self, make_state, capsys):
         server = FakeServer(script=[{"content": "a tidy summary"}])
         settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192)
         history = ChatHistory().append(Turn("what happened", "some stuff happened"))
@@ -312,9 +317,13 @@ class TestCompactHistory:
         assert new_state.history.turns[-1].summary is True
         assert "a tidy summary" in new_state.history.turns[-1].user
 
-        assert len(events) == 2
-        assert isinstance(events[0], LogCompletion)
-        assert isinstance(events[1], MaybeRegenerate)
+        assert len(events) == 3
+        assert isinstance(events[0], Info)
+        assert isinstance(events[1], LogCompletion)
+        assert isinstance(events[2], MaybeRegenerate)
+
+        events[0].execute(new_state)  # the summary is now surfaced to the user, not just logged
+        assert "a tidy summary" in capsys.readouterr().out
 
     def test_compaction_request_is_non_streaming_and_deterministic(self, make_state):
         server = FakeServer(script=[{"content": "summary"}])
@@ -360,7 +369,7 @@ class TestCompactHistory:
 # ---------------------
 
 class TestDisplayStats:
-    def test_prints_context_and_session_figures_and_prompts_again(self, make_state, capsys):
+    def test_prints_context_and_session_figures(self, make_state, capsys):
         history = ChatHistory().append(Turn("q", "a"))
         state = make_state(history=history)
         sys_tokens = estimate_tokens(state.system_prompt)
@@ -372,7 +381,7 @@ class TestDisplayStats:
         out = capsys.readouterr().out
         assert f"Context: {expected_window} / {state.settings.context} tokens" in out
         assert f"Session: {expected_total}" in out
-        assert len(events) == 1 and isinstance(events[0], PromptUser)
+        assert events == []  # pure sink now — MaybeRegenerate (not DisplayStats) schedules PromptUser
 
 
 # ---------------------
@@ -415,9 +424,11 @@ class TestLogCompletion:
 class TestFullEngineRun:
     def test_prompt_completion_and_eof_terminate_cleanly_no_livelock(self, make_state, no_esc_watcher, monkeypatch):
         """End-to-end regression: PromptUser -> UserMessage -> StreamCompletion
-        -> AppendTurn -> MaybeCompact -> MaybeRegenerate -> DisplayStats ->
-        PromptUser -> (EOF) -> Exit -> running=False -> MaybeRegenerate
-        returns [] -> queue drains. Engine.run() must return, not hang.
+        -> AppendTurn -> MaybeCompact -> MaybeRegenerate -> [DisplayStats,
+        PromptUser] -> (EOF) -> Exit -> running=False -> [Info] -> [] ->
+        queue drains. Exit never touches MaybeRegenerate — it settles
+        directly through its own Info sink. Engine.run() must return, not
+        hang.
         """
         inputs = iter(["hello there"])
 
