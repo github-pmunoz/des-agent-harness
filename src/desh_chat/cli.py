@@ -8,14 +8,14 @@ import sys
 import time
 import os
 import uuid
-import traceback
 
 from desh_chat.state import ChatState
 from desh.llama.client import LlamaServer, Logger
 from desh.render import Palette, c_out
-from desh.engine import Engine, Event
-from desh_chat.events import Exit, MaybeRegenerate, PromptUser
+from desh.engine import Engine
+from desh_chat.events import  PromptUser
 from desh_chat.state import ChatHistory, Settings, InferenceEngine
+from desh_chat.handlers import on_error, on_interrupt
 
 
 def main():
@@ -84,16 +84,12 @@ def main():
         "max_turn_tokens": args.max_turn_tokens,
         "argv" : sys.argv[1:]
     }
-
-    def on_error(ev, ex, s) -> list[Event]:
-        traceback.print_exc()
-        return [MaybeRegenerate()]
     
     Engine[ChatState](
         des_log=des_log,
         debug=args.debug,
         on_error=on_error,
-        on_interrupt=lambda s: [Exit()]
+        on_interrupt=on_interrupt,
     ).run(state, seed=[PromptUser()], run_id=run_id, log_header=log_header)
 
 

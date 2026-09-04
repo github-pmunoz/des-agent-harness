@@ -22,9 +22,10 @@ from desh.engine import Engine
 from desh.llama.client import Logger, Request
 from desh.llama.tokens import estimate_tokens
 from desh_chat.events import (
-    AppendTurn, CompactHistory, DisplayStats, Exit, Info, LogCompletion,
+    AppendTurn, CompactHistory, Exit, Info, Error, LogCompletion,
     MaybeCompact, MaybeRegenerate, PromptUser, StreamCompletion, UserMessage,
 )
+from desh_chat.handlers import on_interrupt
 from desh_chat.state import ChatHistory, InferenceEngine, Settings, Turn
 
 
@@ -71,9 +72,10 @@ class TestUserMessageBudget:
                              context=1, max_turn_tokens=100, turn_token_cap=1.0)
         state = make_state(settings=settings)
         _, events = UserMessage("a message long enough to blow a context of 1 token").execute(state)
-        assert len(events) == 1
-        assert isinstance(events[0], MaybeRegenerate)
-        assert "exceeds context window" in capsys.readouterr().out
+        assert len(events) == 2
+        assert isinstance(events[0], Error)
+        assert isinstance(events[1], MaybeRegenerate)
+        assert "exceeds context window" in events[0].text
 
 
 class TestUserMessageHistoryView:
@@ -182,8 +184,8 @@ class TestStreamCompletion:
         state = with_server(make_state, server)
         req = Request(messages=[{"role": "user", "content": "hi"}], model=MODELS[0], stream=True)
         _, events = StreamCompletion(request=req).execute(state)
-        assert events[0].cancelled is True
-        assert "cancelled" in capsys.readouterr().out.lower()
+        assert events[1].cancelled is True
+        assert "cancelled" in events[0].text
 
     def test_logs_completion_when_completions_log_is_configured(self, make_state, no_esc_watcher, tmp_path):
         server = FakeServer(script=[{"content": "logged answer"}])
@@ -262,7 +264,7 @@ class TestMaybeCompact:
         history = ChatHistory().append(Turn("long", "reply", tokens=500))  # exactly at threshold
         state = make_state(settings=settings, history=history)
         _, events = MaybeCompact().execute(state)
-        assert len(events) == 1 and isinstance(events[0], CompactHistory)
+        assert len(events) == 2 and isinstance(events[0], Info) and isinstance(events[1], CompactHistory)
 
     def test_does_not_double_count_the_just_appended_turn(self, make_state):
         """Regression: MaybeCompact used to receive `last_turn` and check
@@ -365,59 +367,6 @@ class TestCompactHistory:
 
 
 # ---------------------
-# DisplayStats
-# ---------------------
-
-class TestDisplayStats:
-    def test_prints_context_and_session_figures(self, make_state, capsys):
-        history = ChatHistory().append(Turn("q", "a"))
-        state = make_state(history=history)
-        sys_tokens = estimate_tokens(state.system_prompt)
-        expected_window = sys_tokens + state.history.window_tokens()
-        expected_total = sys_tokens + state.history.get_total_tokens()
-
-        _, events = DisplayStats().execute(state)
-
-        out = capsys.readouterr().out
-        assert f"Context: {expected_window} / {state.settings.context} tokens" in out
-        assert f"Session: {expected_total}" in out
-        assert events == []  # pure sink now — MaybeRegenerate (not DisplayStats) schedules PromptUser
-
-
-# ---------------------
-# LogCompletion
-# ---------------------
-
-class TestLogCompletion:
-    def test_records_when_a_logger_is_configured(self, make_state, tmp_path):
-        import json
-        log_path = tmp_path / "completions.jsonl"
-        state = make_state(completions_log=Logger(str(log_path)))
-        req = Request(messages=[{"role": "user", "content": "hi"}], model=MODELS[0])
-        from desh.llama.client import Completion
-        completion = Completion(id="x", model=MODELS[0], created=0, system_fingerprint="",
-                                 content="hello", reasoning="", finish_reason="stop",
-                                 usage=None, timings=None, streamed=False)
-        new_state, events = LogCompletion(request=req, completion=completion, port=PORT).execute(state)
-        assert events == []
-        assert new_state is state  # no state mutation — pure side effect
-        record = json.loads(log_path.read_text().strip())
-        assert record["port"] == PORT
-        assert record["response"]["choices"][0]["message"]["content"] == "hello"
-
-    def test_no_op_when_no_logger_configured(self, make_state):
-        state = make_state(completions_log=None)
-        req = Request(messages=[{"role": "user", "content": "hi"}], model=MODELS[0])
-        from desh.llama.client import Completion
-        completion = Completion(id="x", model=MODELS[0], created=0, system_fingerprint="",
-                                 content="hello", reasoning="", finish_reason="stop",
-                                 usage=None, timings=None, streamed=False)
-        new_state, events = LogCompletion(request=req, completion=completion, port=PORT).execute(state)
-        assert events == []
-        assert new_state is state
-
-
-# ---------------------
 # Full chain, real Engine
 # ---------------------
 
@@ -449,6 +398,25 @@ class TestFullEngineRun:
         assert final_state.history.turns[0].user == "hello there"
         assert final_state.history.turns[0].assistant == "hi yourself"
 
+    def test_keyboard_interrupt_at_prompt_exits_cleanly(self, make_state, monkeypatch, capsys):
+        """Ctrl+C while blocked on input() at the prompt must route through
+        the real on_interrupt policy (desh_chat.handlers — the same function
+        cli.py wires into its Engine) to a clean Exit -> Info("Goodbye!") ->
+        [], not propagate raw and crash the run. PromptUser itself only
+        catches EOFError; the graceful handling here is an Engine-level
+        property (_step()'s except KeyboardInterrupt -> on_interrupt), so
+        this has to go through a real Engine, not a bare PromptUser call.
+        """
+        def raise_keyboard_interrupt(prompt=""):
+            raise KeyboardInterrupt
+        monkeypatch.setattr("builtins.input", raise_keyboard_interrupt)
+        state = make_state()
+
+        final_state = Engine[type(state)](on_interrupt=on_interrupt).run(state, seed=[PromptUser()])
+
+        assert final_state.running is False
+        assert "Goodbye!" in capsys.readouterr().out
+
     def test_cancelled_turn_never_reaches_the_model_on_the_next_request(self, make_state, no_esc_watcher):
         """A cancelled turn is stored (DisplayHistory can still show it) but
         must never surface in the messages sent for a later turn.
@@ -458,7 +426,7 @@ class TestFullEngineRun:
         req = Request(messages=[{"role": "system", "content": state.system_prompt},
                                  {"role": "user", "content": "cancel me"}], model=MODELS[0], stream=True)
         state, events = StreamCompletion(request=req).execute(state)
-        state, events = events[0].execute(state)  # AppendTurn
+        state, events = events[1].execute(state)  # AppendTurn
         assert state.history.turns[0].cancelled is True
 
         _, events = UserMessage("a follow-up question").execute(state)

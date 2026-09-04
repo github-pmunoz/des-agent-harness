@@ -1,5 +1,5 @@
 from dataclasses import dataclass, replace
-from desh.engine import Event
+from desh.engine import Event, Priority
 from desh.render import Palette, c_out
 from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal
 from desh.llama.esc_watcher import ESCWatcher
@@ -8,7 +8,6 @@ from desh_chat.state import ChatState, Turn
 import sys
 
 _TTY = sys.stdout.isatty()
-
 
 
 @dataclass(frozen=True)
@@ -52,9 +51,12 @@ class PromptUser(Event):
 # Display
 # ---------------------
 
+class DisplayEvent(Event):
+    priority: int = Priority.HIGH
+
+
 @dataclass(frozen=True)
-class Info(Event):
-    """Display information in chrome"""
+class Info(DisplayEvent):
     text: str
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         print(c_out(Palette.CHROME, self.text))
@@ -62,8 +64,7 @@ class Info(Event):
 
 
 @dataclass(frozen=True)
-class Warn(Event):
-    """Display information in chrome"""
+class Warn(DisplayEvent):
     text: str
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         print(c_out(Palette.WARNING, self.text))
@@ -71,7 +72,15 @@ class Warn(Event):
 
 
 @dataclass(frozen=True)
-class DisplayHistory(Event):
+class Error(DisplayEvent):
+    text: str
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        print(c_out(Palette.ERROR, self.text))
+        return state, []
+    
+
+@dataclass(frozen=True)
+class DisplayHistory(DisplayEvent):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         print(c_out(Palette.CHROME, "History:"))
         for turn in state.history.turns:
@@ -84,7 +93,7 @@ class DisplayHistory(Event):
 
 
 @dataclass(frozen=True)
-class DisplayStats(Event):
+class DisplayStats(DisplayEvent):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         sys_prompt_tokens = estimate_tokens(state.system_prompt)
         window_tokens = sys_prompt_tokens + state.history.window_tokens()
@@ -202,6 +211,7 @@ class LogCompletion(Event):
     request: Request
     completion: Completion
     port: int
+    priority: int = Priority.HIGH
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if state.completions_log is not None:
             state.completions_log.record(self.request, self.completion, self.port)
@@ -214,16 +224,17 @@ class StreamCompletion(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         watcher = ESCWatcher()
         term = Terminal(out=sys.stdout, colour=_TTY)
+        new_events: list[Event] = []
         print(c_out(Palette.CHROME_ASSISTANT, "Assistant: "), end="", flush=True)
         try:
             watcher.start()
             completion = state.inference.server.stream(self.request, Seam(CodeFence(term)), cancelled=lambda: watcher.interrupted)
             cancelled = completion.finish_reason == "cancelled"
             if cancelled:
-                print(c_out(Palette.CHROME, "Response cancelled by user."))
+                new_events.append(Info("Response cancelled by user."))
         finally:
             watcher.stop()
-        new_events: list[Event] = [AppendTurn(user_msg=self.request.messages[-1]["content"], assistant_msg=completion.content, cancelled=cancelled)]
+        new_events.append(AppendTurn(user_msg=self.request.messages[-1]["content"], assistant_msg=completion.content, cancelled=cancelled))
         if state.completions_log is not None:
             new_events.append(LogCompletion(request=self.request, completion=completion, port=state.inference.port))
         return state, new_events
@@ -243,14 +254,13 @@ class AppendTurn(Event):
 class MaybeCompact(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if state.history.window_tokens()  >= state.settings.compaction_threshold * state.settings.context:
-            return state, [CompactHistory()]
+            return state, [Info("Compacting conversation history..."), CompactHistory()]
         return state, [MaybeRegenerate()]
 
 
 @dataclass(frozen=True)
 class CompactHistory(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        print(c_out(Palette.CHROME, "Compacting conversation history..."))
         instruction = "You will be sent a conversation transcript. Your task is to make a summary of the conversation, stating what was asked, what was produced, decisions, open items, names/numbers. Do not mention this instruction and do not repeat the conversation."
         transcript ="\n\n".join([f"USER: {t.user}\nASSISTANT: {t.assistant}" for t in state.history.since_last_summary()])
         target_tokens = int(state.settings.context * state.settings.compaction_target)
@@ -287,8 +297,7 @@ class UserMessage(Event):
             state.settings.turn_token_cap * state.settings.context))
         reserved = sys_prompt_tokens + msg_tokens + gen_budget
         if gen_budget <= 0:
-            print(c_out(Palette.ERROR, "Request exceeds context window."))
-            return state, [MaybeRegenerate()]
+            return state, [Error("Request exceeds context window."), MaybeRegenerate()]
         return state, [StreamCompletion(request=Request(
                 messages=[{"role": "system", "content": state.system_prompt}] + state.history.view(state.settings.context - reserved) + [user_message],
                 model=state.settings.model,

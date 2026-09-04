@@ -1,9 +1,10 @@
-"""Unit tests for the desh_chat command surface : 
-Settings, Command dispatch, and PromptUser's slash-command parsing.
+"""Unit tests for the desh_chat command surface: Settings and Command
+dispatch. PromptUser's own slash-command parsing is a single-event
+isolation test — see test_chat_unit.py.
 """
 import pytest
 
-from desh_chat.events import Command, DisplayHistory, Exit, Info, MaybeRegenerate, PromptUser, UserMessage, Warn
+from desh_chat.events import Command, DisplayHistory, Exit, Info, MaybeRegenerate, Warn
 
 
 def run_command(make_state, command, args, **state_overrides):
@@ -164,6 +165,8 @@ class TestHistory:
     """/history dispatches to DisplayHistory, which fans exactly like
     Info/Warn now (DisplayHistory settles at [], MaybeRegenerate is the
     sibling) — run_command() covers it like every other command.
+    DisplayHistory's own rendering behavior (turn order, summary turns,
+    cancelled turns) is tested directly in test_chat_unit.py.
     """
 
     def test_takes_no_arg(self, make_state):
@@ -176,43 +179,6 @@ class TestHistory:
         out = capsys.readouterr().out
         assert "History:" in out
         assert "USER:" not in out and "ASSISTANT:" not in out
-
-    def test_lists_turns_in_order(self, make_state, capsys):
-        from desh_chat.state import ChatHistory, Turn
-        history = ChatHistory().append(Turn("first question", "first answer")) \
-                                .append(Turn("second question", "second answer"))
-        state = make_state(history=history)
-        _, events = DisplayHistory().execute(state)
-        out = capsys.readouterr().out
-        assert out.index("first question") < out.index("second question")
-        assert "USER: first question" in out
-        assert "ASSISTANT: first answer" in out
-        assert "USER: second question" in out
-        assert "ASSISTANT: second answer" in out
-        assert events == []  # pure sink now — MaybeRegenerate is Command's job, not DisplayHistory's
-
-    def test_summary_turn_shown_without_user_assistant_prefix(self, make_state, capsys):
-        from desh_chat.state import ChatHistory, Turn
-        history = ChatHistory().append(Turn("Summary of the earlier conversation: talked about X", "Understood.", summary=True))
-        state = make_state(history=history)
-        DisplayHistory().execute(state)
-        out = capsys.readouterr().out
-        assert "Summary of the earlier conversation: talked about X" in out
-        assert "USER:" not in out
-        assert "Understood." not in out  # the synthetic assistant ack is not displayed for summary turns
-
-    def test_cancelled_turns_are_still_shown(self, make_state, capsys):
-        """DisplayHistory is a raw dump of state.history.turns — unlike the
-        model-context path (view()/since_last_summary()), it does not filter
-        cancelled turns out; this is the one place they're meant to be visible.
-        """
-        from desh_chat.state import ChatHistory, Turn
-        history = ChatHistory().append(Turn("cancelled question", "partial answer", cancelled=True))
-        state = make_state(history=history)
-        DisplayHistory().execute(state)
-        out = capsys.readouterr().out
-        assert "cancelled question" in out
-        assert "partial answer" in out
 
 
 class TestExitQuit:
@@ -244,47 +210,3 @@ class TestUnknownAndEdgeCases:
         # deliberate choice (2026-09-02): /MoDeL must not be accepted
         run_command(make_state, "Model", "")
         assert "Unknown command" in capsys.readouterr().out
-
-
-class TestPromptUserParsing:
-    """Slash-vs-plain-text detection and command/args splitting."""
-
-    def test_slash_input_becomes_command(self, make_state, monkeypatch):
-        monkeypatch.setattr("builtins.input", lambda prompt="": "/model model-b")
-        state, events = PromptUser().execute(make_state())
-        assert len(events) == 1
-        assert isinstance(events[0], Command)
-        assert events[0].command == "model"
-        assert events[0].args == "model-b"
-
-    def test_slash_input_no_args(self, make_state, monkeypatch):
-        monkeypatch.setattr("builtins.input", lambda prompt="": "/models")
-        _, events = PromptUser().execute(make_state())
-        assert events[0].command == "models"
-        assert events[0].args == ""
-
-    def test_command_name_not_lowered(self, make_state, monkeypatch):
-        # PromptUser does not lowercase — Command's own case-sensitivity
-        # (TestUnknownAndEdgeCases) is what actually rejects /Model.
-        monkeypatch.setattr("builtins.input", lambda prompt="": "/Model foo")
-        _, events = PromptUser().execute(make_state())
-        assert events[0].command == "Model"
-
-    def test_plain_text_becomes_user_message(self, make_state, monkeypatch):
-        monkeypatch.setattr("builtins.input", lambda prompt="": "hello there")
-        _, events = PromptUser().execute(make_state())
-        assert len(events) == 1
-        assert isinstance(events[0], UserMessage)
-        assert events[0].message == "hello there"
-
-    def test_empty_input_regenerates(self, make_state, monkeypatch):
-        monkeypatch.setattr("builtins.input", lambda prompt="": "")
-        _, events = PromptUser().execute(make_state())
-        assert isinstance(events[0], MaybeRegenerate)
-
-    def test_eof_exits(self, make_state, monkeypatch):
-        def raise_eof(prompt=""):
-            raise EOFError
-        monkeypatch.setattr("builtins.input", raise_eof)
-        _, events = PromptUser().execute(make_state())
-        assert isinstance(events[0], Exit)
