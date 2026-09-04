@@ -7,8 +7,24 @@ from desh.llama.tokens import estimate_tokens
 from desh_chat.state import ChatState, Turn
 import sys
 import readline
+import os
+import glob
 
 _TTY = sys.stdout.isatty()
+
+COMMANDS = {
+    "/exit" : "exit the chat",
+    "/history" : "show the conversation history",
+    "/max_turn_tokens" : "set the max number of tokens per turn",
+    "/model" : "set the model to use",
+    "/models" : "list available models",
+    "/nothink" : "disable thinking",
+    "/temperature" : "set the temperature",
+    "/think" : "enable thinking",
+    "/context" : "set the context window size",
+    "/compact" : "compact the conversation history",
+}
+
 
 
 @dataclass(frozen=True)
@@ -47,6 +63,17 @@ class PromptUser(Event):
             return state, [Command(command=c.strip(), args=s.strip())]
         return state, [UserMessage(user_input)]
 
+    @staticmethod
+    def comman_dauto_complete(text, state):
+        buffer = readline.get_line_buffer()
+        candidates = []
+        if buffer.startswith("/") and " " not in buffer:
+            candidates = [c for c in COMMANDS.keys() if c.startswith(buffer)]
+        return candidates[state] if state < len(candidates) else None
+
+readline.set_completer_delims(readline.get_completer_delims().replace("/", ""))
+readline.set_completer(PromptUser.comman_dauto_complete)
+readline.parse_and_bind("tab: complete")
 
 # ---------------------
 # Display
@@ -124,6 +151,10 @@ class Command(Event):
         
     def _dispatch(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         match self.command:
+            case "compact":
+                self._no_args()
+                return state, [Info(f"compacting conversation history..."), CompactHistory()]
+
             case "context":
                 if not self.args:
                     return state, [Info(f"context: {state.settings.context}"), MaybeRegenerate()]
