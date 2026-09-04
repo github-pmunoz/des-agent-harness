@@ -15,9 +15,10 @@ touches MaybeRegenerate.
 """
 from conftest import MODELS, PORT
 
+from desh.engine import Priority
 from desh.llama.client import Completion, Logger, Request
 from desh_chat.events import (
-    Command, DisplayHistory, DisplayStats, Exit, Info, LogCompletion,
+    Command, DisplayHistory, DisplayStats, Error, Exit, Info, LogCompletion,
     MaybeRegenerate, PromptUser, UserMessage, Warn,
 )
 from desh_chat.state import ChatHistory, Turn
@@ -34,6 +35,13 @@ class TestWarn:
     def test_prints_and_settles(self, make_state, capsys):
         new_state, events = Warn("something's off").execute(make_state())
         assert "something's off" in capsys.readouterr().out
+        assert events == []
+
+
+class TestError:
+    def test_prints_and_settles(self, make_state, capsys):
+        new_state, events = Error("Request exceeds context window.").execute(make_state())
+        assert "Request exceeds context window." in capsys.readouterr().out
         assert events == []
 
 
@@ -188,3 +196,31 @@ class TestPromptUserParsing:
         monkeypatch.setattr("builtins.input", raise_eof)
         _, events = PromptUser().execute(make_state())
         assert isinstance(events[0], Exit)
+
+
+class TestEventPriority:
+    """Priority is what makes chrome/log events preempt ahead of business-
+    logic siblings regardless of emission order (e.g. StreamCompletion's
+    Info("Response cancelled...")/LogCompletion now run before AppendTurn,
+    reversing their old list-order-only relative sequence). The engine's
+    priority-over-seq MECHANISM is covered generically in test_engine.py's
+    TestPriority — this only guards that each desh_chat event actually opts
+    into the right tier, which nothing else here checks.
+    """
+
+    def test_display_events_are_high_priority(self):
+        for cls in (Info, Warn, Error, DisplayHistory, DisplayStats):
+            assert cls.priority == Priority.HIGH, f"{cls.__name__} is not Priority.HIGH"
+
+    def test_log_completion_is_high_priority_without_being_a_display_event(self):
+        # LogCompletion lives in "Turn logic", not "Display" — it earns
+        # Priority.HIGH on its own, not via DisplayEvent inheritance.
+        assert LogCompletion.priority == Priority.HIGH
+        from desh_chat.events import DisplayEvent
+        assert not issubclass(LogCompletion, DisplayEvent)
+
+    def test_ordinary_turn_logic_events_stay_normal_priority(self):
+        # Contrast case: nothing here silently promoted business-logic events.
+        assert PromptUser.priority == Priority.NORMAL
+        assert MaybeRegenerate.priority == Priority.NORMAL
+        assert Command.priority == Priority.NORMAL
