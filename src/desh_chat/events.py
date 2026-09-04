@@ -1,11 +1,12 @@
 from dataclasses import dataclass, replace
 from desh.engine import Event, Priority
-from desh.render import Palette, c_out
+from desh.render import Palette, c_out, rl_prompt
 from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_tokens
 from desh_chat.state import ChatState, Turn
 import sys
+import readline
 
 _TTY = sys.stdout.isatty()
 
@@ -31,7 +32,7 @@ class PromptUser(Event):
     """Event to prompt user for input."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         try:
-            user_input = input(c_out(Palette.CHROME_USER, "You: "))
+            user_input = input(rl_prompt(Palette.CHROME_USER, "You: "))
         except EOFError:
             return state, [Exit()]
         if not user_input:

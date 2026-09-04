@@ -24,9 +24,12 @@ class Palette:
 
     def __call__(self, channel: str, text: str) -> str:
         return f"{channel}{text}{Palette.RESET}" if self.enabled else text
+    
 c_out = Palette(enabled=sys.stdout.isatty())
 c_err = Palette(enabled=sys.stderr.isatty())
 
+def rl_prompt(channel: str, text: str) -> str:
+    return f"\001{channel}\002{text}\001{Palette.RESET}\002"
 
 def pretty_log(record: dict) -> str:
     return f"\u21aa {record['payload']} → [{', '.join(record['emitted'])}] " f"depth={record['depth']} {record['dur_ms']}ms" + ("" if record['outcome'] == "ok" else f" ⚠ {record['outcome']}")
