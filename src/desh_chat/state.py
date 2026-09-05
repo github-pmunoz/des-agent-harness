@@ -34,8 +34,9 @@ class ChatState(State):
     history: ChatHistory
     running: bool
     system_prompt: str
-    completions_log: Logger | None = field(repr=False) 
+    completions_log: Logger | None = field(repr=False)
     inference: InferenceEngine = field(repr=False)
+    session_file: str | None = None     # where LoadSession reads / SaveSession writes; None -> no persistence
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))
@@ -60,10 +61,35 @@ class Turn:
     def messages(self):
         return [ {"role": "user", "content": self.user}, {"role": "assistant", "content": self.assistant} ]
 
+    def to_dict(self) -> dict:
+        return {"user": self.user, "assistant": self.assistant, "tokens": self.tokens,
+                "cancelled": self.cancelled, "summary": self.summary}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Turn:
+        return cls(user=d["user"], assistant=d["assistant"], tokens=d.get("tokens", 0),
+                   cancelled=d.get("cancelled", False), summary=d.get("summary", False))
+
 
 @dataclass(frozen=True)
 class ChatHistory:
     turns: tuple[Turn, ...] = ()
+
+    SESSION_FORMAT = 1
+
+    def to_dict(self) -> dict:
+        """Serializable form; the session file is this dict plus whatever metadata the saver adds."""
+        return {"version": self.SESSION_FORMAT, "turns": [t.to_dict() for t in self.turns]}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ChatHistory:
+        """Inverse of to_dict. Raises ValueError on an unknown format, KeyError/TypeError on a malformed one."""
+        if not isinstance(d, dict):
+            raise ValueError(f"session document must be an object, got {type(d).__name__}")
+        version = d.get("version")
+        if version != cls.SESSION_FORMAT:
+            raise ValueError(f"unsupported session format {version!r} (expected {cls.SESSION_FORMAT})")
+        return cls(turns=tuple(Turn.from_dict(t) for t in d["turns"]))
 
     def append(self, turn: Turn) -> ChatHistory:
         return replace(self, turns=self.turns+(turn,))

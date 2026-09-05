@@ -13,9 +13,34 @@ from desh_chat.state import ChatState
 from desh.llama.client import LlamaServer, Logger
 from desh.render import Palette, c_out
 from desh.engine import Engine
-from desh_chat.events import  PromptUser
+from desh_chat.events import LoadSession, PromptUser
 from desh_chat.state import ChatHistory, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
+
+
+def resolve_session_file(session: str, sessions_folder: str, run_id: str) -> str | None:
+    """
+    Turn the two session flags into one path (or None for no persistence).
+
+      --session PATH            an explicit file to load-or-create.
+      --sessions-folder DIR     a new file in DIR, named from run_id, so every run leaves a session.
+      both                      ignores --sessions-folder, uses --session as-is.
+
+    The folder is created if missing. Paths are ~-expanded. Return None when neither flag is set.
+    """
+    if sessions_folder and not session:
+        # Create a new session file in the folder, named from the run_id.
+        session = os.path.join(os.path.expanduser(sessions_folder), f"{run_id}.json")
+        os.makedirs(os.path.expanduser(sessions_folder), exist_ok=True)
+        return session
+    if session:
+        # Ignore the folder, use the session file as-is. Includes branches with and without a directory part.
+        # The folder is created if missing.
+        parent = os.path.dirname(os.path.expanduser(session))
+        if parent and not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+        return os.path.expanduser(session)
+    return None  # no session persistence
 
 
 def main():
@@ -30,8 +55,13 @@ def main():
     ap.add_argument("-cl",  "--completions-log", default="", help="JSONL telemetry file")
     ap.add_argument("-dl",  "--des-log",        default="", help="DES engine log")
     ap.add_argument("-to",  "--timeout",        default=0, type=float)
+    ap.add_argument("-s",   "--session",        default="", help="session file to load or create")
+    ap.add_argument("-sf",  "--sessions-folder", default="", help="folder where a new session file is created per run")
     ap.add_argument("-d",   "--debug",          action="store_true", help="Enable debug output")
     args = ap.parse_args()
+
+    run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
+    session_file = resolve_session_file(args.session, args.sessions_folder, run_id)
 
     print(c_out(Palette.CHROME, f"\n{"═"*50}"))
     print(c_out(Palette.CHROME, f""" DES Chat v0.1
@@ -44,7 +74,8 @@ def main():
     Compl log:    {args.completions_log}
     DES log:      {args.des_log}
     Debug:        {"enabled" if args.debug else "disabled"}
-    Timeout:      {args.timeout}s"""))
+    Timeout:      {args.timeout}s
+    Session:      {session_file or "-"}"""))
     print(c_out(Palette.CHROME, f"\n{"═"*50}"))
 
     # Setup logging
@@ -77,8 +108,8 @@ def main():
         running=True,
         system_prompt=args.system_prompt,
         completions_log=Logger(args.completions_log) if args.completions_log else None,
+        session_file=session_file,
     )
-    run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
     log_header = {
         "model": args.model,
         "context": args.context,
@@ -93,7 +124,7 @@ def main():
         debug=args.debug,
         on_error=on_error,
         on_interrupt=on_interrupt,
-    ).run(state, seed=[PromptUser()], run_id=run_id, log_header=log_header)
+    ).run(state, seed=[LoadSession(), PromptUser()], run_id=run_id, log_header=log_header)
 
 
 if __name__ == "__main__":

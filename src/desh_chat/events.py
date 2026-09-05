@@ -10,6 +10,8 @@ import sys
 import readline
 import os
 import glob
+import json
+import time
 
 _TTY = sys.stdout.isatty()
 
@@ -269,6 +271,71 @@ _COMMAND_INDEX: dict[str, CommandSpec] = {
 
 
 # ---------------------
+# Session persistence
+# ---------------------
+
+@dataclass(frozen=True)
+class LoadSession(Event):
+    """Seed event: restore history from state.session_file, if any.
+
+    Missing file  -> new session, nothing to restore.
+    Corrupt file  -> moved aside to <file>.bad so it is never overwritten; session starts empty
+                     and keeps saving to the original path.
+    """
+    priority: int = Priority.HIGH   # must run before the first PromptUser
+
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        path = state.session_file
+        if path is None:
+            return state, []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                history = ChatHistory.from_dict(json.load(f))
+        except FileNotFoundError:
+            return state, [Info(f"New session: {path}")]
+        except (ValueError, KeyError, TypeError) as e:     # ValueError covers json.JSONDecodeError
+            bad = path + ".bad"
+            os.replace(path, bad)
+            return state, [Warn(f"Session file {path} is unreadable ({e}); moved to {bad}, starting fresh.")]
+        return replace(state, history=history), [Info(f"Restored {len(history)} turns from {path}"), DisplayStats()]
+
+
+@dataclass(frozen=True)
+class SaveSession(Event):
+    """Write the whole history to state.session_file. Atomic: temp file + os.replace, so a crash
+    mid-write can never leave a truncated session behind. No-op without a session file."""
+    priority: int = Priority.HIGH   # persist right after the history change, before the next prompt
+
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        path = state.session_file
+        if path is None:
+            return state, []
+        doc = {
+            **state.history.to_dict(),
+            # informational only — LoadSession restores turns; settings stay with the CLI flags
+            "meta": {
+                "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "model": state.settings.model,
+                "context": state.settings.context,
+                "system_prompt": state.system_prompt,
+            },
+        }
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(doc, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        except OSError as e:
+            return state, [Error(f"Could not save session to {path}: {e}")]
+        return state, []
+
+
+def _persist(state: ChatState) -> list[Event]:
+    """The events a history-changing step appends so the session file tracks the change."""
+    return [SaveSession()] if state.session_file is not None else []
+
+
+# ---------------------
 # Turn logic
 # ---------------------
 
@@ -317,7 +384,7 @@ class AppendTurn(Event):
     tokens: int = 0     # 0 -> Turn falls back to the character heuristic
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         turn = Turn(self.user_msg, self.assistant_msg, tokens=self.tokens, cancelled=self.cancelled)
-        return replace(state, history=state.history.append(turn)), [MaybeCompact()]
+        return replace(state, history=state.history.append(turn)), [MaybeCompact()] + _persist(state)
 
 
 @dataclass(frozen=True)
@@ -355,7 +422,7 @@ class CompactHistory(Event):
         return replace(state, history=state.history.compact(completion.content, tokens=summary_tokens)), [
             Info(f"{completion.content}"),
             LogCompletion(request=req, completion=completion, port=state.inference.port),
-            MaybeRegenerate()]
+            MaybeRegenerate()] + _persist(state)
 
 
 @dataclass(frozen=True)
