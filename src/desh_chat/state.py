@@ -2,6 +2,7 @@ from dataclasses import dataclass, field, replace
 from desh.llama.client import LlamaServer, Logger, ToolCall
 from desh.llama.tokens import estimate_tokens
 from desh.engine import State
+from desh.tools import ToolRegistry
 from typing import Any
 
 # -----------------------
@@ -39,6 +40,7 @@ class ChatState(State):
     inference: InferenceEngine = field(repr=False)
     session_file: str | None = None     # where LoadSession reads / SaveSession writes; None -> no persistence
     pending: PendingTurn | None = None  # the turn in progress between UserMessage and TurnEnd; never persisted
+    tools: ToolRegistry = field(default_factory=ToolRegistry, repr=False)  # what the model may call; empty -> no tools offered
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))

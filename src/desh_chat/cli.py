@@ -13,9 +13,11 @@ from desh_chat.state import ChatState
 from desh.llama.client import LlamaServer, Logger
 from desh.render import Palette, c_out
 from desh.engine import Engine
+from desh.tools import ToolRegistry
 from desh_chat.events import LoadSession, PromptUser
 from desh_chat.state import ChatHistory, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
+from desh_chat.toolset import default_registry
 
 
 def resolve_session_file(session: str, sessions_folder: str, run_id: str) -> str | None:
@@ -58,6 +60,7 @@ def main():
     ap.add_argument("-s",   "--session",        default="", help="session file to load or create")
     ap.add_argument("-sf",  "--sessions-folder", default="", help="folder where a new session file is created per run")
     ap.add_argument("-d",   "--debug",          action="store_true", help="Enable debug output")
+    ap.add_argument("-nt",  "--no-tools",       action="store_true", help="offer the model no tools (plain chat)")
     args = ap.parse_args()
 
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
@@ -75,7 +78,8 @@ def main():
     DES log:      {args.des_log}
     Debug:        {"enabled" if args.debug else "disabled"}
     Timeout:      {args.timeout}s
-    Session:      {session_file or "-"}"""))
+    Session:      {session_file or "-"}
+    Tools:        {"none" if args.no_tools else ", ".join(t.name for t in default_registry().tools)}"""))
     print(c_out(Palette.CHROME, f"\n{"═"*50}"))
 
     # Setup logging
@@ -109,6 +113,7 @@ def main():
         system_prompt=args.system_prompt,
         completions_log=Logger(args.completions_log) if args.completions_log else None,
         session_file=session_file,
+        tools=default_registry() if not args.no_tools else ToolRegistry(),
     )
     log_header = {
         "model": args.model,

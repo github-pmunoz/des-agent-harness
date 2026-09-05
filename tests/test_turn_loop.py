@@ -6,8 +6,9 @@ The turn loop: a turn is (user message, tool rounds*, final answer), driven by t
 
 State between rounds lives on ChatState.pending (a PendingTurn); only TurnEnd writes history.
 FakeServer's script drives the model: an entry with tool_calls makes a round, one without ends the turn.
-ExecuteToolCalls has no registry yet and answers every call with a "not available" result — a
-legitimate tool message, so the loop is complete before any real tool exists.
+These tests run with an EMPTY registry, so ExecuteToolCalls answers every call "not available" — a
+legitimate tool message the model can recover from; the loop shape is independent of any real tool.
+Real-tool dispatch is covered in test_tools.py.
 """
 import json
 

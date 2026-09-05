@@ -423,12 +423,13 @@ class AppendRound(Event):
 
 @dataclass(frozen=True)
 class ExecuteToolCalls(Event):
-    """Run the latest round's calls and attach their results. No registry is wired yet: every call is
-    answered with a 'not available' result, which is a legitimate tool message — the model sees it and
-    can recover — so the loop is complete end to end before any real tool exists."""
+    """Run the latest round's calls through the registry and attach their results. The registry's
+    invoke() turns everything tool-side (unknown tool, bad JSON, rejected arguments, a raising tool)
+    into text, so a result always exists and the model can read it and recover; only the RESULT enters
+    state, never the side effect."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         round = state.pending.rounds[-1]
-        results = tuple(ToolResult(tc.id, tc.name, f"Tool '{tc.name}' is not available in this session.") for tc in round.tool_calls)
+        results = tuple(ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments)) for tc in round.tool_calls)
         shown = [Info(c_out(Palette.DIM_CHROME, f"→ {tc.name}({tc.arguments}) ← {res.content}")) for tc, res in zip(round.tool_calls, results)]
         return replace(state, pending=state.pending.with_results(results)), shown + [NextRound()]
 
@@ -522,7 +523,8 @@ class NextRound(Event):
                 temperature=state.settings.temperature,
                 max_tokens=gen_budget,
                 think=state.settings.think,
-                stream=True
+                stream=True,
+                tools=state.tools.schemas(),
                 ),
             prior_tokens=sys_prompt_tokens + sum(t.tokens for t in view) + pending.priced_tokens(),
         )]
