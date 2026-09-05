@@ -1,4 +1,5 @@
 from dataclasses import dataclass, replace
+from typing import Callable
 from desh.engine import Event, Priority
 from desh.render import Palette, c_out, rl_prompt
 from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal
@@ -11,20 +12,6 @@ import os
 import glob
 
 _TTY = sys.stdout.isatty()
-
-COMMANDS = {
-    "/exit" : "exit the chat",
-    "/history" : "show the conversation history",
-    "/max_turn_tokens" : "set the max number of tokens per turn",
-    "/model" : "set the model to use",
-    "/models" : "list available models",
-    "/nothink" : "disable thinking",
-    "/temperature" : "set the temperature",
-    "/think" : "enable thinking",
-    "/context" : "set the context window size",
-    "/compact" : "compact the conversation history",
-}
-
 
 
 @dataclass(frozen=True)
@@ -68,7 +55,8 @@ class PromptUser(Event):
         buffer = readline.get_line_buffer()
         candidates = []
         if buffer.startswith("/") and " " not in buffer:
-            candidates = [c for c in COMMANDS.keys() if c.startswith(buffer)]
+            # canonical names only: aliases stay out of completion and help
+            candidates = [f"/{name}" for name in COMMANDS if f"/{name}".startswith(buffer)]
         return candidates[state] if state < len(candidates) else None
 
 readline.set_completer_delims(readline.get_completer_delims().replace("/", ""))
@@ -137,6 +125,22 @@ class DisplayStats(DisplayEvent):
 class CommandError(Exception):
     """User facing command problem; never a bug"""
 
+
+CommandHandler = Callable[["Command", ChatState], tuple[ChatState, list[Event]]]
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    """One registry row: what a command does, and the handler that does it.
+
+    `aliases` resolve on dispatch only; completion and any help listing show
+    the canonical name alone.
+    """
+    description: str
+    handler: CommandHandler
+    aliases: tuple[str, ...] = ()
+
+
 @dataclass(frozen=True)
 class Command(Event):
     """Event to process a command."""
@@ -148,61 +152,67 @@ class Command(Event):
             return self._dispatch(state)
         except CommandError as e:
             return state, [Warn(str(e)), MaybeRegenerate()]
-        
+
     def _dispatch(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        match self.command:
-            case "compact":
-                self._no_args()
-                return state, [Info(f"compacting conversation history..."), CompactHistory()]
+        # command names are case-sensitive by design (see PromptUser)
+        spec = _COMMAND_INDEX.get(self.command)
+        if spec is None:
+            raise CommandError(f"Unknown command: /{self.command}")
+        return spec.handler(self, state)
 
-            case "context":
-                if not self.args:
-                    return state, [Info(f"context: {state.settings.context}"), MaybeRegenerate()]
-                value = self._int(0, state.inference.max_context[state.settings.model])
-                return state.change_setting("context", value), [Info(f"\u21aa context set to: {value}"), MaybeRegenerate()]
-            
-            case "exit" | "quit":
-                self._no_args()
-                return state, [Exit()]
+    # --- handlers: one per registry row, in COMMANDS order ---
 
-            case "history":
-                self._no_args()
-                return state, [DisplayHistory(), MaybeRegenerate()]
+    def _cmd_compact(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        self._no_args()
+        return state, [Info(f"compacting conversation history..."), CompactHistory()]
 
-            case "max_turn_tokens":
-                if not self.args:
-                    return state, [Info(f"max_turn_tokens: {state.settings.max_turn_tokens}"), MaybeRegenerate()]
-                value = self._int(0, state.settings.max_turn_tokens)
-                return state.change_setting("max_turn_tokens", value), [Info(f"\u21aa max_turn_tokens set to: {value}"), MaybeRegenerate()]
-            
-            case "models":
-                self._no_args()
-                return state, [Info("\n".join(state.inference.models)), MaybeRegenerate()]
-            
-            case "model":
-                if not self.args:
-                    return state, [Info(f"model: {state.settings.model}"), MaybeRegenerate()]
-                model = self._single_arg()
-                if model not in state.inference.models:
-                    raise CommandError(f"Model {model} not found.")
-                return state.change_setting("model", model), [Info(f"\u21aa model set to: {model}"), MaybeRegenerate()]
-            
-            case "temperature":
-                if not self.args:
-                    return state, [Info(f"temperature: {state.settings.temperature}"), MaybeRegenerate()]
-                value = self._float(lo=0.0, hi=2.0)
-                return state.change_setting("temperature", value), [Info(f"\u21aa temperature set to: {value}"), MaybeRegenerate()]
-            
-            case "think":
-                self._no_args()
-                return state.change_setting("think", True), [Info(f"\u21aa thinking mode enabled"), MaybeRegenerate()]
-                
-            case "nothink":
-                self._no_args()
-                return state.change_setting("think", False), [Info(f"\u21aa thinking mode disabled"), MaybeRegenerate()]
-            
-            case _:
-                raise CommandError(f"Unknown command: /{self.command}")
+    def _cmd_context(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        if not self.args:
+            return state, [Info(f"context: {state.settings.context}"), MaybeRegenerate()]
+        value = self._int(0, state.inference.max_context[state.settings.model])
+        return state.change_setting("context", value), [Info(f"\u21aa context set to: {value}"), MaybeRegenerate()]
+
+    def _cmd_exit(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        self._no_args()
+        return state, [Exit()]
+
+    def _cmd_history(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        self._no_args()
+        return state, [DisplayHistory(), MaybeRegenerate()]
+
+    def _cmd_max_turn_tokens(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        if not self.args:
+            return state, [Info(f"max_turn_tokens: {state.settings.max_turn_tokens}"), MaybeRegenerate()]
+        value = self._int(0, state.settings.max_turn_tokens)
+        return state.change_setting("max_turn_tokens", value), [Info(f"\u21aa max_turn_tokens set to: {value}"), MaybeRegenerate()]
+
+    def _cmd_models(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        self._no_args()
+        return state, [Info("\n".join(state.inference.models)), MaybeRegenerate()]
+
+    def _cmd_model(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        if not self.args:
+            return state, [Info(f"model: {state.settings.model}"), MaybeRegenerate()]
+        name = self._single_arg()
+        if name not in state.inference.models:
+            raise CommandError(f"Model {name} not found.")
+        return state.change_setting("model", name), [Info(f"\u21aa model set to: {name}"), MaybeRegenerate()]
+
+    def _cmd_temperature(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        if not self.args:
+            return state, [Info(f"temperature: {state.settings.temperature}"), MaybeRegenerate()]
+        value = self._float(lo=0.0, hi=2.0)
+        return state.change_setting("temperature", value), [Info(f"\u21aa temperature set to: {value}"), MaybeRegenerate()]
+
+    def _cmd_think(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        self._no_args()
+        return state.change_setting("think", True), [Info(f"\u21aa thinking mode enabled"), MaybeRegenerate()]
+
+    def _cmd_nothink(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        self._no_args()
+        return state.change_setting("think", False), [Info(f"\u21aa thinking mode disabled"), MaybeRegenerate()]
+
+    # --- argument parsing ---
 
     def _no_args(self):
         if self.args:
@@ -232,6 +242,30 @@ class Command(Event):
         if not lo <= v <= hi:
             raise CommandError(f"/{self.command}: must be in [{lo}, {hi}]")
         return v
+
+
+# Single source of truth for the command surface: completion, dispatch and
+# any help listing all read from here. Keys are canonical names without the
+# leading slash. Must follow the Command class so the handlers resolve.
+COMMANDS: dict[str, CommandSpec] = {
+    "compact":         CommandSpec("compact the conversation history",      Command._cmd_compact),
+    "context":         CommandSpec("set the context window size",           Command._cmd_context),
+    "exit":            CommandSpec("exit the chat",                         Command._cmd_exit, aliases=("quit",)), 
+    "history":         CommandSpec("show the conversation history",         Command._cmd_history),
+    "max_turn_tokens": CommandSpec("set the max number of tokens per turn", Command._cmd_max_turn_tokens),
+    "models":          CommandSpec("list available models",                 Command._cmd_models),
+    "model":           CommandSpec("set the model to use",                  Command._cmd_model),
+    "temperature":     CommandSpec("set the temperature",                   Command._cmd_temperature),
+    "think":           CommandSpec("enable thinking",                       Command._cmd_think),
+    "nothink":         CommandSpec("disable thinking",                      Command._cmd_nothink),
+}
+
+# Dispatch index: canonical names plus aliases, all pointing at the same spec.
+_COMMAND_INDEX: dict[str, CommandSpec] = {
+    name: spec
+    for canonical, spec in COMMANDS.items()
+    for name in (canonical, *spec.aliases)
+}
 
 
 # ---------------------
