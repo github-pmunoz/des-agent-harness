@@ -29,7 +29,7 @@ def main():
     ap.add_argument("-th",  "--think",          action="store_true", help="enable thinking")
     ap.add_argument("-cl",  "--completions-log", default="", help="JSONL telemetry file")
     ap.add_argument("-dl",  "--des-log",        default="", help="DES engine log")
-    ap.add_argument("-to",  "--timeout",        type=float, default=30)
+    ap.add_argument("-to",  "--timeout",        default=0, type=float)
     ap.add_argument("-d",   "--debug",          action="store_true", help="Enable debug output")
     args = ap.parse_args()
 
@@ -54,6 +54,9 @@ def main():
         des_log = open(os.path.expanduser(args.des_log), "a", encoding="utf-8")
     else:
         des_log = None
+
+    if args.timeout == 0:
+        args.timeout = args.context // 10 # assuming worst case one shot at 10tokens/sec
 
     client = LlamaServer(f"http://127.0.0.1:{args.port}",timeout=args.timeout)
     state = ChatState(
