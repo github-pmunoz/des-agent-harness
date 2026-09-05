@@ -15,8 +15,6 @@ No Delta type (yet): frames flow as raw dicts; the renderer adapter turns them i
 TODO(transport):
   - Extract Transport Protocol (complete, stream(req, renderer, cancelled), models, props) into
     desh/transport.py; LlamaServer becomes its first impl. Engine depends on the protocol only.
-  - Request.seed optional field + payload() emission 
-  - Completion.from_frames per-index tool_calls fold 
   - Fixture-based self-check became orphaned when fixtures went — replace with
     tests/test_client.py using inline minimal SSE frames (3–4 lines each), so the fold logic
     keeps a regression test without binary fixtures in the repo.
