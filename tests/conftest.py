@@ -1,6 +1,6 @@
 import pytest
 
-from desh.llama.client import Completion, Request
+from desh.llama.client import Completion, Request, ToolCall
 from desh_chat.state import ChatHistory, ChatState, InferenceEngine, Settings
 
 MODELS = ["model-a", "model-b"]
@@ -26,39 +26,48 @@ class FakeServer:
         self.calls: list[tuple[str, Request]] = []
 
     def _next(self, default_content: str, default_finish: str):
-        """Script entry keys: content, finish_reason, reasoning, usage (all optional).
+        """Script entry keys: content, finish_reason, reasoning, usage, tool_calls (all optional).
         usage defaults to None — the "no trailing usage frame" case — so token pricing
-        falls back to the heuristic unless a test opts in."""
+        falls back to the heuristic unless a test opts in.
+        tool_calls is a list of {name, arguments, id?}; when present, finish_reason defaults
+        to "tool_calls" and content to "" (the model asked for tools instead of answering)."""
         if self.script:
             spec = self.script.pop(0)
         else:
             spec = {}
+        calls = [
+            ToolCall(index=i, id=tc.get("id", f"call_{i}"), type="function", name=tc["name"], arguments=tc.get("arguments", "{}"))
+            for i, tc in enumerate(spec.get("tool_calls", []))
+        ]
+        if calls:
+            default_content, default_finish = "", "tool_calls"
         return (
             spec.get("content", default_content),
             spec.get("finish_reason", default_finish),
             spec.get("reasoning", ""),
             spec.get("usage"),
+            calls,
         )
 
     def stream(self, req: Request, renderer, cancelled=lambda: False) -> Completion:
         self.calls.append(("stream", req))
-        content, finish_reason, reasoning, usage = self._next("ok", "stop")
+        content, finish_reason, reasoning, usage, calls = self._next("ok", "stop")
         if content and finish_reason != "cancelled":
             renderer.feed("content", content)
         renderer.flush()
         return Completion(
             id="fake-stream", model=req.model or "", created=0, system_fingerprint="",
             content=content, reasoning=reasoning, finish_reason=finish_reason,
-            usage=usage, timings=None, streamed=True,
+            usage=usage, timings=None, streamed=True, tool_calls=calls,
         )
 
     def complete(self, req: Request) -> Completion:
         self.calls.append(("complete", req))
-        content, finish_reason, reasoning, usage = self._next("summary", "stop")
+        content, finish_reason, reasoning, usage, calls = self._next("summary", "stop")
         return Completion(
             id="fake-complete", model=req.model or "", created=0, system_fingerprint="",
             content=content, reasoning=reasoning, finish_reason=finish_reason,
-            usage=usage, timings=None, streamed=False,
+            usage=usage, timings=None, streamed=False, tool_calls=calls,
         )
 
 

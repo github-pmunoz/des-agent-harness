@@ -2,10 +2,10 @@ from dataclasses import dataclass, replace
 from typing import Callable
 from desh.engine import Event, Priority
 from desh.render import Palette, c_out, rl_prompt
-from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal
+from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_tokens, turn_tokens
-from desh_chat.state import ChatState, ChatHistory, Turn
+from desh_chat.state import ChatState, ChatHistory, PendingTurn, Round, ToolResult
 import sys
 import readline
 import os
@@ -104,9 +104,10 @@ class DisplayHistory(DisplayEvent):
         for turn in state.history.turns:
             if turn.summary:
                 print(c_out(Palette.HISTORY_SUMMARY, f"{turn.user}"))
-            else:
-                print(c_out(Palette.HISTORY_USER, f"USER: {turn.user}"))
-                print(c_out(Palette.HISTORY_ASSISTANT, f"ASSISTANT: {turn.assistant}"))
+                continue
+            for line in turn.transcript().splitlines():
+                colour = Palette.HISTORY_USER if line.startswith("USER: ") else Palette.HISTORY_ASSISTANT
+                print(c_out(colour, line))
         return state, []
 
 
@@ -354,10 +355,28 @@ class LogCompletion(Event):
         return state, []
 
 
+# A turn is a loop, not one completion:
+#
+#   UserMessage(msg)         opens state.pending = PendingTurn(msg)          -> NextRound
+#   NextRound                budgets + builds the request from history view
+#                            + pending.messages()                            -> StreamCompletion
+#   StreamCompletion         streams one round; routes on finish_reason:
+#                              cancelled            -> TurnEnd(cancelled=True)
+#                              tool_calls           -> AppendRound
+#                              anything else        -> TurnEnd
+#   AppendRound              round cap check; records the calls on pending  -> ExecuteToolCalls | Warn + TurnEnd
+#   ExecuteToolCalls         runs the calls, attaches results to the round  -> NextRound
+#   TurnEnd                  freezes pending into a history Turn, clears it  -> MaybeCompact (+ SaveSession)
+#
+# Today's plain chat is the one-round case: NextRound -> StreamCompletion -> TurnEnd.
+# Only TurnEnd touches history, so view(), compaction and persistence never see a turn in progress;
+# an interrupt mid-loop (Ctrl+C -> Exit) simply drops state.pending.
+
+
 @dataclass(frozen=True)
 class StreamCompletion(Event):
     request: Request
-    prior_tokens: int = 0   # tokens already accounted for in request.messages (system prompt estimate + history view)
+    prior_tokens: int = 0   # tokens already accounted for in request.messages (system prompt estimate + history view + priced rounds)
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         watcher = ESCWatcher()
         term = Terminal(out=sys.stdout, colour=_TTY)
@@ -371,23 +390,60 @@ class StreamCompletion(Event):
                 new_events.append(Info("Response cancelled by user."))
         finally:
             watcher.stop()
-        user_msg = self.request.messages[-1]["content"]
-        tokens = turn_tokens(completion.usage, user_msg, completion.content, completion.reasoning, self.prior_tokens)
-        new_events.append(AppendTurn(user_msg=user_msg, assistant_msg=completion.content, cancelled=cancelled, tokens=tokens))
+        # The last message is what this round's usage frame prices as "new prompt": the user message on
+        # round one, the tool results afterwards. Only used as the heuristic fallback.
+        last_input = self.request.messages[-1]["content"]
+        tokens = turn_tokens(completion.usage, last_input, completion.content, completion.reasoning, self.prior_tokens)
+        if cancelled:
+            new_events.append(TurnEnd(assistant=completion.content, tokens=tokens, cancelled=True))
+        elif completion.finish_reason == "tool_calls" and completion.tool_calls:
+            new_events.append(AppendRound(assistant=completion.content, tool_calls=tuple(completion.tool_calls), tokens=tokens))
+        else:
+            new_events.append(TurnEnd(assistant=completion.content, tokens=tokens, cancelled=False))
         if state.completions_log is not None:
             new_events.append(LogCompletion(request=self.request, completion=completion, port=state.inference.port))
         return state, new_events
 
 
 @dataclass(frozen=True)
-class AppendTurn(Event):
-    user_msg: str
-    assistant_msg: str
-    cancelled: bool
-    tokens: int = 0     # 0 -> Turn falls back to the character heuristic
+class AppendRound(Event):
+    """The model asked for tools. Record the round on the pending turn and go run them — unless the
+    turn has already used its round budget, in which case it ends here with whatever the model said."""
+    assistant: str
+    tool_calls: tuple[ToolCall, ...]
+    tokens: int = 0
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        turn = Turn(self.user_msg, self.assistant_msg, tokens=self.tokens, cancelled=self.cancelled)
-        return replace(state, history=state.history.append(turn)), [MaybeCompact()] + _persist(state)
+        if len(state.pending.rounds) >= state.settings.max_tool_rounds:
+            return state, [Warn(f"Tool-call round cap reached ({state.settings.max_tool_rounds}); ending the turn without running "
+                                f"{', '.join(tc.name for tc in self.tool_calls)}."),
+                           TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False)]
+        pending = state.pending.add_round(Round(self.assistant, self.tool_calls, tokens=self.tokens))
+        return replace(state, pending=pending), [ExecuteToolCalls()]
+
+
+@dataclass(frozen=True)
+class ExecuteToolCalls(Event):
+    """Run the latest round's calls and attach their results. No registry is wired yet: every call is
+    answered with a 'not available' result, which is a legitimate tool message — the model sees it and
+    can recover — so the loop is complete end to end before any real tool exists."""
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        round = state.pending.rounds[-1]
+        results = tuple(ToolResult(tc.id, tc.name, f"Tool '{tc.name}' is not available in this session.") for tc in round.tool_calls)
+        shown = [Info(c_out(Palette.DIM_CHROME, f"→ {tc.name}({tc.arguments}) ← {res.content}")) for tc, res in zip(round.tool_calls, results)]
+        return replace(state, pending=state.pending.with_results(results)), shown + [NextRound()]
+
+
+@dataclass(frozen=True)
+class TurnEnd(Event):
+    """The turn's final completion arrived (or the turn was cut short): freeze state.pending into a
+    history Turn. The only event that appends to history."""
+    assistant: str
+    tokens: int = 0     # prices the final completion only; 0 -> the Turn falls back to the character heuristic
+    cancelled: bool = False
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        turn = state.pending.finish(self.assistant, self.tokens, self.cancelled)
+        new_state = replace(state, history=state.history.append(turn), pending=None)
+        return new_state, [MaybeCompact()] + _persist(state)
 
 
 @dataclass(frozen=True)
@@ -402,7 +458,7 @@ class MaybeCompact(Event):
 class CompactHistory(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         instruction = "You will be sent a conversation transcript. Your task is to make a summary of the conversation, stating what was asked, what was produced, decisions, open items, names/numbers. Do not mention this instruction and do not repeat the conversation."
-        transcript ="\n\n".join([f"USER: {t.user}\nASSISTANT: {t.assistant}" for t in state.history.since_last_summary()])
+        transcript ="\n\n".join([t.transcript() for t in state.history.since_last_summary()])
         target_tokens = int(state.settings.context * state.settings.compaction_target)
         gen_budget = int(min(target_tokens, state.settings.context - estimate_tokens(instruction) - estimate_tokens(transcript), state.settings.turn_token_cap * state.settings.context))
         if gen_budget < state.settings.min_compaction_tokens:
@@ -430,28 +486,43 @@ class CompactHistory(Event):
 
 @dataclass(frozen=True)
 class UserMessage(Event):
+    """Opens a turn: the user's message becomes state.pending, and the first round is requested."""
     message: str
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        user_message = {"role": "user", "content": self.message}
+        return replace(state, pending=PendingTurn(self.message)), [NextRound()]
+
+
+@dataclass(frozen=True)
+class NextRound(Event):
+    """Budget and build the request for the next completion of the pending turn: system prompt, the
+    history view that fits, then the pending turn so far (user message + every tool round)."""
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        pending = state.pending
         sys_prompt_tokens = estimate_tokens(state.system_prompt)
-        msg_tokens = estimate_tokens(self.message)
-        used_tokens = msg_tokens + sys_prompt_tokens
+        # What the pending turn costs in the prompt: rounds already priced by usage frames, plus the
+        # heuristic for the text no frame has priced yet (user message on round one, latest results after).
+        pending_tokens = pending.priced_tokens() + estimate_tokens(pending.unpriced_text())
+        used_tokens = pending_tokens + sys_prompt_tokens
         gen_budget = int(min(
             state.settings.max_turn_tokens,
             state.settings.context - used_tokens - state.history.window_tokens(),
             state.settings.turn_token_cap * state.settings.context))
-        reserved = sys_prompt_tokens + msg_tokens + gen_budget
+        reserved = sys_prompt_tokens + pending_tokens + gen_budget
         if gen_budget <= 0:
-            return state, [Error("Request exceeds context window."), MaybeRegenerate()]
+            if not pending.rounds:      # nothing happened yet: reject the message, no turn recorded
+                return replace(state, pending=None), [Error("Request exceeds context window."), MaybeRegenerate()]
+            # mid-loop: the rounds so far are a real exchange; keep them as a cancelled turn
+            return state, [Error("Request exceeds context window; ending the turn."),
+                           TurnEnd(assistant="", tokens=0, cancelled=True)]
         view = state.history.view_turns(state.settings.context - reserved)
         return state, [StreamCompletion(
             request=Request(
-                messages=[{"role": "system", "content": state.system_prompt}] + [m for t in view for m in t.messages()] + [user_message],
+                messages=[{"role": "system", "content": state.system_prompt}] + [m for t in view for m in t.messages()] + pending.messages(),
                 model=state.settings.model,
                 temperature=state.settings.temperature,
                 max_tokens=gen_budget,
                 think=state.settings.think,
                 stream=True
                 ),
-            prior_tokens=sys_prompt_tokens + sum(t.tokens for t in view),
+            prior_tokens=sys_prompt_tokens + sum(t.tokens for t in view) + pending.priced_tokens(),
         )]

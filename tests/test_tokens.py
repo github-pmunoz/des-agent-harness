@@ -13,13 +13,20 @@ from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 
 from desh.llama.client import Request
 from desh.llama.tokens import estimate_tokens, turn_tokens
-from desh_chat.events import AppendTurn, CompactHistory, StreamCompletion, UserMessage
-from desh_chat.state import ChatHistory, InferenceEngine, Turn
+from desh_chat.events import CompactHistory, NextRound, StreamCompletion, TurnEnd, UserMessage
+from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Turn
 
 
 def with_server(make_state, server, **overrides):
     inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT)
     return make_state(inference=inference, **overrides)
+
+
+def open_turn(state, message: str):
+    """UserMessage -> NextRound, returning NextRound's (state, events)."""
+    state, events = UserMessage(message).execute(state)
+    assert [type(e) for e in events] == [NextRound]
+    return events[0].execute(state)
 
 
 USAGE = {"prompt_tokens": 380, "completion_tokens": 205, "total_tokens": 585}
@@ -69,14 +76,14 @@ class TestTurnTokensPolicy:
 
 
 # ---------------------
-# Plumbing: UserMessage -> StreamCompletion -> AppendTurn -> Turn
+# Plumbing: UserMessage -> NextRound -> StreamCompletion -> TurnEnd -> Turn
 # ---------------------
 
 class TestUsagePlumbing:
-    def test_user_message_reports_prior_tokens_as_sys_estimate_plus_view(self, make_state):
+    def test_next_round_reports_prior_tokens_as_sys_estimate_plus_view(self, make_state):
         history = ChatHistory().append(Turn("q1", "a1", tokens=40)).append(Turn("q2", "a2", tokens=60))
         state = make_state(history=history)
-        _, events = UserMessage("q3").execute(state)
+        _, events = open_turn(state, "q3")
         sc = events[0]
         assert isinstance(sc, StreamCompletion)
         assert sc.prior_tokens == estimate_tokens(state.system_prompt) + 100
@@ -108,21 +115,21 @@ class TestUsagePlumbing:
         _, events = StreamCompletion(request=req, prior_tokens=300).execute(state)
         assert events[0].tokens == 0
 
-    def test_append_turn_stores_the_priced_tokens(self, make_state):
-        new_state, _ = AppendTurn(user_msg="q", assistant_msg="a", cancelled=False, tokens=285).execute(make_state())
+    def test_turn_end_stores_the_priced_tokens(self, make_state):
+        new_state, _ = TurnEnd(assistant="a", cancelled=False, tokens=285).execute(make_state(pending=PendingTurn("q")))
         assert new_state.history.turns[-1].tokens == 285
 
-    def test_append_turn_with_zero_tokens_keeps_heuristic(self, make_state):
-        new_state, _ = AppendTurn(user_msg="hello there", assistant_msg="general kenobi", cancelled=False).execute(make_state())
+    def test_turn_end_with_zero_tokens_keeps_heuristic(self, make_state):
+        new_state, _ = TurnEnd(assistant="general kenobi", cancelled=False).execute(make_state(pending=PendingTurn("hello there")))
         assert new_state.history.turns[-1].tokens == estimate_tokens("hello there") + estimate_tokens("general kenobi")
 
     def test_end_to_end_window_tracks_usage(self, make_state, no_esc_watcher):
         server = FakeServer(script=[{"content": "the answer", "usage": USAGE}])
         state = with_server(make_state, server)
-        _, events = UserMessage("the question").execute(state)
+        state, events = open_turn(state, "the question")
         sc = events[0]
         _, events = sc.execute(state)
-        state, _ = events[0].execute(state)  # AppendTurn
+        state, _ = events[0].execute(state)  # TurnEnd
         sys_est = estimate_tokens(state.system_prompt)
         # residual policy: accounted total equals the server's own count
         assert sys_est + state.history.window_tokens() == USAGE["total_tokens"]

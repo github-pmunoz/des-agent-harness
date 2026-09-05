@@ -10,9 +10,9 @@ import pytest
 from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 
 from desh_chat.events import (
-    AppendTurn, CompactHistory, Error, Info, LoadSession, SaveSession, Warn,
+    CompactHistory, Error, Info, LoadSession, SaveSession, TurnEnd, Warn,
 )
-from desh_chat.state import ChatHistory, InferenceEngine, Turn
+from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Turn
 
 
 def with_server(make_state, server, **overrides):
@@ -178,13 +178,13 @@ class TestSaveSession:
 # ---------------------
 
 class TestPersistHooks:
-    def test_append_turn_emits_save_when_session_file_set(self, make_state, tmp_path):
-        state = make_state(session_file=str(tmp_path / "s.json"))
-        _, events = AppendTurn(user_msg="q", assistant_msg="a", cancelled=False).execute(state)
+    def test_turn_end_emits_save_when_session_file_set(self, make_state, tmp_path):
+        state = make_state(session_file=str(tmp_path / "s.json"), pending=PendingTurn("q"))
+        _, events = TurnEnd(assistant="a", cancelled=False).execute(state)
         assert any(isinstance(e, SaveSession) for e in events)
 
-    def test_append_turn_does_not_emit_save_without_session_file(self, make_state):
-        _, events = AppendTurn(user_msg="q", assistant_msg="a", cancelled=False).execute(make_state())
+    def test_turn_end_does_not_emit_save_without_session_file(self, make_state):
+        _, events = TurnEnd(assistant="a", cancelled=False).execute(make_state(pending=PendingTurn("q")))
         assert not any(isinstance(e, SaveSession) for e in events)
 
     def test_compact_history_emits_save_when_session_file_set(self, make_state, tmp_path):
@@ -195,10 +195,10 @@ class TestPersistHooks:
         assert any(isinstance(e, SaveSession) for e in events)
 
     def test_save_emitted_by_append_persists_the_appended_turn(self, make_state, tmp_path):
-        # AppendTurn returns the new state; SaveSession must see it — i.e. run against new_state
+        # TurnEnd returns the new state; SaveSession must see it — i.e. run against new_state
         path = tmp_path / "s.json"
-        state = make_state(session_file=str(path))
-        new_state, events = AppendTurn(user_msg="q", assistant_msg="a", cancelled=False).execute(state)
+        state = make_state(session_file=str(path), pending=PendingTurn("q"))
+        new_state, events = TurnEnd(assistant="a", cancelled=False).execute(state)
         save = next(e for e in events if isinstance(e, SaveSession))
         save.execute(new_state)
         assert ChatHistory.from_dict(json.loads(path.read_text())).turns[-1].user == "q"

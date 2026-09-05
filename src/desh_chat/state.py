@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, replace
-from desh.llama.client import LlamaServer, Logger
+from desh.llama.client import LlamaServer, Logger, ToolCall
 from desh.llama.tokens import estimate_tokens
 from desh.engine import State
 from typing import Any
@@ -19,6 +19,7 @@ class Settings:
     compaction_target: float = 0.25
     turn_token_cap: float = 0.40
     min_compaction_tokens: int = 64
+    max_tool_rounds: int = 10       # tool-call rounds allowed inside one turn before it is forced to end
 
 @dataclass(frozen=True)
 class InferenceEngine:
@@ -37,9 +38,115 @@ class ChatState(State):
     completions_log: Logger | None = field(repr=False)
     inference: InferenceEngine = field(repr=False)
     session_file: str | None = None     # where LoadSession reads / SaveSession writes; None -> no persistence
+    pending: PendingTurn | None = None  # the turn in progress between UserMessage and TurnEnd; never persisted
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))
+
+
+# -----------------------
+# Tool exchange inside a turn
+# -----------------------
+
+@dataclass(frozen=True)
+class ToolResult:
+    """What one tool call came back with. Content is text the model reads; an error or a denial
+    is still a result (the model must be able to see it and recover)."""
+    tool_call_id: str
+    name: str
+    content: str
+
+    def message(self) -> dict:
+        return {"role": "tool", "tool_call_id": self.tool_call_id, "name": self.name, "content": self.content}
+
+    def to_dict(self) -> dict:
+        return {"tool_call_id": self.tool_call_id, "name": self.name, "content": self.content}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ToolResult:
+        return cls(tool_call_id=d["tool_call_id"], name=d["name"], content=d["content"])
+
+
+@dataclass(frozen=True)
+class Round:
+    """One intermediate model round inside a turn: the assistant asked for tools (with whatever text
+    it said alongside), and the tools answered. A turn's final answer is NOT a Round — it is Turn.assistant."""
+    assistant: str
+    tool_calls: tuple[ToolCall, ...]
+    results: tuple[ToolResult, ...] = ()
+    tokens: int = 0     # priced from the usage frame of the completion that produced the calls
+
+    def messages(self) -> list[dict]:
+        """The wire form of this round, as it is echoed back in every later request of the conversation."""
+        messages: list[dict] = [{ #stripping away the tc index
+            "role": "assistant",
+            "content": self.assistant,
+            "tool_calls": [{
+                "id": tc.id,
+                "type": tc.type,
+                "function": {
+                    "name": tc.name,
+                    "arguments": tc.arguments
+                }
+            } for tc in self.tool_calls]
+        }]
+        for result in self.results:
+            messages.append(result.message())
+        return messages
+
+    def text(self) -> str:
+        """All text of the round, for heuristic pricing when no usage frame priced it."""
+        calls = "".join(tc.name + tc.arguments for tc in self.tool_calls)
+        return self.assistant + calls + "".join(r.content for r in self.results)
+
+    def to_dict(self) -> dict:
+        return {"assistant": self.assistant, "tokens": self.tokens,
+                "tool_calls": [tc.to_dict() for tc in self.tool_calls],
+                "results": [r.to_dict() for r in self.results]}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Round:
+        return cls(assistant=d["assistant"], tokens=d.get("tokens", 0),
+                   tool_calls=tuple(ToolCall(index=tc["index"], id=tc["id"], type=tc["type"],
+                                             name=tc["function"]["name"], arguments=tc["function"]["arguments"])
+                                    for tc in d["tool_calls"]),
+                   results=tuple(ToolResult.from_dict(r) for r in d.get("results", [])))
+
+
+@dataclass(frozen=True)
+class PendingTurn:
+    """A turn between UserMessage and TurnEnd: the user message plus every completed tool round so
+    far. Lives on ChatState.pending only; never in ChatHistory, never in the session file."""
+    user: str
+    rounds: tuple[Round, ...] = ()
+
+    def messages(self) -> list[dict]:
+        return [{"role": "user", "content": self.user}] + [m for r in self.rounds for m in r.messages()]
+
+    def priced_tokens(self) -> int:
+        """Tokens already priced by usage frames: every completed round."""
+        return sum(r.tokens for r in self.rounds)
+
+    def unpriced_text(self) -> str:
+        """The prompt text the NEXT completion's usage frame will price: the user message on round one,
+        the latest tool results afterwards."""
+        if not self.rounds:
+            return self.user
+        return "\n".join(r.content for r in self.rounds[-1].results)
+
+    def add_round(self, round: Round) -> PendingTurn:
+        return replace(self, rounds=self.rounds + (round,))
+
+    def with_results(self, results: tuple[ToolResult, ...]) -> PendingTurn:
+        """Attach results to the latest round (the one whose calls just ran)."""
+        last = replace(self.rounds[-1], results=results)
+        return replace(self, rounds=self.rounds[:-1] + (last,))
+
+    def finish(self, assistant: str, tokens: int, cancelled: bool) -> Turn:
+        """The final answer arrived (or the turn was cut short): freeze into a history Turn.
+        tokens prices only the final completion; the rounds carry their own."""
+        return Turn(self.user, assistant, tokens=tokens + self.priced_tokens() if tokens else 0,
+                    cancelled=cancelled, rounds=self.rounds)
 
 
 # -----------------------
@@ -53,29 +160,49 @@ class Turn:
     tokens: int = 0
     cancelled: bool = False
     summary: bool = False
+    rounds: tuple[Round, ...] = ()   # tool exchanges between user and assistant; () for a plain turn
 
     def __post_init__(self):
         if self.tokens == 0:
-            object.__setattr__(self, 'tokens', estimate_tokens(self.user) + estimate_tokens(self.assistant))
+            rounds = sum(r.tokens or estimate_tokens(r.text()) for r in self.rounds)
+            object.__setattr__(self, 'tokens', estimate_tokens(self.user) + estimate_tokens(self.assistant) + rounds)
 
     def messages(self):
-        return [ {"role": "user", "content": self.user}, {"role": "assistant", "content": self.assistant} ]
+        return ([{"role": "user", "content": self.user}]
+                + [m for r in self.rounds for m in r.messages()]
+                + [{"role": "assistant", "content": self.assistant}])
+
+    def transcript(self) -> str:
+        """Plain-text rendering for the compaction prompt and the history display."""
+        lines = [f"USER: {self.user}"]
+        for r in self.rounds:
+            calls = ", ".join(f"{tc.name}({tc.arguments})" for tc in r.tool_calls)
+            lines.append(f"ASSISTANT (tool calls): {r.assistant + ' ' if r.assistant else ''}{calls}")
+            for res in r.results:
+                lines.append(f"TOOL {res.name}: {res.content}")
+        lines.append(f"ASSISTANT: {self.assistant}")
+        return "\n".join(lines)
 
     def to_dict(self) -> dict:
-        return {"user": self.user, "assistant": self.assistant, "tokens": self.tokens,
-                "cancelled": self.cancelled, "summary": self.summary}
+        d = {"user": self.user, "assistant": self.assistant, "tokens": self.tokens,
+             "cancelled": self.cancelled, "summary": self.summary}
+        if self.rounds:     # plain turns serialize exactly as they did in format 1
+            d["rounds"] = [r.to_dict() for r in self.rounds]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> Turn:
         return cls(user=d["user"], assistant=d["assistant"], tokens=d.get("tokens", 0),
-                   cancelled=d.get("cancelled", False), summary=d.get("summary", False))
+                   cancelled=d.get("cancelled", False), summary=d.get("summary", False),
+                   rounds=tuple(Round.from_dict(r) for r in d.get("rounds", [])))
 
 
 @dataclass(frozen=True)
 class ChatHistory:
     turns: tuple[Turn, ...] = ()
 
-    SESSION_FORMAT = 1
+    SESSION_FORMAT = 2              # written
+    SESSION_FORMATS = (1, 2)        # readable: 1 = plain turns only; 2 = turns may carry tool rounds
 
     def to_dict(self) -> dict:
         """Serializable form; the session file is this dict plus whatever metadata the saver adds."""
@@ -87,8 +214,8 @@ class ChatHistory:
         if not isinstance(d, dict):
             raise ValueError(f"session document must be an object, got {type(d).__name__}")
         version = d.get("version")
-        if version != cls.SESSION_FORMAT:
-            raise ValueError(f"unsupported session format {version!r} (expected {cls.SESSION_FORMAT})")
+        if version not in cls.SESSION_FORMATS:
+            raise ValueError(f"unsupported session format {version!r} (expected one of {cls.SESSION_FORMATS})")
         return cls(turns=tuple(Turn.from_dict(t) for t in d["turns"]))
 
     def append(self, turn: Turn) -> ChatHistory:

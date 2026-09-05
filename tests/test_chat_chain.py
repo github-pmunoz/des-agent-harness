@@ -1,8 +1,12 @@
-"""Unit tests for the ported desh_chat turn chain:
+"""Unit tests for the ported desh_chat turn chain (the one-round case; multi-round
+tool loops are covered in test_turn_loop.py):
 
-  UserMessage -> StreamCompletion -> [AppendTurn, LogCompletion] -> AppendTurn
+  UserMessage -> NextRound -> StreamCompletion -> [TurnEnd, LogCompletion] -> TurnEnd
     -> MaybeCompact -> (CompactHistory -> [Info, LogCompletion] ->) MaybeRegenerate
     -> [DisplayStats, PromptUser]
+
+UserMessage only opens state.pending; NextRound is where the budget and the request
+are built, so tests that inspect the request drive both via open_turn().
 
 MaybeRegenerate is a 2-fan, not a chain link: it schedules DisplayStats and
 PromptUser directly, as siblings. DisplayStats/DisplayHistory/Info/Warn are
@@ -22,16 +26,23 @@ from desh.engine import Engine
 from desh.llama.client import Logger, Request
 from desh.llama.tokens import estimate_tokens
 from desh_chat.events import (
-    AppendTurn, CompactHistory, Exit, Info, Error, LogCompletion,
-    MaybeCompact, MaybeRegenerate, PromptUser, StreamCompletion, UserMessage,
+    CompactHistory, Exit, Info, Error, LogCompletion, MaybeCompact, MaybeRegenerate,
+    NextRound, PromptUser, StreamCompletion, TurnEnd, UserMessage,
 )
 from desh_chat.handlers import on_interrupt
-from desh_chat.state import ChatHistory, InferenceEngine, Settings, Turn
+from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Settings, Turn
 
 
 def with_server(make_state, server, **overrides):
     inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT)
     return make_state(inference=inference, **overrides)
+
+
+def open_turn(state, message: str):
+    """UserMessage -> NextRound, returning NextRound's (state, events): the request-building step."""
+    state, events = UserMessage(message).execute(state)
+    assert [type(e) for e in events] == [NextRound]
+    return events[0].execute(state)
 
 
 # ---------------------
@@ -45,7 +56,7 @@ class TestUserMessageBudget:
         settings = Settings(model=MODELS[0], temperature=0.3, think=False,
                              context=1000, max_turn_tokens=100, turn_token_cap=0.5)
         state = make_state(settings=settings)
-        _, events = UserMessage("hi").execute(state)
+        _, events = open_turn(state, "hi")
         assert isinstance(events[0], StreamCompletion)
         assert events[0].request.max_tokens == 100
 
@@ -53,7 +64,7 @@ class TestUserMessageBudget:
         settings = Settings(model=MODELS[0], temperature=0.3, think=False,
                              context=1000, max_turn_tokens=10_000, turn_token_cap=0.5)
         state = make_state(settings=settings)
-        _, events = UserMessage("hi").execute(state)
+        _, events = open_turn(state, "hi")
         assert events[0].request.max_tokens == 500  # 0.5 * 1000
 
     def test_remaining_context_is_the_binding_ceiling(self, make_state):
@@ -63,7 +74,7 @@ class TestUserMessageBudget:
         sys_prompt_tokens = estimate_tokens(state.system_prompt)
         msg_tokens = estimate_tokens("hi")
         expected = 50 - sys_prompt_tokens - msg_tokens  # window_tokens() is 0, no prior history
-        _, events = UserMessage("hi").execute(state)
+        _, events = open_turn(state, "hi")
         assert events[0].request.max_tokens == expected
         assert expected < 45  # confirms this is genuinely the tightest of the three ceilings
 
@@ -71,11 +82,12 @@ class TestUserMessageBudget:
         settings = Settings(model=MODELS[0], temperature=0.3, think=False,
                              context=1, max_turn_tokens=100, turn_token_cap=1.0)
         state = make_state(settings=settings)
-        _, events = UserMessage("a message long enough to blow a context of 1 token").execute(state)
+        new_state, events = open_turn(state, "a message long enough to blow a context of 1 token")
         assert len(events) == 2
         assert isinstance(events[0], Error)
         assert isinstance(events[1], MaybeRegenerate)
         assert "exceeds context window" in events[0].text
+        assert new_state.pending is None    # the rejected message leaves no turn in progress
 
 
 class TestUserMessageHistoryView:
@@ -90,7 +102,7 @@ class TestUserMessageHistoryView:
         history = ChatHistory().append(Turn("previous question", "previous answer"))
         state = make_state(history=history, settings=Settings(
             model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192))
-        _, events = UserMessage("a new question").execute(state)
+        _, events = open_turn(state, "a new question")
         contents = [m["content"] for m in events[0].request.messages]
         assert "previous question" in contents
         assert "previous answer" in contents
@@ -123,7 +135,7 @@ class TestUserMessageHistoryView:
         settings = Settings(model=MODELS[0], temperature=0.3, think=False,
                              context=100, max_turn_tokens=1000, turn_token_cap=1.0)
         state = make_state(history=history, settings=settings, system_prompt=system_prompt)
-        _, events = UserMessage(message).execute(state)
+        _, events = open_turn(state, message)
 
         req = events[0].request
         assert req.max_tokens == 100 - sys_prompt_tokens - msg_tokens - prior_turn.tokens  # context-headroom ceiling bound
@@ -135,7 +147,7 @@ class TestUserMessageHistoryView:
     def test_request_message_order_is_system_then_history_then_new_user_message(self, make_state):
         history = ChatHistory().append(Turn("q1", "a1"))
         state = make_state(history=history)
-        _, events = UserMessage("q2").execute(state)
+        _, events = open_turn(state, "q2")
         roles_and_last = [(m["role"], m["content"]) for m in events[0].request.messages]
         assert roles_and_last[0] == ("system", state.system_prompt)
         assert roles_and_last[-1] == ("user", "q2")
@@ -145,7 +157,7 @@ class TestUserMessageRequestShape:
     def test_request_carries_current_settings(self, make_state):
         settings = Settings(model=MODELS[0], temperature=0.9, think=True, context=16384, max_turn_tokens=8192)
         state = make_state(settings=settings)
-        _, events = UserMessage("hello").execute(state)
+        _, events = open_turn(state, "hello")
         req = events[0].request
         assert req.model == MODELS[0]
         assert req.temperature == 0.9
@@ -158,16 +170,15 @@ class TestUserMessageRequestShape:
 # ---------------------
 
 class TestStreamCompletion:
-    def test_happy_path_emits_append_turn_with_the_streamed_content(self, make_state, no_esc_watcher):
+    def test_happy_path_emits_turn_end_with_the_streamed_content(self, make_state, no_esc_watcher):
         server = FakeServer(script=[{"content": "the answer", "finish_reason": "stop"}])
         state = with_server(make_state, server)
         req = Request(messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "the question"}],
                       model=MODELS[0], stream=True)
         _, events = StreamCompletion(request=req).execute(state)
         assert len(events) == 1
-        assert isinstance(events[0], AppendTurn)
-        assert events[0].user_msg == "the question"
-        assert events[0].assistant_msg == "the answer"
+        assert isinstance(events[0], TurnEnd)
+        assert events[0].assistant == "the answer"
         assert events[0].cancelled is False
 
     def test_prints_assistant_prefix_and_content(self, make_state, no_esc_watcher, capsys):
@@ -202,26 +213,28 @@ class TestStreamCompletion:
         req = Request(messages=[{"role": "user", "content": "hi"}], model=MODELS[0], stream=True)
         _, events = StreamCompletion(request=req).execute(state)
         assert len(events) == 1
-        assert isinstance(events[0], AppendTurn)
+        assert isinstance(events[0], TurnEnd)
 
 
 # ---------------------
-# AppendTurn
+# TurnEnd
 # ---------------------
 
-class TestAppendTurn:
-    def test_appends_a_turn_and_always_emits_maybe_compact(self, make_state):
-        state = make_state()
-        new_state, events = AppendTurn(user_msg="q", assistant_msg="a", cancelled=False).execute(state)
+class TestTurnEnd:
+    def test_appends_the_pending_turn_and_always_emits_maybe_compact(self, make_state):
+        state = make_state(pending=PendingTurn("q"))
+        new_state, events = TurnEnd(assistant="a", cancelled=False).execute(state)
         assert len(new_state.history) == 1
         assert new_state.history.turns[0].user == "q"
         assert new_state.history.turns[0].assistant == "a"
+        assert new_state.pending is None
         assert len(events) == 1 and isinstance(events[0], MaybeCompact)
 
     def test_original_state_is_untouched_immutability(self, make_state):
-        state = make_state()
-        AppendTurn(user_msg="q", assistant_msg="a", cancelled=False).execute(state)
+        state = make_state(pending=PendingTurn("q"))
+        TurnEnd(assistant="a", cancelled=False).execute(state)
         assert len(state.history) == 0
+        assert state.pending == PendingTurn("q")
 
     def test_cancelled_flag_lands_on_the_turn_not_on_tokens(self, make_state):
         """Regression: Turn(user, assistant, self.cancelled) once landed the
@@ -232,14 +245,15 @@ class TestAppendTurn:
         """
         long_user = "a reasonably long user message that is not four characters"
         long_assistant = "a reasonably long assistant reply that is not four characters"
-        new_state, _ = AppendTurn(user_msg=long_user, assistant_msg=long_assistant, cancelled=True).execute(make_state())
+        new_state, _ = TurnEnd(assistant=long_assistant, cancelled=True).execute(make_state(pending=PendingTurn(long_user)))
         turn = new_state.history.turns[0]
         assert turn.cancelled is True
         assert turn.tokens == estimate_tokens(long_user) + estimate_tokens(long_assistant)
         assert turn.tokens != 1
 
     def test_non_cancelled_turn_tokens_are_also_correct(self, make_state):
-        new_state, _ = AppendTurn(user_msg="a decent length user message here", assistant_msg="a decent length assistant reply here", cancelled=False).execute(make_state())
+        state = make_state(pending=PendingTurn("a decent length user message here"))
+        new_state, _ = TurnEnd(assistant="a decent length assistant reply here", cancelled=False).execute(state)
         turn = new_state.history.turns[0]
         assert turn.cancelled is False
         assert turn.tokens == estimate_tokens(turn.user) + estimate_tokens(turn.assistant)
@@ -422,14 +436,14 @@ class TestFullEngineRun:
         must never surface in the messages sent for a later turn.
         """
         server = FakeServer(script=[{"content": "partial", "finish_reason": "cancelled"}])
-        state = with_server(make_state, server)
+        state = with_server(make_state, server, pending=PendingTurn("cancel me"))
         req = Request(messages=[{"role": "system", "content": state.system_prompt},
                                  {"role": "user", "content": "cancel me"}], model=MODELS[0], stream=True)
         state, events = StreamCompletion(request=req).execute(state)
-        state, events = events[1].execute(state)  # AppendTurn
+        state, events = events[1].execute(state)  # TurnEnd
         assert state.history.turns[0].cancelled is True
 
-        _, events = UserMessage("a follow-up question").execute(state)
+        _, events = open_turn(state, "a follow-up question")
         contents = [m["content"] for m in events[0].request.messages]
         assert "cancel me" not in contents
         assert not any("partial" in c for c in contents)
