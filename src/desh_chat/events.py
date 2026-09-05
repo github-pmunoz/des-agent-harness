@@ -29,7 +29,7 @@ class MaybeRegenerate(Event):
 class Exit(Event):
     """Exit the simulation."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        return replace(state, running=False), [Info(f"Goodbye!" + c_out(Palette.DIM_CHROME, f"\nsession saved to {state.session_file}") if state.session_file else "")]
+        return replace(state, running=False), [Info(f"Goodbye!" + (c_out(Palette.DIM_CHROME, f"\nsession saved to {state.session_file}") if state.session_file else ""))]
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ class PromptUser(Event):
         return state, [UserMessage(user_input)]
 
     @staticmethod
-    def comman_dauto_complete(text, state):
+    def command_auto_complete(text, state):
         buffer = readline.get_line_buffer()
         candidates = []
         if buffer.startswith("/") and " " not in buffer:
@@ -62,7 +62,7 @@ class PromptUser(Event):
         return candidates[state] if state < len(candidates) else None
 
 readline.set_completer_delims(readline.get_completer_delims().replace("/", ""))
-readline.set_completer(PromptUser.comman_dauto_complete)
+readline.set_completer(PromptUser.command_auto_complete)
 readline.parse_and_bind("tab: complete")
 
 # ---------------------
