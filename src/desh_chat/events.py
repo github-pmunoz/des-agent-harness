@@ -295,7 +295,7 @@ class LoadSession(Event):
                 if not turn.summary:
                     readline.add_history(turn.user)
         except FileNotFoundError:
-            return state, [Info(f"New session: {path}")]
+            return state, [Info(c_out(Palette.DIM_CHROME, f"New session: {path}"))]
         except (ValueError, KeyError, TypeError) as e:     # ValueError covers json.JSONDecodeError
             bad = path + ".bad"
             os.replace(path, bad)
