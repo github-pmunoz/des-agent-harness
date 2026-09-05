@@ -29,7 +29,7 @@ class MaybeRegenerate(Event):
 class Exit(Event):
     """Exit the simulation."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        return replace(state, running=False), [Info(f"Goodbye!")]
+        return replace(state, running=False), [Info(f"Goodbye!" + c_out(Palette.DIM_CHROME, f"\nsession saved to {state.session_file}") if state.session_file else "")]
 
 
 @dataclass(frozen=True)
@@ -291,13 +291,16 @@ class LoadSession(Event):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 history = ChatHistory.from_dict(json.load(f))
+            for turn in history.turns:
+                if not turn.summary:
+                    readline.add_history(turn.user)
         except FileNotFoundError:
             return state, [Info(f"New session: {path}")]
         except (ValueError, KeyError, TypeError) as e:     # ValueError covers json.JSONDecodeError
             bad = path + ".bad"
             os.replace(path, bad)
             return state, [Warn(f"Session file {path} is unreadable ({e}); moved to {bad}, starting fresh.")]
-        return replace(state, history=history), [Info(f"Restored {len(history)} turns from {path}"), DisplayStats()]
+        return replace(state, history=history), [Info(c_out(Palette.DIM_CHROME, f"Restored {len(history)} turns from {path}")), DisplayStats()]
 
 
 @dataclass(frozen=True)
