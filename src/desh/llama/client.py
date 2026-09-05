@@ -11,7 +11,6 @@ Port of an easrlier bash prototype (send_direct.sh)
     Logger       one JSONL record per completion; never sees frames
 
 No Delta type (yet): frames flow as raw dicts; the renderer adapter turns them into events.
-No queue awareness: that is another project (QueueManager.py).
 
 TODO(transport):
   - Extract Transport Protocol (complete, stream(req, renderer, cancelled), models, props) into
