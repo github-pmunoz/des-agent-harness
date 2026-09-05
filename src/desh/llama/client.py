@@ -2,7 +2,7 @@
 """
 Thin typed client for a local llama-server (single-model or router mode).
 
-Port of an easrlier bash prototype (send_direct.sh)
+Port of an earlier bash prototype (send_direct.sh)
 
     Request      builds the payload; the ONLY place optional keys are decided
     Completion   the settled chat.completion; built from a JSON response OR folded from SSE frames
