@@ -48,6 +48,9 @@ class Request:
     max_tokens: int = 256
     think: bool = False
     stream: bool = False
+    tools: list[dict] = field(default_factory=list)   # OpenAI tool schemas: [{type:"function", function:{name, description, parameters}}]
+    tool_choice: Optional[str | dict] = None          # "auto" | "none" | "required" | {type:"function", function:{name}}
+    seed: Optional[int] = None                        # None -> server picks; 0 is a valid seed
 
     @classmethod
     def single(cls, user: str, system: str = "", **params) -> "Request":
@@ -71,6 +74,12 @@ class Request:
             body["stream_options"] = {"include_usage": True}
         if self.model:
             body["model"] = self.model
+        if self.tools:
+            body["tools"] = self.tools
+            if self.tool_choice is not None:
+                body["tool_choice"] = self.tool_choice
+        if self.seed is not None:
+            body["seed"] = self.seed
         return body
 
 # ---------------------------------------------------------------------------

@@ -315,6 +315,17 @@ class TestFromResponse:
 # Request.payload: optional keys present exactly when they mean something
 # ---------------------
 
+# One tool schema in the OpenAI shape: what the model is told it can call.
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city.",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    },
+}
+
+
 class TestRequestPayload:
     def test_model_key_absent_for_single_model_server(self):
         assert "model" not in Request.single("hi").payload()
@@ -333,6 +344,30 @@ class TestRequestPayload:
     def test_single_adds_system_message_only_when_given(self):
         assert Request.single("q").messages == [{"role": "user", "content": "q"}]
         assert Request.single("q", system="s").messages == [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+
+    def test_default_payload_has_no_tool_or_seed_keys(self):
+        # A request that does not use tools/seed must produce the same body it always has
+        assert {"tools", "tool_choice", "seed"}.isdisjoint(Request.single("hi").payload())
+
+    def test_tools_are_emitted_verbatim_when_given(self):
+        body = Request.single("hi", tools=[WEATHER_TOOL]).payload()
+        assert body["tools"] == [WEATHER_TOOL]
+        assert "tool_choice" not in body  # server default (auto) applies; we do not spell it out
+
+    def test_tool_choice_is_emitted_when_given(self):
+        assert Request.single("hi", tools=[WEATHER_TOOL], tool_choice="required").payload()["tool_choice"] == "required"
+        assert "tool_choice" not in Request.single("hi", tool_choice="required").payload()
+        named = {"type": "function", "function": {"name": "get_weather"}}
+        assert Request.single("hi", tools=[WEATHER_TOOL], tool_choice=named).payload()["tool_choice"] == named
+
+    def test_empty_tools_list_is_not_emitted(self):
+        # tools=[] means "no tools", same as the default; the key must not appear
+        assert "tools" not in Request.single("hi", tools=[]).payload()
+
+    def test_seed_is_emitted_when_set_including_zero(self):
+        assert "seed" not in Request.single("hi").payload()
+        assert Request.single("hi", seed=42).payload()["seed"] == 42
+        assert Request.single("hi", seed=0).payload()["seed"] == 0  # 0 is a valid seed, not "unset"
 
 
 # ---------------------
