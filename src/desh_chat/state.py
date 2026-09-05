@@ -68,8 +68,10 @@ class ChatHistory:
     def append(self, turn: Turn) -> ChatHistory:
         return replace(self, turns=self.turns+(turn,))
 
-    def view(self, budget: int = 0) -> list[dict]:
-        """Return the longest tail of turns which in addition to the extra_tokens fits within max_tokens."""
+    def view_turns(self, budget: int = 0) -> list[Turn]:
+        """Return the longest tail of turns whose tokens fit within budget.
+        Scans newest first (turns are appended, so the tail is the most recent), skipping cancelled
+        turns and stopping at the last summary; the result is re-reversed into chronological order."""
         view, used  = [], 0
         for turn in reversed(self.turns):
             if turn.cancelled:
@@ -80,7 +82,11 @@ class ChatHistory:
             view.append(turn)
             if turn.summary:
                 break
-        return [msg for t in reversed(view) for msg in t.messages()]
+        return list(reversed(view))
+
+    def view(self, budget: int = 0) -> list[dict]:
+        """The messages of view_turns(budget), flattened for a Request."""
+        return [msg for t in self.view_turns(budget) for msg in t.messages()]
 
     def get_total_tokens(self) -> int:
         """Return total tokens in history. Does not include cancelled turns."""
@@ -94,9 +100,12 @@ class ChatHistory:
         """Return all messages in history."""
         return [msg for turn in self.turns for msg in turn.messages()]
 
-    def compact(self, summary: str) -> ChatHistory:
-        """Replaces the turn history with a synthetic summary turn"""
-        return self.append(Turn(f"Summary of the earlier conversation: {summary}", "Understood.", summary=True))
+    SUMMARY_PREFIX = "Summary of the earlier conversation: "
+    SUMMARY_ACK = "Understood."
+
+    def compact(self, summary: str, tokens: int = 0) -> ChatHistory:
+        """Replaces the turn history with a synthetic summary turn. tokens=0 -> heuristic pricing."""
+        return self.append(Turn(self.SUMMARY_PREFIX + summary, self.SUMMARY_ACK, tokens=tokens, summary=True))
 
     def since_last_summary(self):
         """Return all turns since the last summary, except cancelled."""

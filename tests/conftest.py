@@ -26,6 +26,9 @@ class FakeServer:
         self.calls: list[tuple[str, Request]] = []
 
     def _next(self, default_content: str, default_finish: str):
+        """Script entry keys: content, finish_reason, reasoning, usage (all optional).
+        usage defaults to None — the "no trailing usage frame" case — so token pricing
+        falls back to the heuristic unless a test opts in."""
         if self.script:
             spec = self.script.pop(0)
         else:
@@ -33,27 +36,29 @@ class FakeServer:
         return (
             spec.get("content", default_content),
             spec.get("finish_reason", default_finish),
+            spec.get("reasoning", ""),
+            spec.get("usage"),
         )
 
     def stream(self, req: Request, renderer, cancelled=lambda: False) -> Completion:
         self.calls.append(("stream", req))
-        content, finish_reason = self._next("ok", "stop")
+        content, finish_reason, reasoning, usage = self._next("ok", "stop")
         if content and finish_reason != "cancelled":
             renderer.feed("content", content)
         renderer.flush()
         return Completion(
             id="fake-stream", model=req.model or "", created=0, system_fingerprint="",
-            content=content, reasoning="", finish_reason=finish_reason,
-            usage=None, timings=None, streamed=True,
+            content=content, reasoning=reasoning, finish_reason=finish_reason,
+            usage=usage, timings=None, streamed=True,
         )
 
     def complete(self, req: Request) -> Completion:
         self.calls.append(("complete", req))
-        content, finish_reason = self._next("summary", "stop")
+        content, finish_reason, reasoning, usage = self._next("summary", "stop")
         return Completion(
             id="fake-complete", model=req.model or "", created=0, system_fingerprint="",
-            content=content, reasoning="", finish_reason=finish_reason,
-            usage=None, timings=None, streamed=False,
+            content=content, reasoning=reasoning, finish_reason=finish_reason,
+            usage=usage, timings=None, streamed=False,
         )
 
 

@@ -4,8 +4,8 @@ from desh.engine import Event, Priority
 from desh.render import Palette, c_out, rl_prompt
 from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal
 from desh.llama.esc_watcher import ESCWatcher
-from desh.llama.tokens import estimate_tokens
-from desh_chat.state import ChatState, Turn
+from desh.llama.tokens import estimate_tokens, turn_tokens
+from desh_chat.state import ChatState, ChatHistory, Turn
 import sys
 import readline
 import os
@@ -287,6 +287,7 @@ class LogCompletion(Event):
 @dataclass(frozen=True)
 class StreamCompletion(Event):
     request: Request
+    prior_tokens: int = 0   # tokens already accounted for in request.messages (system prompt estimate + history view)
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         watcher = ESCWatcher()
         term = Terminal(out=sys.stdout, colour=_TTY)
@@ -300,7 +301,9 @@ class StreamCompletion(Event):
                 new_events.append(Info("Response cancelled by user."))
         finally:
             watcher.stop()
-        new_events.append(AppendTurn(user_msg=self.request.messages[-1]["content"], assistant_msg=completion.content, cancelled=cancelled))
+        user_msg = self.request.messages[-1]["content"]
+        tokens = turn_tokens(completion.usage, user_msg, completion.content, completion.reasoning, self.prior_tokens)
+        new_events.append(AppendTurn(user_msg=user_msg, assistant_msg=completion.content, cancelled=cancelled, tokens=tokens))
         if state.completions_log is not None:
             new_events.append(LogCompletion(request=self.request, completion=completion, port=state.inference.port))
         return state, new_events
@@ -311,8 +314,9 @@ class AppendTurn(Event):
     user_msg: str
     assistant_msg: str
     cancelled: bool
+    tokens: int = 0     # 0 -> Turn falls back to the character heuristic
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        turn = Turn(self.user_msg, self.assistant_msg, cancelled=self.cancelled)
+        turn = Turn(self.user_msg, self.assistant_msg, tokens=self.tokens, cancelled=self.cancelled)
         return replace(state, history=state.history.append(turn)), [MaybeCompact()]
 
 
@@ -343,7 +347,12 @@ class CompactHistory(Event):
             stream=False
         )
         completion = state.inference.server.complete(req)
-        return replace(state, history=state.history.compact(completion.content)), [
+        # The summary turn is a fresh prompt fragment, not the one this usage measured: only the
+        # generated summary has a real count; the wrapper text around it is priced by heuristic.
+        summary_tokens = 0
+        if completion.usage and completion.usage.get("completion_tokens"):
+            summary_tokens = completion.usage["completion_tokens"] + estimate_tokens(ChatHistory.SUMMARY_PREFIX + ChatHistory.SUMMARY_ACK)
+        return replace(state, history=state.history.compact(completion.content, tokens=summary_tokens)), [
             Info(f"{completion.content}"),
             LogCompletion(request=req, completion=completion, port=state.inference.port),
             MaybeRegenerate()]
@@ -364,11 +373,15 @@ class UserMessage(Event):
         reserved = sys_prompt_tokens + msg_tokens + gen_budget
         if gen_budget <= 0:
             return state, [Error("Request exceeds context window."), MaybeRegenerate()]
-        return state, [StreamCompletion(request=Request(
-                messages=[{"role": "system", "content": state.system_prompt}] + state.history.view(state.settings.context - reserved) + [user_message],
+        view = state.history.view_turns(state.settings.context - reserved)
+        return state, [StreamCompletion(
+            request=Request(
+                messages=[{"role": "system", "content": state.system_prompt}] + [m for t in view for m in t.messages()] + [user_message],
                 model=state.settings.model,
                 temperature=state.settings.temperature,
                 max_tokens=gen_budget,
                 think=state.settings.think,
                 stream=True
-                ))]
+                ),
+            prior_tokens=sys_prompt_tokens + sum(t.tokens for t in view),
+        )]
