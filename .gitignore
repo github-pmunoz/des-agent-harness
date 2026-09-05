@@ -3,6 +3,7 @@ __pycache__/
 *.jsonl
 *.json
 *.bad
+*.log
 build/
 dist/
 venv/
