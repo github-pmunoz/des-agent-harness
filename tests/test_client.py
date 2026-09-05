@@ -20,7 +20,7 @@ import urllib.error
 import pytest
 
 from desh.llama.client import (
-    Completion, LlamaServer, LlamaServerError, LlamaUnreachable, Request, Stage, events, parse_sse,
+    Completion, LlamaServer, LlamaServerError, LlamaUnreachable, Request, Stage, events, parse_sse, ToolCall,
 )
 
 
@@ -190,7 +190,6 @@ class TestFromFrames:
         c = Completion.from_frames([frame({"content": None, "reasoning_content": None}), frame({"content": "x"})])
         assert c.content == "x" and c.reasoning == ""
 
-    @pytest.mark.xfail(raises=AttributeError, reason="tool_calls not yet implemented", strict=True)
     def test_tool_call_deltas_baseline_single_call(self):
         """What from_frames does TODAY with streamed tool_calls deltas.
 
@@ -222,7 +221,6 @@ class TestFromFrames:
         assert c.tool_calls[0].name == "get_weather"
         assert c.tool_calls[0].arguments == '{"city": "Santiago"}'
 
-    @pytest.mark.xfail(raises=AttributeError, reason="tool_calls not yet implemented", strict=True)
     def test_tool_call_deltas_baseline_multi_call(self):
         """Tests indexing and flattening of multiple tool_calls.
         """
@@ -249,7 +247,6 @@ class TestFromFrames:
             (1, "get_time", '{"tz": "CLT"}', "call_b2"),
         ]
 
-    @pytest.mark.xfail(raises=AttributeError, reason="tool_calls not yet implemented", strict=True)
     def test_tool_call_deltas_baseline_frame_spans_two_indices(self):
         """llama-server shape: the model emits calls sequentially, but the server re-parses its partial
         output per chunk and sends the diff, so ONE frame can carry the closing fragment of index 0

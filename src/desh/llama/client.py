@@ -73,6 +73,26 @@ class Request:
             body["model"] = self.model
         return body
 
+# ---------------------------------------------------------------------------
+# ToolCall
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A tool call, as it appears in a completion's tool_calls array."""
+    index: int
+    id: str
+    type: str
+    name: str
+    arguments: str
+
+    def to_dict(self) -> dict:
+        return {
+            "index": self.index,
+            "id": self.id,
+            "type": self.type,
+            "function": {"name": self.name, "arguments": self.arguments},
+        }
 
 # ---------------------------------------------------------------------------
 # Completion
@@ -90,6 +110,7 @@ class Completion:
     usage: Optional[dict]
     timings: Optional[dict]
     streamed: bool = False
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
     @classmethod
     def from_response(cls, d: dict) -> "Completion":
@@ -106,6 +127,15 @@ class Completion:
             usage=d.get("usage"),
             timings=d.get("timings"),
             streamed=False,
+            tool_calls=[
+                ToolCall(
+                    index=i,
+                    id=t["id"],
+                    type=t["type"],
+                    name=t["function"]["name"],
+                    arguments=t["function"]["arguments"]
+                )for i, t in enumerate(msg.get("tool_calls") or [])
+            ]
         )
 
     @classmethod
@@ -119,12 +149,17 @@ class Completion:
           - reasoning frames: choices[0].delta.reasoning_content
           - finish frame:     choices[0].finish_reason != null, delta == {}
           - trailing frame:   choices == []  with usage + timings  (only with stream_options.include_usage)
+          - tool-call frames: choices[0].delta.tool_calls = [ {index, id?, type?, function:{name?, arguments?}} ... ]
+                              one element per call touched by this chunk; the OPENER of an index carries
+                              id/type/name once, every later element for that index carries only an
+                              arguments fragment. Elements for different indices may share a frame.
         """
         content = ""
         reasoning = ""
         usage = None
         timings = None
         finish_reason = "unknown"
+        calls: dict[int, dict] = {}   # index -> {index, id, type, name, arguments} accumulated across frames
         for frame in frames:
             if "choices" not in frame:
                 continue
@@ -137,8 +172,26 @@ class Completion:
             delta = frame["choices"][0]["delta"]
             content += delta.get("content") or ""
             reasoning += delta.get("reasoning_content") or ""
+            for tc in delta.get("tool_calls") or []:
+                index = tc["index"]
+                call = calls.setdefault(index, {
+                    "index": index,
+                    "id": "",
+                    "type": "",
+                    "name": "",
+                    "arguments": "",
+                })
+                function = tc.get("function") or {}
+                if "id" in tc:
+                    call["id"] = tc["id"]
+                if "type" in tc:
+                    call["type"] = tc["type"]
+                if "name" in function:
+                    call["name"] = function["name"]
+                call["arguments"] += function.get("arguments") or ""
 
         return cls(
+            tool_calls=[ToolCall(**calls[i]) for i in sorted(calls)],
             id=frames[0]["id"],
             model=frames[0]["model"],
             created=frames[0]["created"],
@@ -153,6 +206,9 @@ class Completion:
 
     def to_dict(self) -> dict:
         """chat.completion-shaped dict, same layout the bash script logs (so old JSONL queries keep working)."""
+        msg : dict = {"role": "assistant", "content": self.content, "reasoning_content": self.reasoning}
+        if self.tool_calls:
+            msg["tool_calls"] = [t.to_dict() for t in self.tool_calls]
         return {
             "id": self.id,
             "object": "chat.completion",
@@ -162,7 +218,7 @@ class Completion:
             "choices": [{
                 "index": 0,
                 "finish_reason": self.finish_reason,
-                "message": {"role": "assistant", "content": self.content, "reasoning_content": self.reasoning},
+                "message": msg,
             }],
             "usage": self.usage,
             "timings": self.timings,
