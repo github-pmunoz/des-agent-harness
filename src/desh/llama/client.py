@@ -251,8 +251,11 @@ def parse_sse(lines: Iterator[str]) -> Iterator[dict]:
 
 def events(frame: dict) -> Iterator[tuple[str, str]]:
     """
-    Frame -> (channel, text) events, channel in {"reasoning", "content"}.
+    Frame -> (channel, text) events, channel in {"reasoning", "content", "tool_name", "tool_args"}.
     Envelope-only frames (finish frame, trailing usage frame) yield nothing.
+    A tool-call opener yields ("tool_name", name) once; every arguments fragment yields
+    ("tool_args", fragment), so a renderer can show that the model is writing a call — otherwise a
+    long argument (a file's contents) streams in total silence.
     This is the only place the renderer stack touches the OpenAI frame shape.
     """
     if not frame.get("choices"):
@@ -262,6 +265,12 @@ def events(frame: dict) -> Iterator[tuple[str, str]]:
         yield "reasoning", delta["reasoning_content"]
     if delta.get("content"):
         yield "content", delta["content"]
+    for tc in delta.get("tool_calls") or []:
+        function = tc.get("function") or {}
+        if function.get("name"):
+            yield "tool_name", function["name"]
+        if function.get("arguments"):
+            yield "tool_args", function["arguments"]
 
 
 # ---------------------------------------------------------------------------
@@ -405,9 +414,53 @@ class Stage:
             self.next.feed(channel, text)
 
 
+class ToolProgress(Stage):
+    """
+    Make a streaming tool call visible. Turns tool_name / tool_args events into one dim "tool" line
+    per call that is rewritten in place as the arguments grow:
+
+        ⚙ Write … 1234 chars
+
+    The line is closed with a newline when another call opens, when other text arrives, or at
+    flush(). Updates are throttled to every `step` characters so a non-TTY sink (a log, a test)
+    is not flooded with carriage returns. Nothing here touches the fold: the arguments themselves
+    are never rendered, only their size.
+    """
+    def __init__(self, next: Stage, step: int = 256):
+        super().__init__(next)
+        self.step = step
+        self.name: Optional[str] = None
+        self.size = 0
+        self.shown = 0
+
+    def feed(self, channel: str, text: str) -> None:
+        if channel == "tool_name":
+            self._close()
+            self.name, self.size, self.shown = text, 0, 0
+            self.emit("tool", f"\r⚙ {text}")
+        elif channel == "tool_args":
+            self.size += len(text)
+            if self.name is not None and self.size - self.shown >= self.step:
+                self.shown = self.size
+                self.emit("tool", f"\r⚙ {self.name} … {self.size} chars")
+        else:
+            self._close()
+            self.emit(channel, text)
+
+    def _close(self) -> None:
+        if self.name is not None:
+            self.emit("tool", f"\r⚙ {self.name} … {self.size} chars\n" if self.size else "\n")
+            self.name = None
+
+    def flush(self) -> None:
+        self._close()
+        super().flush()
+
+
 class Terminal(Stage):
-    """Sink: writes to a stream with per-channel colour. reasoning dim, content plain, code yellow."""
-    COLOURS = {"reasoning": "\033[2m", "content": "", "code": "\033[33m"}
+    """Sink: writes to a stream with per-channel colour. reasoning dim, content plain, code yellow,
+    tool (a streaming call's progress line) dim."""
+    COLOURS = {"reasoning": "\033[2m", "content": "", "code": "\033[33m", "tool": "\033[2m"}
     RESET = "\033[0m"
 
     def __init__(self, out=None, colour: bool = True):

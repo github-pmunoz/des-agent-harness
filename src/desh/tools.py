@@ -119,13 +119,17 @@ class Tool:
     fn: Callable[..., Any] = field(repr=False, compare=False)
     schema: dict = field(repr=False)
     confirm: bool = True    # ask the operator before running; False only for a tool declared read-only
+    # how the call is shown at the confirmation prompt: decoded arguments -> text. None -> generic rendering.
+    preview: Optional[Callable[[dict], str]] = field(default=None, repr=False, compare=False)
 
     @classmethod
     def define(cls, fn: Callable[..., Any], *, name: Optional[str] = None, description: Optional[str] = None,
-               parameters: Optional[dict] = None, confirm: bool = True) -> Tool:
+               parameters: Optional[dict] = None, confirm: bool = True,
+               preview: Optional[Callable[[dict], str]] = None) -> Tool:
         """Derive the schema from fn's signature, type hints and docstring. Each keyword is an override
         slot that replaces the derived part verbatim — `parameters` is the hand-written JSON Schema escape
-        hatch for a signature the derivation cannot express. `confirm=False` declares the tool read-only."""
+        hatch for a signature the derivation cannot express. `confirm=False` declares the tool read-only;
+        `preview` renders the call for the operator (an Edit as a diff) instead of the generic listing."""
         summary, _ = parse_docstring(fn.__doc__)
         name = name or fn.__name__
         schema = {
@@ -136,7 +140,7 @@ class Tool:
                 "parameters": parameters if parameters is not None else parameters_schema(fn),
             },
         }
-        return cls(name=name, fn=fn, schema=schema, confirm=confirm)
+        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview)
 
     @property
     def description(self) -> str:

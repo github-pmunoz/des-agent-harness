@@ -1,8 +1,9 @@
 from dataclasses import dataclass, replace
-from typing import Callable, Literal
+from typing import Callable, Literal, Optional
 from desh.engine import Event, Priority
 from desh.render import Palette, c_out, rl_prompt
-from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal, ToolCall
+from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal, ToolCall, ToolProgress
+from desh.tools import Tool
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_tokens, turn_tokens
 from desh_chat.state import ChatState, ChatHistory, PendingTurn, Round, ToolResult
@@ -405,7 +406,7 @@ class StreamCompletion(Event):
         print(c_out(Palette.CHROME_ASSISTANT, "Assistant: "), end="", flush=True)
         try:
             watcher.start()
-            completion = state.inference.server.stream(self.request, Seam(CodeFence(term)), cancelled=lambda: watcher.interrupted)
+            completion = state.inference.server.stream(self.request, Seam(CodeFence(ToolProgress(term))), cancelled=lambda: watcher.interrupted)
             cancelled = completion.finish_reason == "cancelled"
             if cancelled:
                 new_events.append(Info("Response cancelled by user."))
@@ -533,7 +534,7 @@ class ExecuteToolCalls(Event):
         tc = round.tool_calls[self.index]
         tool = state.tools.get(tc.name)
         if tool is not None and tool.confirm:
-            print(c_out(Palette.CHROME, describe_call(tc)))
+            print(c_out(Palette.CHROME, describe_call(tc, tool)))
             answer = ask(tc)
         else:
             answer = Answer("yes")
@@ -564,16 +565,22 @@ def shorten(text: str, limit: int = 200) -> str:
     return flat if len(flat) <= limit else flat[:limit - 1] + "…"
 
 
-def describe_call(tc: ToolCall) -> str:
-    """The call as the operator must see it to approve it: one line per argument, multi-line
-    values (file contents, edits) as indented blocks. Falls back to the raw wire string when the
-    arguments are not a JSON object."""
+def describe_call(tc: ToolCall, tool: Optional[Tool] = None) -> str:
+    """The call as the operator must see it to approve it. A tool with a `preview` renders its own
+    (an Edit as a diff); otherwise one line per argument, multi-line values (file contents) as
+    indented blocks. Falls back to the raw wire string when the arguments are not a JSON object,
+    and to the generic rendering when a preview raises — the gate must always show something."""
     try:
         args = json.loads(tc.arguments)
     except ValueError:
         args = None
     if not isinstance(args, dict) or not args:
         return f"→ {tc.name}({tc.arguments})"
+    if tool is not None and tool.preview is not None:
+        try:
+            return f"→ {tc.name}\n{tool.preview(args)}"
+        except Exception:
+            pass
     lines = [f"→ {tc.name}"]
     for key, value in args.items():
         if isinstance(value, str) and "\n" in value:

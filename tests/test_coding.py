@@ -7,8 +7,8 @@ import os
 import pytest
 
 from desh.llama.client import ToolCall
-from desh.tools import ToolRegistry
-from desh_chat.coding import Workspace, coding_registry
+from desh.tools import Tool, ToolRegistry
+from desh_chat.coding import Workspace, coding_registry, edit_preview
 from desh_chat.events import describe_call, shorten
 
 
@@ -185,6 +185,49 @@ class TestCodingRegistry:
 
 
 # ---------------------
+# Edit preview: what the operator sees for an Edit at the gate (colour is off under pytest)
+# ---------------------
+
+class TestEditPreview:
+    def preview(self, old, new, **extra):
+        return edit_preview({"file_path": "x.py", "old_string": old, "new_string": new, **extra}).splitlines()
+
+    def test_one_line_change_is_a_minus_and_a_plus_under_the_path(self):
+        assert self.preview("    return a - b", "    return a + b") == ["x.py", "-    return a - b", "+    return a + b"]
+
+    def test_unshared_fragments_group_all_removals_before_all_additions(self):
+        assert self.preview("def f():\n    return 1", "def g(x):\n    return x * 2") == [
+            "x.py", "-def f():", "-    return 1", "+def g(x):", "+    return x * 2"]
+
+    def test_shared_lines_appear_as_context(self):
+        assert self.preview("foo(\n    1,\n)", "bar(\n    2,\n)") == ["x.py", "-foo(", "-    1,", "+bar(", "+    2,", " )"]
+
+    def test_headers_are_dropped(self):
+        out = "\n".join(self.preview("a", "b"))
+        assert "---" not in out and "+++" not in out and "@@" not in out
+
+    def test_replace_all_is_shown(self):
+        assert self.preview("a", "b", replace_all=True)[-1] == "(replace_all: true)"
+        assert "(replace_all" not in "\n".join(self.preview("a", "b"))
+
+    def test_missing_path_is_named(self):
+        assert edit_preview({"old_string": "a", "new_string": "b"}).splitlines()[0] == "(no file)"
+
+    def test_malformed_call_raises_and_the_gate_falls_back(self, tmp_path):
+        with pytest.raises(Exception):
+            edit_preview({"file_path": "x.py"})
+        tool = coding_registry(str(tmp_path)).get("Edit")
+        tc = ToolCall(index=0, id="c", type="function", name="Edit", arguments='{"file_path": "x.py"}')
+        assert describe_call(tc, tool) == '→ Edit\n  file_path: "x.py"'
+
+    def test_colour_wraps_only_when_stdout_is_a_tty(self, monkeypatch):
+        from desh import render
+        monkeypatch.setattr(render.c_out, "enabled", True)
+        out = edit_preview({"file_path": "x.py", "old_string": "a", "new_string": "b"})
+        assert "\033[31m-a\033[0m" in out and "\033[32m+b\033[0m" in out
+
+
+# ---------------------
 # What the operator sees at the gate
 # ---------------------
 
@@ -200,6 +243,23 @@ class TestDescribeCall:
     def test_non_object_arguments_fall_back_to_the_wire_string(self):
         assert describe_call(ToolCall(index=0, id="c", type="function", name="T", arguments="oops")) == "→ T(oops)"
         assert describe_call(ToolCall(index=0, id="c", type="function", name="T", arguments="{}")) == "→ T({})"
+
+    def test_a_tool_preview_replaces_the_generic_listing(self):
+        tool = Tool.define(lambda a: a, name="T", description="t", parameters={"type": "object", "properties": {}},
+                           preview=lambda args: f"PREVIEW of {args['a']}")
+        tc = ToolCall(index=0, id="c", type="function", name="T", arguments='{"a": "x"}')
+        assert describe_call(tc, tool) == "→ T\nPREVIEW of x"
+
+    def test_a_raising_preview_falls_back_to_the_generic_listing(self):
+        def boom(args):
+            raise KeyError("old_string")
+        tool = Tool.define(lambda a: a, name="T", description="t", parameters={"type": "object", "properties": {}}, preview=boom)
+        tc = ToolCall(index=0, id="c", type="function", name="T", arguments='{"a": "x"}')
+        assert describe_call(tc, tool) == '→ T\n  a: "x"'
+
+    def test_edit_is_registered_with_a_preview(self, tmp_path):
+        assert coding_registry(str(tmp_path)).get("Edit").preview is not None
+        assert coding_registry(str(tmp_path)).get("Write").preview is None
 
     def test_shorten_is_one_line_and_bounded(self):
         assert shorten("a\nb") == "a⏎b"

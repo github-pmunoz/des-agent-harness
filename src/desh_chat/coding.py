@@ -16,10 +16,12 @@ round.
 """
 from __future__ import annotations
 
+import difflib
 import os
 import subprocess
 from dataclasses import dataclass
 
+from desh.render import Palette, c_out
 from desh.tools import ToolRegistry
 
 
@@ -95,6 +97,9 @@ class Workspace:
         if not old_string:
             return "old_string cannot be empty."
 
+        if old_string == new_string:
+            return "(no change: old_string and new_string are identical)"
+
         # Check if the file exists
         full = self.path(file_path)
         if not os.path.exists(full):
@@ -138,11 +143,31 @@ class Workspace:
         return "\n".join(parts) if parts else "(no output)"
 
 
+def edit_preview(args: dict) -> str:
+    old = args.get("old_string")
+    new = args.get("new_string")
+    assert isinstance(old, str) and isinstance(new, str)
+    diff = difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", fromfile="old", tofile="new")
+    lines = [c_out(Palette.DIFF_CTX, args.get("file_path", "") or "(no file)")]
+    for line in diff:
+        if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
+            continue
+        elif line.startswith("+"):
+            lines.append(c_out(Palette.DIFF_ADD, line))
+        elif line.startswith("-"):
+            lines.append(c_out(Palette.DIFF_DEL, line))
+        else:
+            lines.append(c_out(Palette.DIFF_CTX, line))
+    if args.get("replace_all"):
+        lines.append(c_out(Palette.DIFF_CTX, "(replace_all: true)")) 
+    return "\n".join(lines)
+
+
 def coding_registry(root: str = ".") -> ToolRegistry:
     """Read runs unprompted; Write, Edit and Bash ask."""
     ws = Workspace(root)
     return (ToolRegistry()
             .add(ws.read, name="Read", confirm=False)
             .add(ws.write, name="Write")
-            .add(ws.edit, name="Edit")
+            .add(ws.edit, name="Edit", preview=edit_preview)
             .add(ws.bash, name="Bash"))

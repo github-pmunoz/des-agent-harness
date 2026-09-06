@@ -20,7 +20,7 @@ import urllib.error
 import pytest
 
 from desh.llama.client import (
-    Completion, LlamaServer, LlamaServerError, LlamaUnreachable, Request, Stage, events, parse_sse, ToolCall,
+    Completion, LlamaServer, LlamaServerError, LlamaUnreachable, Request, Stage, Terminal, ToolProgress, events, parse_sse, ToolCall,
 )
 
 
@@ -502,3 +502,80 @@ class TestOpenErrors:
 
     def test_base_url_trailing_slash_is_normalised(self):
         assert LlamaServer("http://fake:1/").base_url == "http://fake:1"
+
+
+# ---------------------------------------------------------------------------
+# Streaming tool calls are visible: tool_name / tool_args channels and the ToolProgress stage
+# ---------------------------------------------------------------------------
+
+def tc_frame(index=0, name=None, arguments=None, id=None):
+    tc = {"index": index}
+    if id is not None:
+        tc["id"] = id
+    function = {}
+    if name is not None:
+        function["name"] = name
+    if arguments is not None:
+        function["arguments"] = arguments
+    tc["function"] = function
+    return frame({"tool_calls": [tc]})
+
+
+class TestToolCallEvents:
+    def test_opener_yields_the_name_and_fragments_yield_arguments(self):
+        assert list(events(tc_frame(name="Write", id="call_0"))) == [("tool_name", "Write")]
+        assert list(events(tc_frame(arguments='{"file'))) == [("tool_args", '{"file')]
+
+    def test_opener_with_arguments_yields_both_in_order(self):
+        assert list(events(tc_frame(name="Bash", arguments="{"))) == [("tool_name", "Bash"), ("tool_args", "{")]
+
+    def test_empty_fragments_are_not_events(self):
+        assert list(events(tc_frame(arguments=""))) == []
+
+    def test_content_still_precedes_tool_events_in_a_mixed_frame(self):
+        f = frame({"content": "Sure.", "tool_calls": [{"index": 0, "function": {"name": "Read"}}]})
+        assert list(events(f)) == [("content", "Sure."), ("tool_name", "Read")]
+
+
+class TestToolProgress:
+    def run(self, *evs, step=10, flush=True):
+        sink = Recorder()
+        stage = ToolProgress(sink, step=step)
+        for ch, text in evs:
+            stage.feed(ch, text)
+        if flush:
+            stage.flush()
+        return sink
+
+    def test_name_opens_a_line_and_flush_closes_it_with_the_size(self):
+        sink = self.run(("tool_name", "Write"), ("tool_args", "x" * 25))
+        assert sink.events == [("tool", "\r⚙ Write"), ("tool", "\r⚙ Write … 25 chars"), ("tool", "\r⚙ Write … 25 chars\n")]
+        assert sink.flushed == 1
+
+    def test_updates_are_throttled_to_the_step(self):
+        sink = self.run(("tool_name", "W"), *[("tool_args", "abc")] * 7)     # 21 chars, step 10
+        # crossings at 12 only (3,6,9 < 10; 15,18,21 are < 10 past 12); the close line carries the final 21
+        assert [e for e in sink.events if "chars" in e[1] and not e[1].endswith("\n")] == [("tool", "\r⚙ W … 12 chars")]
+        assert sink.events[-1] == ("tool", "\r⚙ W … 21 chars\n")
+
+    def test_a_call_without_arguments_closes_with_a_bare_newline(self):
+        sink = self.run(("tool_name", "Read"))
+        assert sink.events == [("tool", "\r⚙ Read"), ("tool", "\n")]
+
+    def test_second_call_closes_the_first(self):
+        sink = self.run(("tool_name", "A"), ("tool_args", "12"), ("tool_name", "B"))
+        assert sink.events[:3] == [("tool", "\r⚙ A"), ("tool", "\r⚙ A … 2 chars\n"), ("tool", "\r⚙ B")]
+
+    def test_other_channels_close_the_line_and_pass_through(self):
+        sink = self.run(("tool_name", "A"), ("tool_args", "12"), ("content", "done"))
+        assert sink.events == [("tool", "\r⚙ A"), ("tool", "\r⚙ A … 2 chars\n"), ("content", "done")]
+
+    def test_no_tool_events_means_no_tool_output(self):
+        sink = self.run(("reasoning", "hm"), ("content", "hi"))
+        assert sink.events == [("reasoning", "hm"), ("content", "hi")]
+
+    def test_terminal_renders_the_tool_channel_dim(self):
+        out = io.StringIO()
+        term = Terminal(out=out, colour=False)
+        ToolProgress(term).feed("tool_name", "Edit")
+        assert out.getvalue() == "\r⚙ Edit"

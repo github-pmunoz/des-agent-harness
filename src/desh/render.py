@@ -18,6 +18,9 @@ class Palette:
     HISTORY_ASSISTANT = "\033[2m\033[33m"  # dim yellow
     HISTORY_SUMMARY = "\033[2m\033[95m"  # dim magenta
     STATS_LINE = "\033[1m\033[36m"  # bright cyan
+    DIFF_DEL = "\033[31m"     # red: a removed line in an edit preview
+    DIFF_ADD = "\033[32m"     # green: an added line
+    DIFF_CTX = "\033[2m"      # dim: unchanged context
 
     def __init__(self, enabled: bool):
         self.enabled = enabled
