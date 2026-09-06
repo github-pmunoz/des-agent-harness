@@ -188,7 +188,7 @@ class Command(Event):
     def _cmd_max_turn_tokens(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not self.args:
             return state, [Info(f"max_turn_tokens: {state.settings.max_turn_tokens}"), MaybeRegenerate()]
-        value = self._int(0, state.settings.max_turn_tokens)
+        value = self._int(0, state.settings.context)
         return state.change_setting("max_turn_tokens", value), [Info(f"\u21aa max_turn_tokens set to: {value}"), MaybeRegenerate()]
 
     def _cmd_models(self, state: ChatState) -> tuple[ChatState, list[Event]]:
@@ -425,6 +425,7 @@ class AppendRound(Event):
     tool_calls: tuple[ToolCall, ...]
     tokens: int = 0
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        assert state.pending is not None
         if len(state.pending.rounds) >= state.settings.max_tool_rounds:
             return state, [Warn(f"Tool-call round cap reached ({state.settings.max_tool_rounds}); ending the turn without running "
                                 f"{', '.join(tc.name for tc in self.tool_calls)}."),
