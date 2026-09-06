@@ -16,11 +16,11 @@ class Settings:
     think: bool
     context: int
     max_turn_tokens: int
+    max_tool_rounds: int = 10       # tool-call rounds allowed inside one turn before it is forced to end
     compaction_threshold: float = 0.65
     compaction_target: float = 0.25
     turn_token_cap: float = 0.40
     min_compaction_tokens: int = 64
-    max_tool_rounds: int = 10       # tool-call rounds allowed inside one turn before it is forced to end
 
 @dataclass(frozen=True)
 class InferenceEngine:

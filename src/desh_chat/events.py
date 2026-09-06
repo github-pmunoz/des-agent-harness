@@ -191,6 +191,12 @@ class Command(Event):
         value = self._int(0, state.settings.context)
         return state.change_setting("max_turn_tokens", value), [Info(f"\u21aa max_turn_tokens set to: {value}"), MaybeRegenerate()]
 
+    def _cmd_max_tool_rounds(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        if not self.args:
+            return state, [Info(f"max_tool_rounds: {state.settings.max_tool_rounds}"), MaybeRegenerate()]
+        value = self._int(lo=1)
+        return state.change_setting("max_tool_rounds", value), [Info(f"\u21aa max_tool_rounds set to: {value}"), MaybeRegenerate()]
+    
     def _cmd_models(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         self._no_args()
         return state, [Info("\n".join(state.inference.models)), MaybeRegenerate()]
@@ -239,13 +245,15 @@ class Command(Event):
             raise CommandError(f"/{self.command}: must be in [{lo}, {hi}]")
         return v
 
-    def _int(self, lo, hi) -> int:
+    def _int(self, lo=None, hi=None) -> int:
         try:
             v = int(self._single_arg())
         except ValueError:
             raise CommandError(f"/{self.command}: not an int: {self.args}")
-        if not lo <= v <= hi:
-            raise CommandError(f"/{self.command}: must be in [{lo}, {hi}]")
+        if (lo is not None and not lo <= v):
+            raise CommandError(f"/{self.command}: must be at least {lo}")
+        if (hi is not None and not v <= hi):
+            raise CommandError(f"/{self.command}: must be at most {hi}")
         return v
 
 
@@ -258,6 +266,7 @@ COMMANDS: dict[str, CommandSpec] = {
     "exit":            CommandSpec("exit the chat",                         Command._cmd_exit, aliases=("quit",)), 
     "history":         CommandSpec("show the conversation history",         Command._cmd_history),
     "max_turn_tokens": CommandSpec("set the max number of tokens per turn", Command._cmd_max_turn_tokens),
+    "max_tool_rounds": CommandSpec("set the max number of tool rounds",     Command._cmd_max_tool_rounds),
     "models":          CommandSpec("list available models",                 Command._cmd_models),
     "model":           CommandSpec("set the model to use",                  Command._cmd_model),
     "temperature":     CommandSpec("set the temperature",                   Command._cmd_temperature),

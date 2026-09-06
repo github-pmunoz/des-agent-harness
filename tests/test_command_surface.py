@@ -144,6 +144,41 @@ class TestMaxTurnTokens:
         assert isinstance(first, Info)
 
 
+class TestMaxTurnRounds:
+    def test_no_arg_shows_current(self, make_state):
+        _, first, _ = run_command(make_state, "max_tool_rounds", "")
+        assert isinstance(first, Info)
+
+    def test_valid_sets(self, make_state):
+        final, first, _ = run_command(make_state, "max_tool_rounds", "5")
+        assert final.settings.max_tool_rounds == 5
+        assert isinstance(first, Info)
+
+    def test_zero_is_not_allowed(self, make_state):
+        final, first, _ = run_command(make_state, "max_tool_rounds", "0")
+        assert final.settings.max_tool_rounds != 0
+        assert isinstance(first, Warn)
+
+    def test_one_is_allowed(self, make_state):
+        final, first, _ = run_command(make_state, "max_tool_rounds", "1")
+        assert final.settings.max_tool_rounds == 1
+        assert isinstance(first, Info)
+
+    def test_large_is_allowed(self, make_state):
+        final, first, _ = run_command(make_state, "max_tool_rounds", "1000000")
+        assert final.settings.max_tool_rounds == 1000000
+        assert isinstance(first, Info)
+
+
+    def test_negative_rejected(self, make_state):
+        _, first, _ = run_command(make_state, "max_tool_rounds", "-1")
+        assert isinstance(first, Warn)
+
+    def test_non_numeric_rejected(self, make_state):
+        _, first, _ = run_command(make_state, "max_tool_rounds", "abc")
+        assert isinstance(first, Warn)
+
+
 class TestThink:
     def test_think_enables(self, make_state):
         final, first, _ = run_command(make_state, "think", "")
