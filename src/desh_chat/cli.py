@@ -79,7 +79,7 @@ def main():
     Debug:        {"enabled" if args.debug else "disabled"}
     Timeout:      {args.timeout}s
     Session:      {session_file or "-"}
-    Tools:        {"none" if args.no_tools else ", ".join(t.name for t in default_registry().tools)}"""))
+    Tools:        {"none" if args.no_tools else ", ".join(t.name + (" (asks)" if t.confirm else "") for t in default_registry().tools)}"""))
     print(c_out(Palette.CHROME, f"\n{"═"*50}"))
 
     # Setup logging

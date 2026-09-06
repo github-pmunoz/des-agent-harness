@@ -3,10 +3,15 @@ Tool registry: what the model is offered (JSON schemas on Request.tools) and wha
 asks (Python callables). Lives in the engine package, not desh_chat: the transport needs the
 schemas, the engine needs the callables, neither is chat-specific.
 
-    Tool          one callable + the OpenAI-shaped schema the model sees for it
+    Tool          one callable + the OpenAI-shaped schema the model sees for it + its confirm policy
     Tool.define   derives the schema from signature + type hints + Google-style docstring; each
                   part has a hand-written override slot (name / description / parameters)
     ToolRegistry  frozen tuple of Tools; schemas() for the request, invoke() for the engine
+
+Policy is data on the Tool, not logic in the harness: `confirm` says whether the operator is asked
+before the call runs. It defaults to True — a tool that was never thought about asks; only a tool
+declared read-only (confirm=False) runs unprompted. The harness asks, the OS enforces: sandboxing
+and permissions stay outside the app.
 
 Why derive: llama-server builds its tool-call grammar from `parameters`, so a schema that drifts
 from the signature constrains the model to arguments the function cannot accept. Derivation makes
@@ -113,13 +118,14 @@ class Tool:
     name: str
     fn: Callable[..., Any] = field(repr=False, compare=False)
     schema: dict = field(repr=False)
+    confirm: bool = True    # ask the operator before running; False only for a tool declared read-only
 
     @classmethod
     def define(cls, fn: Callable[..., Any], *, name: Optional[str] = None, description: Optional[str] = None,
-               parameters: Optional[dict] = None) -> Tool:
+               parameters: Optional[dict] = None, confirm: bool = True) -> Tool:
         """Derive the schema from fn's signature, type hints and docstring. Each keyword is an override
         slot that replaces the derived part verbatim — `parameters` is the hand-written JSON Schema escape
-        hatch for a signature the derivation cannot express."""
+        hatch for a signature the derivation cannot express. `confirm=False` declares the tool read-only."""
         summary, _ = parse_docstring(fn.__doc__)
         name = name or fn.__name__
         schema = {
@@ -130,7 +136,7 @@ class Tool:
                 "parameters": parameters if parameters is not None else parameters_schema(fn),
             },
         }
-        return cls(name=name, fn=fn, schema=schema)
+        return cls(name=name, fn=fn, schema=schema, confirm=confirm)
 
     @property
     def description(self) -> str:

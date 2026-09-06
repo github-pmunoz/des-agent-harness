@@ -1,8 +1,8 @@
 """
 The tools chat-des offers by default. Each is a plain function; Tool.define derives its schema
 from the signature and Google-style docstring, so what the model is told and what the function
-accepts cannot drift. Read-only tools only until ConfirmToolCalls (#940) gates the writes; the
-CRUD coding-agent set arrives with #941.
+accepts cannot drift. A tool asks the operator before running unless it is registered with
+confirm=False, which is a declaration that it is read-only.
 """
 from datetime import datetime
 
@@ -20,4 +20,4 @@ def current_time(timezone_offset_hours: int = 0) -> str:
 
 
 def default_registry() -> ToolRegistry:
-    return ToolRegistry().add(current_time)
+    return ToolRegistry().add(current_time, confirm=False)

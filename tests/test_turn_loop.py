@@ -1,7 +1,7 @@
 """
 The turn loop: a turn is (user message, tool rounds*, final answer), driven by the chain
 
-  UserMessage -> NextRound -> StreamCompletion -> AppendRound -> ExecuteToolCalls -> NextRound -> ...
+  UserMessage -> NextRound -> StreamCompletion -> AppendRound -> ExecuteToolCalls(i)* -> NextRound -> ...
                                                -> TurnEnd -> MaybeCompact
 
 State between rounds lives on ChatState.pending (a PendingTurn); only TurnEnd writes history.
@@ -167,11 +167,11 @@ class TestStreamCompletionRouting:
 # ---------------------
 
 class TestAppendRound:
-    def test_records_the_round_on_pending_and_goes_to_execute(self, make_state):
+    def test_records_the_round_on_pending_and_goes_to_the_first_call(self, make_state):
         state = make_state(pending=PendingTurn("q"))
         new_state, events = AppendRound(assistant="checking", tool_calls=(WEATHER,), tokens=30).execute(state)
         assert new_state.pending.rounds == (Round("checking", (WEATHER,), (), tokens=30),)
-        assert [type(e) for e in events] == [ExecuteToolCalls]
+        assert events == [ExecuteToolCalls(index=0)]
         assert state.pending.rounds == ()
 
     def test_round_cap_ends_the_turn_with_a_warning_and_no_new_round(self, make_state):
@@ -186,14 +186,17 @@ class TestAppendRound:
 
 
 class TestExecuteToolCalls:
-    def test_answers_every_call_as_unavailable_shows_them_and_requests_the_next_round(self, make_state):
+    def test_one_call_per_step_each_unavailable_then_the_next_round(self, make_state):
         state = make_state(pending=PendingTurn("q").add_round(Round("", (WEATHER, TIME))))
-        new_state, events = ExecuteToolCalls().execute(state)
-        results = new_state.pending.rounds[-1].results
+        mid, events = ExecuteToolCalls().execute(state)
+        assert [(r.tool_call_id, r.name) for r in mid.pending.rounds[-1].results] == [("call_0", "get_weather")]
+        assert [type(e) for e in events] == [Info, ExecuteToolCalls] and events[1].index == 1
+        assert "get_weather" in events[0].text
+        final, events = events[1].execute(mid)
+        results = final.pending.rounds[-1].results
         assert [(r.tool_call_id, r.name) for r in results] == [("call_0", "get_weather"), ("call_1", "get_time")]
         assert all("not available" in r.content for r in results)
-        assert [type(e) for e in events] == [Info, Info, NextRound]
-        assert "get_weather" in events[0].text and "get_time" in events[1].text
+        assert [type(e) for e in events] == [Info, NextRound]
 
 
 # ---------------------

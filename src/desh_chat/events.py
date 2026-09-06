@@ -1,5 +1,5 @@
 from dataclasses import dataclass, replace
-from typing import Callable
+from typing import Callable, Literal
 from desh.engine import Event, Priority
 from desh.render import Palette, c_out, rl_prompt
 from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal, ToolCall
@@ -12,6 +12,8 @@ import os
 import glob
 import json
 import time
+import termios
+import tty
 
 _TTY = sys.stdout.isatty()
 
@@ -364,13 +366,23 @@ class LogCompletion(Event):
 #                              cancelled            -> TurnEnd(cancelled=True)
 #                              tool_calls           -> AppendRound
 #                              anything else        -> TurnEnd
-#   AppendRound              round cap check; records the calls on pending  -> ExecuteToolCalls | Warn + TurnEnd
-#   ExecuteToolCalls         runs the calls, attaches results to the round  -> NextRound
+#   AppendRound              round cap check; records the calls on pending  -> ExecuteToolCalls(0) | Warn + TurnEnd
+#   ExecuteToolCalls(i)      ONE call per step, in order: asks the operator
+#                            if the tool wants confirmation, runs it or
+#                            records the denial, attaches the result       -> ExecuteToolCalls(i+1) | NextRound | TurnEnd(cancelled)
 #   TurnEnd                  freezes pending into a history Turn, clears it  -> MaybeCompact (+ SaveSession)
 #
 # Today's plain chat is the one-round case: NextRound -> StreamCompletion -> TurnEnd.
 # Only TurnEnd touches history, so view(), compaction and persistence never see a turn in progress;
 # an interrupt mid-loop (Ctrl+C -> Exit) simply drops state.pending.
+#
+# Confirmation happens inside the round, per call, not as a verdict over the whole round: the
+# operator answers yes / no / no-with-guidance / cancel as each call comes up. A "no" short-circuits
+# the round — the calls after it are answered "not run" without asking, since the model will need
+# to rethink them anyway — and a denial is not an error: it is a tool message the model reads and
+# adapts to on the next round. The prompt pauses the way PromptUser does but resolves only through
+# logged events (Info/Warn, then the next step, NextRound or TurnEnd); it never schedules
+# PromptUser itself, so the regeneration point stays where MaybeRegenerate puts it.
 
 
 @dataclass(frozen=True)
@@ -421,17 +433,117 @@ class AppendRound(Event):
         return replace(state, pending=pending), [ExecuteToolCalls()]
 
 
+DENIED_TEXT = "The user declined this tool call. Do not retry it; ask the user or take another approach."
+SKIPPED_TEXT = "Not run: the user declined an earlier tool call in this round. Reconsider the plan before retrying."
+
+
+@dataclass(frozen=True)
+class Answer:
+    """One operator decision at the confirmation prompt. `message` is guidance the operator typed
+    with a "no": it replaces DENIED_TEXT as the tool message, so the model learns why."""
+    kind: Literal["yes", "no", "cancel"]
+    message: str = ""
+
+
+def ask(tc: ToolCall) -> Answer:
+    """The operator's decision for one call whose tool wants confirmation. Never raises.
+    ESC is cancel, Enter/EOF with no input is yes, [y/n/m/c] don't need Enter to be pressed,
+    and any other key asks again."""
+    def prompt(text: str) -> str | None:
+        """Read one control line without adding it to the conversation history."""
+        try:
+            before = readline.get_current_history_length()
+            try:
+                value = input(rl_prompt(Palette.CHROME, text))
+            finally:
+                after = readline.get_current_history_length()
+                for index in range(after - 1, before - 1, -1):
+                    readline.remove_history_item(index)
+            return value
+        except (EOFError):
+            return None
+        except Exception:
+            return None
+
+    def key_prompt(text: str) -> str | None:
+        """Read one decision key immediately, without putting the terminal in line mode."""
+        old_settings = None
+        try:
+            sys.stdout.write(c_out(Palette.CHROME, text))    # plain write: readline's \001/\002 markers do not apply here
+            sys.stdout.flush()
+            if sys.stdin.isatty():
+                old_settings = termios.tcgetattr(sys.stdin)
+                tty.setcbreak(sys.stdin.fileno())
+            key = sys.stdin.read(1)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return key or None
+        except Exception:
+            return None
+        finally:
+            if old_settings is not None:
+                try:
+                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                except Exception:
+                    pass
+
+    while True:
+        choice = key_prompt("[y]es / [n]o / [m]essage / [c]ancel: (ESC to cancel, ENTER for yes)")
+        if choice is None:
+            return Answer(kind="cancel")
+        choice = choice.lower()
+        if choice in {"\r", "\n"}:
+            return Answer(kind="yes")
+        if choice == "\x1b":
+            return Answer(kind="cancel")
+        if choice == "y":
+            return Answer(kind="yes")
+        if choice == "c":
+            return Answer(kind="cancel")
+        if choice == "n":
+            return Answer(kind="no")
+        if choice == "m":
+            message = prompt("Message for the model: ") or ""
+            return Answer(kind="no", message=message)
+
+
 @dataclass(frozen=True)
 class ExecuteToolCalls(Event):
-    """Run the latest round's calls through the registry and attach their results. The registry's
-    invoke() turns everything tool-side (unknown tool, bad JSON, rejected arguments, a raising tool)
-    into text, so a result always exists and the model can read it and recover; only the RESULT enters
-    state, never the side effect."""
+    """Answer the latest round's calls one per step, in order. This step handles call `index`:
+    it asks the operator when the tool wants confirmation, then either runs the call through the
+    registry or records the denial, and attaches the result to the round. The registry's invoke()
+    turns everything tool-side (unknown tool, bad JSON, rejected arguments, a raising tool) into
+    text, so a result always exists; only the RESULT enters state, never the side effect.
+
+    A "no" short-circuits the round: the calls after it are answered SKIPPED_TEXT without asking,
+    and the model gets its next round. A "cancel" ends the turn cancelled with whatever ran so far."""
+    index: int = 0
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         round = state.pending.rounds[-1]
-        results = tuple(ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments)) for tc in round.tool_calls)
-        shown = [Info(c_out(Palette.DIM_CHROME, f"→ {tc.name}({tc.arguments}) ← {res.content}")) for tc, res in zip(round.tool_calls, results)]
-        return replace(state, pending=state.pending.with_results(results)), shown + [NextRound()]
+        tc = round.tool_calls[self.index]
+        tool = state.tools.get(tc.name)
+        if tool is not None and tool.confirm:
+            print(c_out(Palette.CHROME, f"→ {tc.name}({tc.arguments})"))
+            answer = ask(tc)
+        else:
+            answer = Answer("yes")
+
+        if answer.kind == "cancel":
+            return state, [Warn("Turn cancelled at the confirmation prompt."),
+                           TurnEnd(assistant="", tokens=0, cancelled=True)]
+        if answer.kind == "no":
+            denied = ToolResult(tc.id, tc.name, answer.message or DENIED_TEXT)
+            skipped = tuple(ToolResult(o.id, o.name, SKIPPED_TEXT) for o in round.tool_calls[self.index + 1:])
+            shown: list[Event] = [Warn(f"✗ {tc.name} declined" + (f": {answer.message}" if answer.message else ""))]
+            if skipped:
+                shown.append(Warn(f"  {len(skipped)} later call(s) not run: {', '.join(r.name for r in skipped)}"))
+            return replace(state, pending=state.pending.add_results(denied, *skipped)), shown + [NextRound()]
+
+        result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments))
+        last = self.index + 1 == len(round.tool_calls)
+        return (replace(state, pending=state.pending.add_results(result)),
+                [Info(c_out(Palette.DIM_CHROME, f"→ {tc.name}({tc.arguments}) ← {result.content}")),
+                 NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
 
 @dataclass(frozen=True)

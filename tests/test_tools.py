@@ -212,7 +212,11 @@ def unserializable() -> object:
     return object()
 
 
-REGISTRY = ToolRegistry().add(get_weather).add(divide).add(now).add(inventory).add(raises_type_error).add(unserializable)
+# All read-only: these are doubles for invoke() and the request wiring, so nothing here should stop
+# at the confirmation gate. The gate has its own tests in test_confirm.py.
+REGISTRY = ToolRegistry()
+for _fn in (get_weather, divide, now, inventory, raises_type_error, unserializable):
+    REGISTRY = REGISTRY.add(_fn, confirm=False)
 
 
 class TestInvoke:
@@ -286,11 +290,13 @@ class TestExecuteToolCallsWithRegistry:
         weather = ToolCall(index=0, id="call_a", type="function", name="get_weather", arguments='{"city": "Santiago"}')
         broken = ToolCall(index=1, id="call_b", type="function", name="divide", arguments='{"a": 1, "b": 0}')
         state = make_state(pending=PendingTurn("q").add_round(Round("", (weather, broken))), tools=REGISTRY)
-        new_state, events = ExecuteToolCalls().execute(state)
+        mid, events = ExecuteToolCalls().execute(state)          # one call per step
+        assert [type(e) for e in events] == [Info, ExecuteToolCalls]
+        new_state, events = events[1].execute(mid)
         results = new_state.pending.rounds[-1].results
         assert results[0] == ToolResult("call_a", "get_weather", "Santiago: sunny")
         assert results[1].tool_call_id == "call_b" and "ZeroDivisionError" in results[1].content
-        assert [type(e) for e in events] == [Info, Info, NextRound]
+        assert [type(e) for e in events] == [Info, NextRound]
 
     def test_full_turn_with_a_real_tool(self, make_state, no_esc_watcher):
         from conftest import FakeServer

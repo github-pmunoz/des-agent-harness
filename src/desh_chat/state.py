@@ -144,6 +144,10 @@ class PendingTurn:
         last = replace(self.rounds[-1], results=results)
         return replace(self, rounds=self.rounds[:-1] + (last,))
 
+    def add_results(self, *results: ToolResult) -> PendingTurn:
+        """Append results to the latest round, in call order: the round is answered one call per step."""
+        return self.with_results(self.rounds[-1].results + results)
+
     def finish(self, assistant: str, tokens: int, cancelled: bool) -> Turn:
         """The final answer arrived (or the turn was cut short): freeze into a history Turn.
         tokens prices only the final completion; the rounds carry their own."""
