@@ -26,7 +26,7 @@ import json
 import re
 import types
 import typing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
 
 
@@ -153,11 +153,12 @@ class ToolRegistry:
     state is a value like everything else on it. An empty registry offers nothing — Request.tools
     stays absent and the model cannot call anything."""
     tools: tuple[Tool, ...] = ()
+    max_result_chars: int = 8000    # every result is bounded here so no tool can flood the context window
 
     def register(self, tool: Tool) -> ToolRegistry:
         if tool.name in self:
             raise ValueError(f"tool {tool.name!r} is already registered")
-        return ToolRegistry(self.tools + (tool,))
+        return replace(self, tools=self.tools + (tool,))
 
     def add(self, fn: Callable[..., Any], **overrides) -> ToolRegistry:
         """register(Tool.define(fn, **overrides))."""
@@ -178,8 +179,22 @@ class ToolRegistry:
         an unknown tool, malformed JSON, arguments the function rejects, or an exception inside the
         tool all come back as text the model reads and can recover from (the same rule CommandError
         follows). Engine.on_error is reserved for bugs in the harness, so nothing tool-side may
-        propagate past this boundary.
+        propagate past this boundary. The result is bounded to max_result_chars (head and tail kept).
         """
+        return self.bound(self._invoke(name, arguments))
+
+    def bound(self, text: str) -> str:
+        """text cut to max_result_chars: the head and the tail survive, the middle is replaced by a
+        marker saying how much was dropped. Errors usually sit at the end, so the tail matters."""
+        limit = self.max_result_chars
+        if len(text) <= limit:
+            return text
+        head = limit * 3 // 4
+        tail = limit - head
+        dropped = len(text) - head - tail
+        return text[:head] + f"\n[... {dropped} characters truncated ...]\n" + text[-tail:]
+
+    def _invoke(self, name: str, arguments: str) -> str:
         tool = self.get(name)
         if tool is None:
             return f"Tool {name!r} is not available."

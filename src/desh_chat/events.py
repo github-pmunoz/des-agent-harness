@@ -523,7 +523,7 @@ class ExecuteToolCalls(Event):
         tc = round.tool_calls[self.index]
         tool = state.tools.get(tc.name)
         if tool is not None and tool.confirm:
-            print(c_out(Palette.CHROME, f"→ {tc.name}({tc.arguments})"))
+            print(c_out(Palette.CHROME, describe_call(tc)))
             answer = ask(tc)
         else:
             answer = Answer("yes")
@@ -541,9 +541,37 @@ class ExecuteToolCalls(Event):
 
         result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments))
         last = self.index + 1 == len(round.tool_calls)
+        # the echo is for the operator's eye, so it is short; the model gets the full result
+        echo = f"← {shorten(result.content)}" if tool is not None and tool.confirm else f"→ {tc.name}({shorten(tc.arguments)}) ← {shorten(result.content)}"
         return (replace(state, pending=state.pending.add_results(result)),
-                [Info(c_out(Palette.DIM_CHROME, f"→ {tc.name}({tc.arguments}) ← {result.content}")),
+                [Info(c_out(Palette.DIM_CHROME, echo)),
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])
+
+
+def shorten(text: str, limit: int = 200) -> str:
+    """One line, at most `limit` characters, for terminal echoes of calls and results."""
+    flat = text.replace("\n", "⏎")
+    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
+
+
+def describe_call(tc: ToolCall) -> str:
+    """The call as the operator must see it to approve it: one line per argument, multi-line
+    values (file contents, edits) as indented blocks. Falls back to the raw wire string when the
+    arguments are not a JSON object."""
+    try:
+        args = json.loads(tc.arguments)
+    except ValueError:
+        args = None
+    if not isinstance(args, dict) or not args:
+        return f"→ {tc.name}({tc.arguments})"
+    lines = [f"→ {tc.name}"]
+    for key, value in args.items():
+        if isinstance(value, str) and "\n" in value:
+            lines.append(f"  {key}:")
+            lines.extend(f"    {line}" for line in value.splitlines())
+        else:
+            lines.append(f"  {key}: {json.dumps(value, ensure_ascii=False)}")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)

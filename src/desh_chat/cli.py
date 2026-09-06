@@ -18,6 +18,14 @@ from desh_chat.events import LoadSession, PromptUser
 from desh_chat.state import ChatHistory, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import default_registry
+from desh_chat.coding import CODING_SYSTEM_PROMPT, coding_registry
+
+# name -> builder(workspace root). "basic" ignores the root.
+TOOLSETS = {
+    "none":   lambda root: ToolRegistry(),
+    "basic":  lambda root: default_registry(),
+    "coding": lambda root: coding_registry(root),
+}
 
 
 def resolve_session_file(session: str, sessions_folder: str, run_id: str) -> str | None:
@@ -52,7 +60,7 @@ def main():
     ap.add_argument("-t",   "--temperature",    type=float, default=0.3)
     ap.add_argument("-c",   "--context",        type=int, default=16384, help="context window size")
     ap.add_argument("-mt",  "--max-turn-tokens",type=int, default=8192, help="max tokens per turn")
-    ap.add_argument("-sp",  "--system-prompt",  default="You are a helpful assistant. Reply concisely.")
+    ap.add_argument("-sp",  "--system-prompt",  default=None, help="default: a plain assistant prompt, or the coding-agent prompt with --toolset coding")
     ap.add_argument("-th",  "--think",          action="store_true", help="enable thinking")
     ap.add_argument("-cl",  "--completions-log", default="", help="JSONL telemetry file")
     ap.add_argument("-dl",  "--des-log",        default="", help="DES engine log")
@@ -60,11 +68,15 @@ def main():
     ap.add_argument("-s",   "--session",        default="", help="session file to load or create")
     ap.add_argument("-sf",  "--sessions-folder", default="", help="folder where a new session file is created per run")
     ap.add_argument("-d",   "--debug",          action="store_true", help="Enable debug output")
-    ap.add_argument("-nt",  "--no-tools",       action="store_true", help="offer the model no tools (plain chat)")
+    ap.add_argument("-ts",  "--toolset",        default="basic", choices=TOOLSETS, help="which tools the model is offered")
+    ap.add_argument("-w",   "--workspace",      default=".", help="project root for the coding toolset")
     args = ap.parse_args()
 
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
     session_file = resolve_session_file(args.session, args.sessions_folder, run_id)
+    tools = TOOLSETS[args.toolset](args.workspace)
+    system_prompt = args.system_prompt if args.system_prompt is not None else (
+        CODING_SYSTEM_PROMPT if args.toolset == "coding" else "You are a helpful assistant. Reply concisely.")
 
     print(c_out(Palette.CHROME, f"\n{"═"*50}"))
     print(c_out(Palette.CHROME, f""" DES Chat v0.1
@@ -79,7 +91,8 @@ def main():
     Debug:        {"enabled" if args.debug else "disabled"}
     Timeout:      {args.timeout}s
     Session:      {session_file or "-"}
-    Tools:        {"none" if args.no_tools else ", ".join(t.name + (" (asks)" if t.confirm else "") for t in default_registry().tools)}"""))
+    Toolset:      {args.toolset}: {", ".join(t.name + (" (asks)" if t.confirm else "") for t in tools.tools) or "none"}
+    Workspace:    {os.path.realpath(args.workspace) if args.toolset == "coding" else "-"}"""))
     print(c_out(Palette.CHROME, f"\n{"═"*50}"))
 
     # Setup logging
@@ -110,10 +123,10 @@ def main():
         ),
         history=ChatHistory(),
         running=True,
-        system_prompt=args.system_prompt,
+        system_prompt=system_prompt,
         completions_log=Logger(args.completions_log) if args.completions_log else None,
         session_file=session_file,
-        tools=default_registry() if not args.no_tools else ToolRegistry(),
+        tools=tools,
     )
     log_header = {
         "model": args.model,
