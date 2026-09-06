@@ -1,6 +1,6 @@
 """
 llama-server client baseline: pins the frame-fold and transport contract of
-desh/llama/client.py with inline SSE frames, so later changes to the fold (tool calls)
+desh/llama/wire.py and server.py with inline SSE frames, so later changes to the fold (tool calls)
 and to the transport seam (a Transport protocol with LlamaServer as one implementation)
 have a regression net. No network: LlamaServer._open / urlopen are monkeypatched with
 fake responses built from the SSE text below.
@@ -19,9 +19,9 @@ import urllib.error
 
 import pytest
 
-from desh.llama.client import (
-    Completion, LlamaServer, LlamaServerError, LlamaUnreachable, Request, Stage, Terminal, ToolProgress, events, parse_sse, ToolCall,
-)
+from desh.llama.server import LlamaServer, LlamaServerError, LlamaUnreachable
+from desh.llama.stages import Stage, Terminal, ToolProgress
+from desh.llama.wire import Completion, Request, ToolCall, events, parse_sse
 
 
 # ---------------------

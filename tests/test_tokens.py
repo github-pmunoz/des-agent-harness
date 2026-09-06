@@ -11,7 +11,7 @@ Policy under test (desh/llama/tokens.py):
 """
 from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 
-from desh.llama.client import Request
+from desh.llama.wire import Request
 from desh.llama.tokens import estimate_tokens, turn_tokens
 from desh_chat.events import CompactHistory, NextRound, StreamCompletion, TurnEnd, UserMessage
 from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Turn

@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field, replace
-from desh.llama.client import LlamaServer, Logger, ToolCall
+from desh.llama.logger import Logger
+from desh.llama.server import LlamaServer
+from desh.llama.wire import ToolCall
 from desh.llama.tokens import estimate_tokens
 from desh.engine import State
 from desh.tools import ToolRegistry

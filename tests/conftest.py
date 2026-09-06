@@ -1,6 +1,6 @@
 import pytest
 
-from desh.llama.client import Completion, Request, ToolCall
+from desh.llama.wire import Completion, Request, ToolCall
 from desh_chat.state import ChatHistory, ChatState, InferenceEngine, Settings
 
 MODELS = ["model-a", "model-b"]

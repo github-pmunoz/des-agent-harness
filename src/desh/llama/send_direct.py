@@ -11,8 +11,10 @@ import json
 import sys
 from urllib.parse import urlparse
 
-from desh.llama.client import (Request, LlamaServer, Logger, LlamaServerError, LlamaUnreachable,
-                         Seam, CodeFence, Terminal)
+from desh.llama.logger import Logger
+from desh.llama.server import LlamaServer, LlamaServerError, LlamaUnreachable
+from desh.llama.stages import Seam, CodeFence, Terminal
+from desh.llama.wire import Request
 
 
 def prompt_from_file(path: str) -> str:
