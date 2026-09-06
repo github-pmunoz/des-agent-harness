@@ -16,11 +16,11 @@ touches MaybeRegenerate.
 from conftest import MODELS, PORT
 
 from desh.engine import Priority
-from desh.llama.client import Completion, Logger, Request
-from desh_chat.events import (
-    Command, DisplayHistory, DisplayStats, Error, Exit, Info, LogCompletion,
-    MaybeRegenerate, PromptUser, UserMessage, Warn,
-)
+from desh.llama.logger import Logger
+from desh.llama.wire import Completion, Request
+from desh_chat.commands import Command
+from desh_chat.display import DisplayHistory, DisplayStats, Error, Info, Warn
+from desh_chat.events import Exit, LogCompletion, MaybeRegenerate, PromptUser, UserMessage
 from desh_chat.state import ChatHistory, Turn
 
 
@@ -216,7 +216,7 @@ class TestEventPriority:
         # LogCompletion lives in "Turn logic", not "Display" — it earns
         # Priority.HIGH on its own, not via DisplayEvent inheritance.
         assert LogCompletion.priority == Priority.HIGH
-        from desh_chat.events import DisplayEvent
+        from desh_chat.display import DisplayEvent
         assert not issubclass(LogCompletion, DisplayEvent)
 
     def test_ordinary_turn_logic_events_stay_normal_priority(self):

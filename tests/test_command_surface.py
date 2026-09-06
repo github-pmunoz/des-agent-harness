@@ -4,7 +4,9 @@ isolation test — see test_chat_unit.py.
 """
 import pytest
 
-from desh_chat.events import Command, DisplayHistory, Exit, Info, MaybeRegenerate, Warn
+from desh_chat.commands import Command
+from desh_chat.display import DisplayHistory, Info, Warn
+from desh_chat.events import Exit, MaybeRegenerate
 
 
 def run_command(make_state, command, args, **state_overrides):

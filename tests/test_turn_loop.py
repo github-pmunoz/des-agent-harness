@@ -15,12 +15,14 @@ import json
 from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 
 from desh.engine import Engine
-from desh.llama.client import Request, ToolCall
+from desh.llama.wire import Request, ToolCall
 from desh.llama.tokens import estimate_tokens
+from desh_chat.display import Error, Info, Warn
 from desh_chat.events import (
-    AppendRound, Error, ExecuteToolCalls, Info, LoadSession, MaybeCompact, NextRound, PromptUser,
-    SaveSession, StreamCompletion, TurnEnd, UserMessage, Warn,
+    AppendRound, ExecuteToolCalls, MaybeCompact, NextRound, PromptUser,
+    StreamCompletion, TurnEnd, UserMessage,
 )
+from desh_chat.session import LoadSession, SaveSession
 from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn
 
 

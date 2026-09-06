@@ -11,9 +11,10 @@ from typing import Literal, Optional
 import pytest
 
 from conftest import MAX_CONTEXT, MODELS, PORT
-from desh.llama.client import ToolCall
+from desh.llama.wire import ToolCall
 from desh.tools import Tool, ToolRegistry, json_type, parameters_schema, parse_docstring
-from desh_chat.events import ExecuteToolCalls, Info, NextRound
+from desh_chat.display import Info
+from desh_chat.events import ExecuteToolCalls, NextRound
 from desh_chat.state import InferenceEngine, PendingTurn, Round, ToolResult
 
 

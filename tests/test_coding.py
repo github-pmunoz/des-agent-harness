@@ -6,10 +6,10 @@ import os
 
 import pytest
 
-from desh.llama.client import ToolCall
+from desh.llama.wire import ToolCall
 from desh.tools import Tool, ToolRegistry
 from desh_chat.coding import Workspace, coding_registry, edit_preview
-from desh_chat.events import describe_call, shorten
+from desh_chat.gate import describe_call, shorten
 
 
 @pytest.fixture

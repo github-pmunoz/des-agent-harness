@@ -1,23 +1,34 @@
+"""
+The chat loop: prompt, turn, compaction, regeneration. Everything here is one strongly connected
+component of the event graph — MaybeRegenerate -> PromptUser -> Command -> ... -> MaybeRegenerate —
+which is why it is one module. The leaves live elsewhere: display.py (what gets printed),
+session.py (load/save), gate.py (the operator's side of a tool call). commands.py is the one
+member of the loop kept in its own file: it imports this module at the top, and this module
+reaches it only at call time (PromptUser, the completer), so the cycle never enters the import
+graph.
+"""
+import readline
+import sys
 from dataclasses import dataclass, replace
-from typing import Callable, Literal, Optional
+
 from desh.engine import Event, Priority
 from desh.render import Palette, c_out, rl_prompt
-from desh.llama.client import Completion, Request, Seam, CodeFence, Terminal, ToolCall, ToolProgress
-from desh.tools import Tool
+from desh.llama.stages import Seam, CodeFence, Terminal, ToolProgress
+from desh.llama.wire import Completion, Request, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_tokens, turn_tokens
 from desh_chat.state import ChatState, ChatHistory, PendingTurn, Round, ToolResult
-import sys
-import readline
-import os
-import glob
-import json
-import time
-import termios
-import tty
+from desh_chat.display import DisplayStats, Error, Info, Warn
+from desh_chat.session import persist
+from desh_chat import gate
+from desh_chat.gate import Answer, DENIED_TEXT, SKIPPED_TEXT, describe_call, shorten
 
 _TTY = sys.stdout.isatty()
 
+
+# ---------------------
+# Prompt and regeneration
+# ---------------------
 
 @dataclass(frozen=True)
 class MaybeRegenerate(Event):
@@ -39,6 +50,7 @@ class Exit(Event):
 class PromptUser(Event):
     """Event to prompt user for input."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        from desh_chat.commands import Command     # the loop's back edge: bound at call time, see module docstring
         try:
             user_input = input(rl_prompt(Palette.CHROME_USER, "You: "))
         except EOFError:
@@ -57,6 +69,7 @@ class PromptUser(Event):
 
     @staticmethod
     def command_auto_complete(text, state):
+        from desh_chat.commands import COMMANDS    # same back edge as execute()
         buffer = readline.get_line_buffer()
         candidates = []
         if buffer.startswith("/") and " " not in buffer:
@@ -67,288 +80,6 @@ class PromptUser(Event):
 readline.set_completer_delims(readline.get_completer_delims().replace("/", ""))
 readline.set_completer(PromptUser.command_auto_complete)
 readline.parse_and_bind("tab: complete")
-
-# ---------------------
-# Display
-# ---------------------
-
-class DisplayEvent(Event):
-    priority: int = Priority.HIGH
-
-
-@dataclass(frozen=True)
-class Info(DisplayEvent):
-    text: str
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        print(c_out(Palette.CHROME, self.text))
-        return state, []
-
-
-@dataclass(frozen=True)
-class Warn(DisplayEvent):
-    text: str
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        print(c_out(Palette.WARNING, self.text))
-        return state, []
-
-
-@dataclass(frozen=True)
-class Error(DisplayEvent):
-    text: str
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        print(c_out(Palette.ERROR, self.text))
-        return state, []
-    
-
-@dataclass(frozen=True)
-class DisplayHistory(DisplayEvent):
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        print(c_out(Palette.CHROME, "History:"))
-        for turn in state.history.turns:
-            if turn.summary:
-                print(c_out(Palette.HISTORY_SUMMARY, f"{turn.user}"))
-                continue
-            for line in turn.transcript().splitlines():
-                colour = Palette.HISTORY_USER if line.startswith("USER: ") else Palette.HISTORY_ASSISTANT
-                print(c_out(colour, line))
-        return state, []
-
-
-@dataclass(frozen=True)
-class DisplayStats(DisplayEvent):
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        sys_prompt_tokens = estimate_tokens(state.system_prompt)
-        window_tokens = sys_prompt_tokens + state.history.window_tokens()
-        total_tokens = sys_prompt_tokens + state.history.get_total_tokens()
-        print(c_out(Palette.STATS_LINE, f"Context: {window_tokens} / {state.settings.context} tokens ({window_tokens/state.settings.context*100.0:.1f}%) \t Session: {total_tokens}"))
-        return state, []
-
-
-# ---------------------
-# Commands
-# ---------------------
-
-class CommandError(Exception):
-    """User facing command problem; never a bug"""
-
-
-CommandHandler = Callable[["Command", ChatState], tuple[ChatState, list[Event]]]
-
-
-@dataclass(frozen=True)
-class CommandSpec:
-    """One registry row: what a command does, and the handler that does it.
-
-    `aliases` resolve on dispatch only; completion and any help listing show
-    the canonical name alone.
-    """
-    description: str
-    handler: CommandHandler
-    aliases: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class Command(Event):
-    """Event to process a command."""
-    command: str
-    args: str
-
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        try:
-            return self._dispatch(state)
-        except CommandError as e:
-            return state, [Warn(str(e)), MaybeRegenerate()]
-
-    def _dispatch(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        # command names are case-sensitive by design (see PromptUser)
-        spec = _COMMAND_INDEX.get(self.command)
-        if spec is None:
-            raise CommandError(f"Unknown command: /{self.command}")
-        return spec.handler(self, state)
-
-    # --- handlers: one per registry row, in COMMANDS order ---
-
-    def _cmd_compact(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        self._no_args()
-        return state, [Info(f"compacting conversation history..."), CompactHistory()]
-
-    def _cmd_context(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        if not self.args:
-            return state, [Info(f"context: {state.settings.context}"), MaybeRegenerate()]
-        value = self._int(0, state.inference.max_context[state.settings.model])
-        return state.change_setting("context", value), [Info(f"\u21aa context set to: {value}"), MaybeRegenerate()]
-
-    def _cmd_exit(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        self._no_args()
-        return state, [Exit()]
-
-    def _cmd_history(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        self._no_args()
-        return state, [DisplayHistory(), MaybeRegenerate()]
-
-    def _cmd_max_turn_tokens(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        if not self.args:
-            return state, [Info(f"max_turn_tokens: {state.settings.max_turn_tokens}"), MaybeRegenerate()]
-        value = self._int(0, state.settings.context)
-        return state.change_setting("max_turn_tokens", value), [Info(f"\u21aa max_turn_tokens set to: {value}"), MaybeRegenerate()]
-
-    def _cmd_max_tool_rounds(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        if not self.args:
-            return state, [Info(f"max_tool_rounds: {state.settings.max_tool_rounds}"), MaybeRegenerate()]
-        value = self._int(lo=1)
-        return state.change_setting("max_tool_rounds", value), [Info(f"\u21aa max_tool_rounds set to: {value}"), MaybeRegenerate()]
-    
-    def _cmd_models(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        self._no_args()
-        return state, [Info("\n".join(state.inference.models)), MaybeRegenerate()]
-
-    def _cmd_model(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        if not self.args:
-            return state, [Info(f"model: {state.settings.model}"), MaybeRegenerate()]
-        name = self._single_arg()
-        if name not in state.inference.models:
-            raise CommandError(f"Model {name} not found.")
-        return state.change_setting("model", name), [Info(f"\u21aa model set to: {name}"), MaybeRegenerate()]
-
-    def _cmd_temperature(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        if not self.args:
-            return state, [Info(f"temperature: {state.settings.temperature}"), MaybeRegenerate()]
-        value = self._float(lo=0.0, hi=2.0)
-        return state.change_setting("temperature", value), [Info(f"\u21aa temperature set to: {value}"), MaybeRegenerate()]
-
-    def _cmd_think(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        self._no_args()
-        return state.change_setting("think", True), [Info(f"\u21aa thinking mode enabled"), MaybeRegenerate()]
-
-    def _cmd_nothink(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        self._no_args()
-        return state.change_setting("think", False), [Info(f"\u21aa thinking mode disabled"), MaybeRegenerate()]
-
-    # --- argument parsing ---
-
-    def _no_args(self):
-        if self.args:
-            raise CommandError(f"/{self.command} takes no argument: {self.args}")
-
-    def _single_arg(self) -> str:
-        if not self.args:
-            raise CommandError(f"/{self.command} needs an argument")
-        if " " in self.args:
-            raise CommandError(f"/{self.command} needs a single argument, got {len(self.args.split(" "))}")
-        return self.args
-
-    def _float(self, lo, hi) -> float:
-        try:
-            v = float(self._single_arg())
-        except ValueError:
-            raise CommandError(f"/{self.command}: not a float: {self.args}")
-        if not lo <= v <= hi:
-            raise CommandError(f"/{self.command}: must be in [{lo}, {hi}]")
-        return v
-
-    def _int(self, lo=None, hi=None) -> int:
-        try:
-            v = int(self._single_arg())
-        except ValueError:
-            raise CommandError(f"/{self.command}: not an int: {self.args}")
-        if (lo is not None and not lo <= v):
-            raise CommandError(f"/{self.command}: must be at least {lo}")
-        if (hi is not None and not v <= hi):
-            raise CommandError(f"/{self.command}: must be at most {hi}")
-        return v
-
-
-# Single source of truth for the command surface: completion, dispatch and
-# any help listing all read from here. Keys are canonical names without the
-# leading slash. Must follow the Command class so the handlers resolve.
-COMMANDS: dict[str, CommandSpec] = {
-    "compact":         CommandSpec("compact the conversation history",      Command._cmd_compact),
-    "context":         CommandSpec("set the context window size",           Command._cmd_context),
-    "exit":            CommandSpec("exit the chat",                         Command._cmd_exit, aliases=("quit",)), 
-    "history":         CommandSpec("show the conversation history",         Command._cmd_history),
-    "max_turn_tokens": CommandSpec("set the max number of tokens per turn", Command._cmd_max_turn_tokens),
-    "max_tool_rounds": CommandSpec("set the max number of tool rounds",     Command._cmd_max_tool_rounds),
-    "models":          CommandSpec("list available models",                 Command._cmd_models),
-    "model":           CommandSpec("set the model to use",                  Command._cmd_model),
-    "temperature":     CommandSpec("set the temperature",                   Command._cmd_temperature),
-    "think":           CommandSpec("enable thinking",                       Command._cmd_think),
-    "nothink":         CommandSpec("disable thinking",                      Command._cmd_nothink),
-}
-
-# Dispatch index: canonical names plus aliases, all pointing at the same spec.
-_COMMAND_INDEX: dict[str, CommandSpec] = {
-    name: spec
-    for canonical, spec in COMMANDS.items()
-    for name in (canonical, *spec.aliases)
-}
-
-
-# ---------------------
-# Session persistence
-# ---------------------
-
-@dataclass(frozen=True)
-class LoadSession(Event):
-    """Seed event: restore history from state.session_file, if any.
-
-    Missing file  -> new session, nothing to restore.
-    Corrupt file  -> moved aside to <file>.bad so it is never overwritten; session starts empty
-                     and keeps saving to the original path.
-    """
-    priority: int = Priority.HIGH   # must run before the first PromptUser
-
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        path = state.session_file
-        if path is None:
-            return state, []
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                history = ChatHistory.from_dict(json.load(f))
-            for turn in history.turns:
-                if not turn.summary:
-                    readline.add_history(turn.user)
-        except FileNotFoundError:
-            return state, [Info(c_out(Palette.DIM_CHROME, f"New session: {path}"))]
-        except (ValueError, KeyError, TypeError) as e:     # ValueError covers json.JSONDecodeError
-            bad = path + ".bad"
-            os.replace(path, bad)
-            return state, [Warn(f"Session file {path} is unreadable ({e}); moved to {bad}, starting fresh.")]
-        return replace(state, history=history), [Info(c_out(Palette.DIM_CHROME, f"Restored {len(history)} turns from {path}")), DisplayStats()]
-
-
-@dataclass(frozen=True)
-class SaveSession(Event):
-    """Write the whole history to state.session_file. Atomic: temp file + os.replace, so a crash
-    mid-write can never leave a truncated session behind. No-op without a session file."""
-    priority: int = Priority.HIGH   # persist right after the history change, before the next prompt
-
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        path = state.session_file
-        if path is None:
-            return state, []
-        doc = {
-            **state.history.to_dict(),
-            # informational only — LoadSession restores turns; settings stay with the CLI flags
-            "meta": {
-                "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                "model": state.settings.model,
-                "context": state.settings.context,
-                "system_prompt": state.system_prompt,
-            },
-        }
-        tmp = path + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(doc, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
-        except OSError as e:
-            return state, [Error(f"Could not save session to {path}: {e}")]
-        return state, []
-
-
-def _persist(state: ChatState) -> list[Event]:
-    """The events a history-changing step appends so the session file tracks the change."""
-    return [SaveSession()] if state.session_file is not None else []
 
 
 # ---------------------
@@ -444,80 +175,6 @@ class AppendRound(Event):
         return replace(state, pending=pending), [ExecuteToolCalls()]
 
 
-DENIED_TEXT = "The user declined this tool call. Do not retry it; ask the user or take another approach."
-SKIPPED_TEXT = "Not run: the user declined an earlier tool call in this round. Reconsider the plan before retrying."
-
-
-@dataclass(frozen=True)
-class Answer:
-    """One operator decision at the confirmation prompt. `message` is guidance the operator typed
-    with a "no": it replaces DENIED_TEXT as the tool message, so the model learns why."""
-    kind: Literal["yes", "no", "cancel"]
-    message: str = ""
-
-
-def ask(tc: ToolCall) -> Answer:
-    """The operator's decision for one call whose tool wants confirmation. Never raises.
-    ESC is cancel, Enter/EOF with no input is yes, [y/n/m/c] don't need Enter to be pressed,
-    and any other key asks again."""
-    def prompt(text: str) -> str | None:
-        """Read one control line without adding it to the conversation history."""
-        try:
-            before = readline.get_current_history_length()
-            try:
-                value = input(rl_prompt(Palette.CHROME, text))
-            finally:
-                after = readline.get_current_history_length()
-                for index in range(after - 1, before - 1, -1):
-                    readline.remove_history_item(index)
-            return value
-        except (EOFError):
-            return None
-        except Exception:
-            return None
-
-    def key_prompt(text: str) -> str | None:
-        """Read one decision key immediately, without putting the terminal in line mode."""
-        old_settings = None
-        try:
-            sys.stdout.write(c_out(Palette.CHROME, text))    # plain write: readline's \001/\002 markers do not apply here
-            sys.stdout.flush()
-            if sys.stdin.isatty():
-                old_settings = termios.tcgetattr(sys.stdin)
-                tty.setcbreak(sys.stdin.fileno())
-            key = sys.stdin.read(1)
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            return key or None
-        except Exception:
-            return None
-        finally:
-            if old_settings is not None:
-                try:
-                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-                except Exception:
-                    pass
-
-    while True:
-        choice = key_prompt("[y]es / [n]o / [m]essage / [c]ancel: (ESC to cancel, ENTER for yes)")
-        if choice is None:
-            return Answer(kind="cancel")
-        choice = choice.lower()
-        if choice in {"\r", "\n"}:
-            return Answer(kind="yes")
-        if choice == "\x1b":
-            return Answer(kind="cancel")
-        if choice == "y":
-            return Answer(kind="yes")
-        if choice == "c":
-            return Answer(kind="cancel")
-        if choice == "n":
-            return Answer(kind="no")
-        if choice == "m":
-            message = prompt("Message for the model: ") or ""
-            return Answer(kind="no", message=message)
-
-
 @dataclass(frozen=True)
 class ExecuteToolCalls(Event):
     """Answer the latest round's calls one per step, in order. This step handles call `index`:
@@ -535,7 +192,7 @@ class ExecuteToolCalls(Event):
         tool = state.tools.get(tc.name)
         if tool is not None and tool.confirm:
             print(c_out(Palette.CHROME, describe_call(tc, tool)))
-            answer = ask(tc)
+            answer = gate.ask(tc)       # through the module so a test can script the prompt
         else:
             answer = Answer("yes")
 
@@ -559,38 +216,6 @@ class ExecuteToolCalls(Event):
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
 
-def shorten(text: str, limit: int = 200) -> str:
-    """One line, at most `limit` characters, for terminal echoes of calls and results."""
-    flat = text.replace("\n", "⏎")
-    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
-
-
-def describe_call(tc: ToolCall, tool: Optional[Tool] = None) -> str:
-    """The call as the operator must see it to approve it. A tool with a `preview` renders its own
-    (an Edit as a diff); otherwise one line per argument, multi-line values (file contents) as
-    indented blocks. Falls back to the raw wire string when the arguments are not a JSON object,
-    and to the generic rendering when a preview raises — the gate must always show something."""
-    try:
-        args = json.loads(tc.arguments)
-    except ValueError:
-        args = None
-    if not isinstance(args, dict) or not args:
-        return f"→ {tc.name}({tc.arguments})"
-    if tool is not None and tool.preview is not None:
-        try:
-            return f"→ {tc.name}\n{tool.preview(args)}"
-        except Exception:
-            pass
-    lines = [f"→ {tc.name}"]
-    for key, value in args.items():
-        if isinstance(value, str) and "\n" in value:
-            lines.append(f"  {key}:")
-            lines.extend(f"    {line}" for line in value.splitlines())
-        else:
-            lines.append(f"  {key}: {json.dumps(value, ensure_ascii=False)}")
-    return "\n".join(lines)
-
-
 @dataclass(frozen=True)
 class TurnEnd(Event):
     """The turn's final completion arrived (or the turn was cut short): freeze state.pending into a
@@ -601,7 +226,7 @@ class TurnEnd(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         turn = state.pending.finish(self.assistant, self.tokens, self.cancelled)
         new_state = replace(state, history=state.history.append(turn), pending=None)
-        return new_state, [MaybeCompact()] + _persist(state)
+        return new_state, [MaybeCompact()] + persist(state)
 
 
 @dataclass(frozen=True)
@@ -639,7 +264,7 @@ class CompactHistory(Event):
         return replace(state, history=state.history.compact(completion.content, tokens=summary_tokens)), [
             Info(f"{completion.content}"),
             LogCompletion(request=req, completion=completion, port=state.inference.port),
-            MaybeRegenerate()] + _persist(state)
+            MaybeRegenerate()] + persist(state)
 
 
 @dataclass(frozen=True)

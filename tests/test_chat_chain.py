@@ -23,10 +23,12 @@ real terminal-raw-mode watcher — no live router, no real stdin required.
 from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 
 from desh.engine import Engine
-from desh.llama.client import Logger, Request
+from desh.llama.logger import Logger
+from desh.llama.wire import Request
 from desh.llama.tokens import estimate_tokens
+from desh_chat.display import Error, Info
 from desh_chat.events import (
-    CompactHistory, Exit, Info, Error, LogCompletion, MaybeCompact, MaybeRegenerate,
+    CompactHistory, Exit, LogCompletion, MaybeCompact, MaybeRegenerate,
     NextRound, PromptUser, StreamCompletion, TurnEnd, UserMessage,
 )
 from desh_chat.handlers import on_interrupt

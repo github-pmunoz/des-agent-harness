@@ -9,9 +9,9 @@ import pytest
 
 from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 
-from desh_chat.events import (
-    CompactHistory, Error, Info, LoadSession, SaveSession, TurnEnd, Warn,
-)
+from desh_chat.display import Error, Info, Warn
+from desh_chat.events import CompactHistory, TurnEnd
+from desh_chat.session import LoadSession, SaveSession
 from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Turn
 
 

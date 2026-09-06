@@ -14,10 +14,12 @@ import pytest
 from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 
 from desh.engine import Engine
-from desh.llama.client import ToolCall
+from desh.llama.wire import ToolCall
 from desh.tools import Tool, ToolRegistry
-from desh_chat import events
-from desh_chat.events import DENIED_TEXT, SKIPPED_TEXT, Answer, ExecuteToolCalls, Info, NextRound, PromptUser, TurnEnd, UserMessage, Warn
+from desh_chat import gate
+from desh_chat.display import Info, Warn
+from desh_chat.events import ExecuteToolCalls, NextRound, PromptUser, TurnEnd, UserMessage
+from desh_chat.gate import DENIED_TEXT, SKIPPED_TEXT, Answer
 from desh_chat.state import InferenceEngine, PendingTurn, Round
 
 
@@ -72,7 +74,7 @@ def answers(monkeypatch):
                 return next(it)
             except StopIteration:
                 pytest.fail(f"ask() called for {tc.name} but the script is exhausted")
-        monkeypatch.setattr(events, "ask", fake_ask)
+        monkeypatch.setattr(gate, "ask", fake_ask)
         return asked
     return _set
 
@@ -223,7 +225,7 @@ import builtins
 import io
 import sys
 
-from desh_chat.events import ask
+from desh_chat.gate import ask
 
 
 @pytest.fixture
@@ -281,8 +283,8 @@ class TestAsk:
         keys("m", lines=("why",))
         length = {"n": 5}
         removed: list[int] = []
-        monkeypatch.setattr(events.readline, "get_current_history_length", lambda: length["n"])
-        monkeypatch.setattr(events.readline, "remove_history_item", lambda i: removed.append(i))
+        monkeypatch.setattr(gate.readline, "get_current_history_length", lambda: length["n"])
+        monkeypatch.setattr(gate.readline, "remove_history_item", lambda i: removed.append(i))
         real_input = builtins.input
 
         def input_that_adds_history(prompt=""):

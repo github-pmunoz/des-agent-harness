@@ -10,11 +10,13 @@ import os
 import uuid
 
 from desh_chat.state import ChatState
-from desh.llama.client import LlamaServer, Logger
+from desh.llama.logger import Logger
+from desh.llama.server import LlamaServer
 from desh.render import Palette, c_out
 from desh.engine import Engine
 from desh.tools import ToolRegistry
-from desh_chat.events import LoadSession, PromptUser
+from desh_chat.events import PromptUser
+from desh_chat.session import LoadSession
 from desh_chat.state import ChatHistory, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import default_registry
