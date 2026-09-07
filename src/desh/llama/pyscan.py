@@ -49,7 +49,7 @@ BUILTINS = frozenset({
     "StopIteration", "NotImplementedError", "AttributeError", "OSError", "FileNotFoundError",
     "AssertionError",
     # names that are not keywords but read as constants
-    "self", "cls", "__name__",
+    "self", "cls", "__name__", "__enter__", "__exit__",
 })
 
 
