@@ -1,6 +1,5 @@
 import traceback
 from desh.engine import Event
-from desh.render import Palette, c_out
 from desh_chat.state import ChatState
 from desh_chat.display import Info
 from desh_chat.events import MaybeRegenerate, Exit
