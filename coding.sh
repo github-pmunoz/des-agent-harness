@@ -28,4 +28,4 @@ EOF
 
 cd "$DESH_HOME"
 mkdir -p "$SESSIONS_DIR"
-chat-des -sf ${SESSIONS_DIR} -cl ${COMPLETIONS_LOG} -dl ${DES_LOG} "$@" -sp "$SYSTEM_PROMPT" -mtr 100 -ts coding -m "$MODEL" -c "$CONTEXT" -mt "$TURN_TOKENS"
+chat-des -sf ${SESSIONS_DIR} -cl ${COMPLETIONS_LOG} -dl ${DES_LOG} -sp "$SYSTEM_PROMPT" -mtr 100 -ts coding -m "$MODEL" -c "$CONTEXT" -mt "$TURN_TOKENS" "$@"  

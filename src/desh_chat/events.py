@@ -191,6 +191,7 @@ class ExecuteToolCalls(Event):
     and the model gets its next round. A "cancel" ends the turn cancelled with whatever ran so far."""
     index: int = 0
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        assert state.pending is not None
         round = state.pending.rounds[-1]
         tc = round.tool_calls[self.index]
         tool = state.tools.get(tc.name)
@@ -227,6 +228,7 @@ class TurnEnd(Event):
     tokens: int = 0     # prices the final completion only; 0 -> the Turn falls back to the character heuristic
     cancelled: bool = False
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        assert state.pending is not None
         turn = state.pending.finish(self.assistant, self.tokens, self.cancelled)
         new_state = replace(state, history=state.history.append(turn), pending=None)
         return new_state, [MaybeCompact()] + persist(state)
@@ -283,6 +285,7 @@ class NextRound(Event):
     """Budget and build the request for the next completion of the pending turn: system prompt, the
     history view that fits, then the pending turn so far (user message + every tool round)."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        assert state.pending is not None
         pending = state.pending
         sys_prompt_tokens = estimate_tokens(state.system_prompt)
         # What the pending turn costs in the prompt: rounds already priced by usage frames, plus the
