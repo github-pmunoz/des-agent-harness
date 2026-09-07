@@ -52,7 +52,7 @@ def ask(tc: ToolCall) -> Answer:
         """Read one decision key immediately, without putting the terminal in line mode."""
         old_settings = None
         try:
-            sys.stdout.write(c_out(Palette.CHROME, text))    # plain write: readline's \001/\002 markers do not apply here
+            sys.stdout.write(c_out(Palette.TOOL_CONFIRM, text))    # plain write: readline's \001/\002 markers do not apply here
             sys.stdout.flush()
             if sys.stdin.isatty():
                 old_settings = termios.tcgetattr(sys.stdin)
@@ -69,9 +69,10 @@ def ask(tc: ToolCall) -> Answer:
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
                 except Exception:
                     pass
-
+    choice_prompt = "[y]es / [n]o / [m]essage / [c]ancel: (ESC to cancel, ENTER for yes)"
+    print(c_out(Palette.CHROME, f"{"──"*(len(choice_prompt)//2)}"))
     while True:
-        choice = key_prompt("[y]es / [n]o / [m]essage / [c]ancel: (ESC to cancel, ENTER for yes)")
+        choice = key_prompt(choice_prompt)
         if choice is None:
             return Answer(kind="cancel")
         choice = choice.lower()
@@ -90,10 +91,10 @@ def ask(tc: ToolCall) -> Answer:
             return Answer(kind="no", message=message)
 
 
-def shorten(text: str, limit: int = 200) -> str:
-    """One line, at most `limit` characters, for terminal echoes of calls and results."""
-    flat = text.replace("\n", "⏎")
-    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
+def shorten(text: str, limit: int = 200, indent: int = 4) -> str:
+    """At most `limit` characters, for terminal echoes of calls and results."""
+    short = text if len(text) <= limit else text[:limit - 1] + f" ... {len(text)} chars"
+    return "\n".join(f"{' '*indent}{line}" for line in short.splitlines())
 
 
 def describe_call(tc: ToolCall, tool: Optional[Tool] = None) -> str:
@@ -105,18 +106,24 @@ def describe_call(tc: ToolCall, tool: Optional[Tool] = None) -> str:
         args = json.loads(tc.arguments)
     except ValueError:
         args = None
+    color_arrow = c_out(Palette.CHROME, f"→")
+    color_name = c_out(Palette.TOOL_NAME, f"{tc.name}")
     if not isinstance(args, dict) or not args:
-        return f"→ {tc.name}({tc.arguments})"
+        color_args = c_out(Palette.TOOL_ARG_VALUE, f"{tc.arguments}")
+        return f"{color_arrow} {color_name}({color_args})"
     if tool is not None and tool.preview is not None:
         try:
-            return f"→ {tc.name}\n{tool.preview(args)}"
+            color_preview = c_out(Palette.TOOL_ARG_VALUE, f"({tool.preview(args)})")
+            return f"{color_arrow} {color_name}\n{color_preview}"
         except Exception:
             pass
-    lines = [f"→ {tc.name}"]
+    color_key = c_out(Palette.TOOL_ARG_KEY, "{}")
+    color_value = c_out(Palette.TOOL_ARG_VALUE, "{}")
+    lines = [f"{color_arrow} {color_name}"]
     for key, value in args.items():
         if isinstance(value, str) and "\n" in value:
-            lines.append(f"  {key}:")
-            lines.extend(f"    {line}" for line in value.splitlines())
+            lines.append(f"  {color_key.format(key)}:")
+            lines.extend(f"    {color_value.format(line)}" for line in value.splitlines())
         else:
-            lines.append(f"  {key}: {json.dumps(value, ensure_ascii=False)}")
+            lines.append(f"  {color_key.format(key)}: {color_value.format(json.dumps(value, ensure_ascii=False))}")
     return "\n".join(lines)

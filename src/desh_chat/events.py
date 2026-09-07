@@ -191,8 +191,8 @@ class ExecuteToolCalls(Event):
         round = state.pending.rounds[-1]
         tc = round.tool_calls[self.index]
         tool = state.tools.get(tc.name)
+        print(describe_call(tc, tool))
         if tool is not None and tool.confirm:
-            print(c_out(Palette.CHROME, describe_call(tc, tool)))
             answer = gate.ask(tc)       # through the module so a test can script the prompt
         else:
             answer = Answer("yes")
@@ -211,9 +211,9 @@ class ExecuteToolCalls(Event):
         result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments))
         last = self.index + 1 == len(round.tool_calls)
         # the echo is for the operator's eye, so it is short; the model gets the full result
-        echo = f"← {shorten(result.content)}" if tool is not None and tool.confirm else f"→ {tc.name}({shorten(tc.arguments)}) ← {shorten(result.content)}"
+        echo = f"{c_out(Palette.TOOL_RESULT, shorten(result.content))}"
         return (replace(state, pending=state.pending.add_results(result)),
-                [Info(c_out(Palette.DIM_CHROME, echo)),
+                [Info(echo),
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
 

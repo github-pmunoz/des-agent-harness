@@ -549,7 +549,7 @@ class TestToolProgress:
 
     def test_name_opens_a_line_and_flush_closes_it_with_the_size(self):
         sink = self.run(("tool_name", "Write"), ("tool_args", "x" * 25))
-        assert sink.events == [("tool", "\r⚙ Write"), ("tool", "\r⚙ Write … 25 chars"), ("tool", "\r⚙ Write … 25 chars\n")]
+        assert sink.events == [("tool", "\r⚙ Write   "), ("tool", "\r⚙ Write … 25 chars"), ("tool", "\r⚙ Write … 25 chars\n")]
         assert sink.flushed == 1
 
     def test_updates_are_throttled_to_the_step(self):
@@ -560,15 +560,15 @@ class TestToolProgress:
 
     def test_a_call_without_arguments_closes_with_a_bare_newline(self):
         sink = self.run(("tool_name", "Read"))
-        assert sink.events == [("tool", "\r⚙ Read"), ("tool", "\n")]
+        assert sink.events == [("tool", "\r⚙ Read    "), ("tool", "\n")]
 
     def test_second_call_closes_the_first(self):
         sink = self.run(("tool_name", "A"), ("tool_args", "12"), ("tool_name", "B"))
-        assert sink.events[:3] == [("tool", "\r⚙ A"), ("tool", "\r⚙ A … 2 chars\n"), ("tool", "\r⚙ B")]
+        assert sink.events[:3] == [("tool", "\r⚙ A       "), ("tool", "\r⚙ A … 2 chars\n"), ("tool", "\r⚙ B       ")]
 
     def test_other_channels_close_the_line_and_pass_through(self):
         sink = self.run(("tool_name", "A"), ("tool_args", "12"), ("content", "done"))
-        assert sink.events == [("tool", "\r⚙ A"), ("tool", "\r⚙ A … 2 chars\n"), ("content", "done")]
+        assert sink.events == [("tool", "\r⚙ A       "), ("tool", "\r⚙ A … 2 chars\n"), ("content", "done")]
 
     def test_no_tool_events_means_no_tool_output(self):
         sink = self.run(("reasoning", "hm"), ("content", "hi"))
@@ -578,4 +578,4 @@ class TestToolProgress:
         out = io.StringIO()
         term = Terminal(out=out, colour=False)
         ToolProgress(term).feed("tool_name", "Edit")
-        assert out.getvalue() == "\r⚙ Edit"
+        assert out.getvalue() == "\r⚙ Edit    "

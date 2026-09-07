@@ -21,6 +21,11 @@ class Palette:
     DIFF_DEL = "\033[31m"     # red: a removed line in an edit preview
     DIFF_ADD = "\033[32m"     # green: an added line
     DIFF_CTX = "\033[2m"      # dim: unchanged context
+    TOOL_NAME = "\033[1m\033[36m"  # bright cyan: a tool name
+    TOOL_ARG_KEY = "\033[36m"  # cyan: a tool argument key
+    TOOL_ARG_VALUE = "\033[0m"  # default: a tool argument value
+    TOOL_CONFIRM = "\033[32m"  # green: a tool confirm message
+    TOOL_RESULT = "\033[0m\033[2m"   # dim default: a tool result
 
     def __init__(self, enabled: bool):
         self.enabled = enabled

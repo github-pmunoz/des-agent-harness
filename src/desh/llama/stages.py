@@ -58,7 +58,8 @@ class ToolProgress(Stage):
         if channel == "tool_name":
             self._close()
             self.name, self.size, self.shown = text, 0, 0
-            self.emit("tool", f"\r⚙ {text}")
+            pad_length = len("Assistant: ") #Fix for short tool names not redrawing the full "Assistant: " string
+            self.emit("tool", f"\r⚙ {text}".ljust(pad_length))
         elif channel == "tool_args":
             self.size += len(text)
             if self.name is not None and self.size - self.shown >= self.step:
