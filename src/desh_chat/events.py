@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 
 from desh.engine import Event, Priority
 from desh.render import Palette, c_out, rl_prompt
-from desh.llama.stages import Seam, CodeFence, Terminal, ToolProgress
+from desh.llama.stages import Seam, CodeFence, PyHighlight, Terminal, ToolProgress
 from desh.llama.wire import Completion, Request, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_tokens, turn_tokens
@@ -141,7 +141,7 @@ class StreamCompletion(Event):
         print(c_out(Palette.CHROME_ASSISTANT, "Assistant: "), end="", flush=True)
         try:
             watcher.start()
-            completion = state.inference.server.stream(self.request, Seam(CodeFence(ToolProgress(term))), cancelled=lambda: watcher.interrupted)
+            completion = state.inference.server.stream(self.request, Seam(CodeFence(PyHighlight(ToolProgress(term)))), cancelled=lambda: watcher.interrupted)
             cancelled = completion.finish_reason == "cancelled"
             if cancelled:
                 new_events.append(Info("Response cancelled by user."))

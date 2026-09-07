@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from desh.llama.logger import Logger
 from desh.llama.server import LlamaServer, LlamaServerError, LlamaUnreachable
-from desh.llama.stages import Seam, CodeFence, Terminal
+from desh.llama.stages import Seam, CodeFence, PyHighlight, Terminal
 from desh.llama.wire import Request
 
 
@@ -56,7 +56,7 @@ def main(argv=None) -> int:
     try:
         if a.stream:
             sink = Terminal(out=sys.stdout, colour=not a.output)
-            completion = server.stream(req, Seam(CodeFence(sink)))
+            completion = server.stream(req, Seam(CodeFence(PyHighlight(sink))))
         else:
             completion = server.complete(req)
     except LlamaUnreachable as e:

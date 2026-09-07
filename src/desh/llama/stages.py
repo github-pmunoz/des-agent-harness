@@ -1,16 +1,18 @@
 """
 Renderer stages: the chain a streaming completion is drawn through. Contract per link is
 feed(channel, text) / flush(); a stage transforms events and passes them on, the last one is a
-sink. Chain with Seam(CodeFence(ToolProgress(Terminal()))) — outermost receives first.
+sink. Chain with Seam(CodeFence(PyHighlight(ToolProgress(Terminal())))) — outermost receives first.
 
 Channels are llama-server's frame vocabulary as wire.events() emits it — reasoning, content,
-tool_name, tool_args — plus the two this chain creates: code (CodeFence) and tool (ToolProgress).
+tool_name, tool_args — plus the ones this chain creates: code and code_py (CodeFence), tool
+(ToolProgress), and the py_* token channels (PyHighlight). Only Terminal knows a colour.
 """
 from __future__ import annotations
 
 import sys
 from typing import Optional
 
+from desh.llama.pyscan import ScanState, finish, scan
 from desh.render import Palette
 
 
@@ -78,10 +80,44 @@ class ToolProgress(Stage):
         super().flush()
 
 
+class PyHighlight(Stage):
+    """
+    Colour the body of a python fence by token class. Consumes "code_py" and re-emits it as the
+    py_* channels (plus plain "code_py" for default text) via the streaming scanner in pyscan;
+    every other channel passes through. A pass-through event first finishes the scan — the held
+    tail must not overtake it, and the closing fence (a "code" event) ends the program, so the
+    next fence starts with fresh scanner state.
+    """
+    def __init__(self, next: Stage):
+        super().__init__(next)
+        self.state = ScanState()
+
+    def feed(self, channel: str, text: str) -> None:
+        if channel == "code_py":
+            spans, self.state = scan(self.state, text)
+        else:
+            spans, self.state = finish(self.state)
+            spans.append((channel, text))
+        for span_channel, span_text in spans:
+            self.emit(span_channel, span_text)
+
+    def flush(self) -> None:
+        spans, self.state = finish(self.state)
+        for span_channel, span_text in spans:
+            self.emit(span_channel, span_text)
+        super().flush()
+
+
 class Terminal(Stage):
     """Sink: writes to a stream with per-channel colour. reasoning dim, content plain, code yellow,
-    tool (a streaming call's progress line) dim."""
-    COLOURS = {"reasoning": Palette.DEBUG, "content": "", "code": Palette.CHROME, "tool": Palette.DEBUG}
+    tool (a streaming call's progress line) dim; inside a python fence the token channels take
+    their own colours and default text (code_py) renders in the terminal's foreground."""
+    COLOURS = {
+        "reasoning": Palette.DEBUG, "content": "", "code": Palette.CHROME, "tool": Palette.DEBUG,
+        "code_py": "", "py_kw": Palette.PY_KEYWORD, "py_builtin": Palette.PY_BUILTIN,
+        "py_call": Palette.PY_CALL, "py_str": Palette.PY_STRING, "py_num": Palette.PY_NUMBER,
+        "py_comment": Palette.PY_COMMENT,
+    }
     RESET = Palette.RESET
 
     def __init__(self, out=None, colour: bool = True):
@@ -126,26 +162,35 @@ class CodeFence(Stage):
     """
     Re-channel text inside ``` fences from "content" to "code" (port of chat-bot.py's fence machine).
     Only the content channel is inspected; reasoning passes through untouched.
-    Must handle a fence split across deltas ("``" then "`python\n"): hold back up to two trailing
-    backticks until the next event or flush() decides.
+
+    Three regions, each with its own hold-back rule, because any of them can be split across deltas:
+      - outside a fence: hold up to two trailing backticks ("``" now, "`python" later);
+      - the info string right after an opening fence: hold until its newline ("py" then "thon\\n");
+      - the fence body: hold up to two trailing backticks, same as outside.
+    The info string names the body's channel: a python fence body goes out as "code_py" so a
+    highlighter downstream can colour it; every other body, and every fence line, is plain "code".
     """
+    PYTHON_LANGS = frozenset({"python", "py", "python3"})
+
     def __init__(self, next: Stage):
         super().__init__(next)
         self.in_code = False
+        self.in_info = False
+        self.lang = ""
         self.buffer = ""
 
     @property
     def channel(self) -> str:
         """The channel the NEXT span of content text belongs to, given where we are in the stream."""
-        return "code" if self.in_code else "content"
+        if not self.in_code:
+            return "content"
+        return "code_py" if self.lang in self.PYTHON_LANGS else "code"
 
     def feed(self, channel: str, text: str) -> None:
         # Pass-through: anything not "content" was classified upstream (reasoning today).
         # "code" never arrives here — this stage is the one that *creates* it, on emit.
         if channel != "content":
-            if self.buffer:
-                self.emit(self.channel, self.buffer)
-                self.buffer = ""
+            self._flush_buffer()
             self.emit(channel, text)
             return
 
@@ -153,27 +198,48 @@ class CodeFence(Stage):
         work = self.buffer + text
         self.buffer = ""
 
-        # Every complete fence in `work`: emit the span before it on the CURRENT channel,
-        # emit the fence itself as code, flip state. Same loop body serves opening and closing
-        # fences — the only difference is the state we start in.
-        while "```" in work:
-            before, work = work.split("```", 1)
-            if before:
-                self.emit(self.channel, before)
-            self.emit("code", "```")
-            self.in_code = not self.in_code
+        while work:
+            if self.in_info:
+                # The info line is held whole until its newline: the language is its first word.
+                nl = work.find("\n")
+                if nl < 0:
+                    self.buffer = work
+                    return
+                info, work = work[:nl + 1], work[nl + 1:]
+                words = info.split()
+                self.lang = words[0].lower() if words else ""
+                self.in_info = False
+                self.emit("code", info)
+                continue
 
-        # `work` now has no complete fence. But it may END in 1-2 backticks that are the start
-        # of a fence whose rest is in the next delta ("``" now, "`python" later).
-        tail_start = -2 if work.endswith("``") else -1 if work.endswith("`") else 0
-        if tail_start != 0:
-            self.buffer = work[tail_start:]
-            work = work[:tail_start]
-        if work:
-            self.emit(self.channel, work)
+            # A complete fence: emit the span before it on the CURRENT channel, emit the fence
+            # itself as code, flip state. Same body serves opening and closing fences — an opening
+            # one additionally enters the info region.
+            if "```" in work:
+                before, work = work.split("```", 1)
+                if before:
+                    self.emit(self.channel, before)
+                self.emit("code", "```")
+                self.in_code = not self.in_code
+                self.in_info = self.in_code
+                self.lang = ""
+                continue
+
+            # No complete fence left. But `work` may END in 1-2 backticks that are the start
+            # of a fence whose rest is in the next delta.
+            tail_start = -2 if work.endswith("``") else -1 if work.endswith("`") else 0
+            if tail_start != 0:
+                self.buffer = work[tail_start:]
+                work = work[:tail_start]
+            if work:
+                self.emit(self.channel, work)
+            return
+
+    def _flush_buffer(self) -> None:
+        if self.buffer:
+            self.emit("code" if self.in_info else self.channel, self.buffer)
+            self.buffer = ""
 
     def flush(self) -> None:
-        if self.buffer:
-            self.emit("code" if self.in_code else "content", self.buffer)
-            self.buffer = ""
+        self._flush_buffer()
         super().flush()

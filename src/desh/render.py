@@ -26,6 +26,12 @@ class Palette:
     TOOL_ARG_VALUE = "\033[0m"  # default: a tool argument value
     TOOL_CONFIRM = "\033[32m"  # green: a tool confirm message
     TOOL_RESULT = "\033[2m"   # dim: a tool result
+    PY_KEYWORD = "\033[1m\033[35m"  # bright magenta: a python keyword
+    PY_BUILTIN = "\033[36m"   # cyan: a builtin name or type
+    PY_CALL = "\033[94m"      # bright blue: a name the code introduced, being called
+    PY_STRING = "\033[32m"    # green: a string literal
+    PY_NUMBER = "\033[38;5;208m"  # orange: a number literal
+    PY_COMMENT = "\033[2m"    # dim: a comment
 
     def __init__(self, enabled: bool):
         self.enabled = enabled
