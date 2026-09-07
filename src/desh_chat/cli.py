@@ -62,6 +62,7 @@ def main():
     ap.add_argument("-t",   "--temperature",    type=float, default=0.3)
     ap.add_argument("-c",   "--context",        type=int, default=16384, help="context window size")
     ap.add_argument("-mt",  "--max-turn-tokens",type=int, default=8192, help="max tokens per turn")
+    ap.add_argument("-mtr",  "--max-tool-rounds",type=int, default=10, help="max tool rounds per turn")
     ap.add_argument("-sp",  "--system-prompt",  default=None, help="default: a plain assistant prompt, or the coding-agent prompt with --toolset coding")
     ap.add_argument("-th",  "--think",          action="store_true", help="enable thinking")
     ap.add_argument("-cl",  "--completions-log", default="", help="JSONL telemetry file")
@@ -88,6 +89,7 @@ def main():
     Think mode:   {"enabled" if args.think else "disabled"}
     Context:      {args.context}
     Turn tokens:  {args.max_turn_tokens}
+    Tool rounds:  {args.max_tool_rounds}
     Compl log:    {args.completions_log}
     DES log:      {args.des_log}
     Debug:        {"enabled" if args.debug else "disabled"}
@@ -115,7 +117,8 @@ def main():
             temperature=args.temperature,
             think=args.think,
             context=args.context,
-            max_turn_tokens=args.max_turn_tokens
+            max_turn_tokens=args.max_turn_tokens,
+            max_tool_rounds=args.max_tool_rounds
         ),
         inference=InferenceEngine(
             server=client,

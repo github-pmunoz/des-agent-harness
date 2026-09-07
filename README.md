@@ -55,6 +55,7 @@ chat-des \
   --temperature 0.5 \
   --context 16384 \
   --max-turn-tokens 8192 \
+  --max-tool-rounds 10 \
   --toolset coding \
   --workspace . \
   --think
@@ -69,6 +70,7 @@ The most useful options are:
 | `--temperature` | `0.3` | Sampling temperature. |
 | `--context` | `16384` | Context-window size used for budgeting and compaction. |
 | `--max-turn-tokens` | `8192` | Completion-token limit for one turn. |
+| `--max-tool-rounds` | `10` | Maximum number of tool-call rounds in a single turn. |
 | `--think` | off | Ask the server to enable reasoning/thinking. |
 | `--toolset` | `basic` | Tools offered to the model: `none`, `basic` (current time), or `coding`. |
 | `--workspace` | `.` | Root directory available to the `coding` toolset. |
