@@ -43,7 +43,10 @@ class MaybeRegenerate(Event):
 class Exit(Event):
     """Exit the simulation."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        return replace(state, running=False), [Info(f"Goodbye!" + (c_out(Palette.DIM_CHROME, f"\nsession saved to {state.session_file}") if state.session_file else ""))]
+        info_events: list[Event] = [Info("Goodbye!")]
+        if state.session_file:
+            info_events.append(Info(f"session saved to {state.session_file}", colour=Palette.DIM_CHROME))
+        return replace(state, running=False), info_events
 
 
 @dataclass(frozen=True)
@@ -211,9 +214,8 @@ class ExecuteToolCalls(Event):
         result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments))
         last = self.index + 1 == len(round.tool_calls)
         # the echo is for the operator's eye, so it is short; the model gets the full result
-        echo = f"{c_out(Palette.TOOL_RESULT, shorten(result.content))}"
         return (replace(state, pending=state.pending.add_results(result)),
-                [Info(echo),
+                [Info(shorten(result.content), colour=Palette.TOOL_RESULT),
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
 

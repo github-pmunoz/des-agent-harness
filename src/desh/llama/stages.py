@@ -58,8 +58,7 @@ class ToolProgress(Stage):
         if channel == "tool_name":
             self._close()
             self.name, self.size, self.shown = text, 0, 0
-            pad_length = len("Assistant: ") #Fix for short tool names not redrawing the full "Assistant: " string
-            self.emit("tool", f"\r⚙ {text}".ljust(pad_length))
+            self.emit("tool", f"\r⚙ {text}")
         elif channel == "tool_args":
             self.size += len(text)
             if self.name is not None and self.size - self.shown >= self.step:
@@ -88,9 +87,14 @@ class Terminal(Stage):
     def __init__(self, out=None, colour: bool = True):
         super().__init__(None)
         self.out = out or sys.stdout
-        self.colour = colour and self.out.isatty()
+        self.tty = self.out.isatty()
+        self.colour = colour and self.tty
 
     def feed(self, channel: str, text: str) -> None:
+        if self.tty and text.startswith("\r"):
+            # A carriage return redraws over whatever the line already holds (the "Assistant: " prompt
+            # on the first tool call); erase to end of line so a shorter redraw leaves no tail.
+            text = "\r\033[K" + text[1:]
         if self.colour and self.COLOURS.get(channel):
             self.out.write(self.COLOURS[channel] + text + self.RESET)
         else:

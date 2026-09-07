@@ -18,8 +18,9 @@ class DisplayEvent(Event):
 @dataclass(frozen=True)
 class Info(DisplayEvent):
     text: str
+    colour: str = Palette.CHROME
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        print(c_out(Palette.CHROME, self.text))
+        print(c_out(self.colour, self.text))
         return state, []
 
 

@@ -25,7 +25,7 @@ class Palette:
     TOOL_ARG_KEY = "\033[36m"  # cyan: a tool argument key
     TOOL_ARG_VALUE = "\033[0m"  # default: a tool argument value
     TOOL_CONFIRM = "\033[32m"  # green: a tool confirm message
-    TOOL_RESULT = "\033[0m\033[2m"   # dim default: a tool result
+    TOOL_RESULT = "\033[2m"   # dim: a tool result
 
     def __init__(self, enabled: bool):
         self.enabled = enabled

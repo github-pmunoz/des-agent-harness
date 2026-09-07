@@ -70,7 +70,7 @@ def ask(tc: ToolCall) -> Answer:
                 except Exception:
                     pass
     choice_prompt = "[y]es / [n]o / [m]essage / [c]ancel: (ESC to cancel, ENTER for yes)"
-    print(c_out(Palette.CHROME, f"{"──"*(len(choice_prompt)//2)}"))
+    print(c_out(Palette.CHROME, "─" * len(choice_prompt)))
     while True:
         choice = key_prompt(choice_prompt)
         if choice is None:
@@ -92,38 +92,42 @@ def ask(tc: ToolCall) -> Answer:
 
 
 def shorten(text: str, limit: int = 200, indent: int = 4) -> str:
-    """At most `limit` characters, for terminal echoes of calls and results."""
-    short = text if len(text) <= limit else text[:limit - 1] + f" ... {len(text)} chars"
-    return "\n".join(f"{' '*indent}{line}" for line in short.splitlines())
+    """A tool result as the operator sees it echoed: line breaks kept, every line indented, and the
+    source trimmed to `limit` characters with a note of its full size. `limit` bounds the source
+    text, not the returned string, which is longer by the indent and the size note."""
+    short = text if len(text) <= limit else text[:limit] + f" ... {len(text)} chars"
+    return "\n".join(f"{' ' * indent}{line}" for line in short.splitlines())
 
 
 def describe_call(tc: ToolCall, tool: Optional[Tool] = None) -> str:
-    """The call as the operator must see it to approve it. A tool with a `preview` renders its own
-    (an Edit as a diff); otherwise one line per argument, multi-line values (file contents) as
-    indented blocks. Falls back to the raw wire string when the arguments are not a JSON object,
-    and to the generic rendering when a preview raises — the gate must always show something."""
+    """The call as the operator sees it, whether or not the tool asks for confirmation. A tool with
+    a `preview` renders its own (an Edit as a diff); otherwise one line per argument, multi-line
+    values (file contents) as indented blocks. Falls back to the raw wire string when the arguments
+    are not a JSON object, and to the generic rendering when a preview raises — the gate must
+    always show something."""
+    def key(text: str) -> str:
+        return c_out(Palette.TOOL_ARG_KEY, text)
+
+    def value(text: str) -> str:
+        return c_out(Palette.TOOL_ARG_VALUE, text)
+
     try:
         args = json.loads(tc.arguments)
     except ValueError:
         args = None
-    color_arrow = c_out(Palette.CHROME, f"→")
-    color_name = c_out(Palette.TOOL_NAME, f"{tc.name}")
+    head = f"{c_out(Palette.CHROME, '→')} {c_out(Palette.TOOL_NAME, tc.name)}"
     if not isinstance(args, dict) or not args:
-        color_args = c_out(Palette.TOOL_ARG_VALUE, f"{tc.arguments}")
-        return f"{color_arrow} {color_name}({color_args})"
+        return f"{head}({value(tc.arguments)})"
     if tool is not None and tool.preview is not None:
         try:
-            color_preview = c_out(Palette.TOOL_ARG_VALUE, f"({tool.preview(args)})")
-            return f"{color_arrow} {color_name}\n{color_preview}"
+            return f"{head}\n{tool.preview(args)}"
         except Exception:
             pass
-    color_key = c_out(Palette.TOOL_ARG_KEY, "{}")
-    color_value = c_out(Palette.TOOL_ARG_VALUE, "{}")
-    lines = [f"{color_arrow} {color_name}"]
-    for key, value in args.items():
-        if isinstance(value, str) and "\n" in value:
-            lines.append(f"  {color_key.format(key)}:")
-            lines.extend(f"    {color_value.format(line)}" for line in value.splitlines())
+    lines = [head]
+    for name, arg in args.items():
+        if isinstance(arg, str) and "\n" in arg:
+            lines.append(f"  {key(name)}:")
+            lines.extend(f"    {value(line)}" for line in arg.splitlines())
         else:
-            lines.append(f"  {color_key.format(key)}: {color_value.format(json.dumps(value, ensure_ascii=False))}")
+            lines.append(f"  {key(name)}: {value(json.dumps(arg, ensure_ascii=False))}")
     return "\n".join(lines)

@@ -248,7 +248,7 @@ class TestDescribeCall:
         tool = Tool.define(lambda a: a, name="T", description="t", parameters={"type": "object", "properties": {}},
                            preview=lambda args: f"PREVIEW of {args['a']}")
         tc = ToolCall(index=0, id="c", type="function", name="T", arguments='{"a": "x"}')
-        assert describe_call(tc, tool) == "→ T\n(PREVIEW of x)"
+        assert describe_call(tc, tool) == "→ T\nPREVIEW of x"
 
     def test_a_raising_preview_falls_back_to_the_generic_listing(self):
         def boom(args):
@@ -263,4 +263,4 @@ class TestDescribeCall:
 
     def test_shorten_indents_lines_and_bounded(self):
         assert shorten("a\nb") == "    a\n    b"
-        assert shorten("x" * 300) == "    " + "x" * 199 + " ... 300 chars"
+        assert shorten("x" * 300) == "    " + "x" * 200 + " ... 300 chars"
