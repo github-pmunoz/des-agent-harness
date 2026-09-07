@@ -170,6 +170,21 @@ class TestPromptUserParsing:
         assert events[0].command == "models"
         assert events[0].args == ""
 
+    def test_whitespace_prefixed_slash_input_becomes_command(self, make_state, monkeypatch):
+        # leading whitespace must not prevent command detection
+        monkeypatch.setattr("builtins.input", lambda prompt="": "   /exit")
+        _, events = PromptUser().execute(make_state())
+        assert len(events) == 1
+        assert isinstance(events[0], Command)
+        assert events[0].command == "exit"
+        assert events[0].args == ""
+
+    def test_whitespace_prefixed_slash_input_with_args(self, make_state, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda prompt="": "  /model model-b")
+        _, events = PromptUser().execute(make_state())
+        assert events[0].command == "model"
+        assert events[0].args == "model-b"
+
     def test_command_name_not_lowered(self, make_state, monkeypatch):
         # PromptUser does not lowercase — Command's own case-sensitivity
         # (test_command_surface.py's TestUnknownAndEdgeCases) is what

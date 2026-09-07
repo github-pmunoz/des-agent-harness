@@ -57,8 +57,9 @@ class PromptUser(Event):
             return state, [Exit()]
         if not user_input:
             return state, [MaybeRegenerate()]
-        if user_input[0] == "/":
+        if user_input.lstrip().startswith("/"):
             # command names are case-sensitive by design
+            user_input = user_input.lstrip()
             c = s = ""
             if " " in user_input:
                 c, s = user_input[1:].split(" ", 1)
