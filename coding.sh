@@ -4,6 +4,9 @@ DESH_HOME=$(dirname $0)
 SESSIONS_DIR="$DESH_HOME/.sessions"
 COMPLETIONS_LOG="$DESH_HOME/.completions.log"
 DES_LOG="$DESH_HOME/.des.log"
+MODEL="Qwen3.8-27B-UD-Q4_K_M-64K"
+CONTEXT=65536
+TURN_TOKENS=65536
 
 SYSTEM_PROMPT= <<'EOF'
 "You are a coding agent working inside one project directory. Use the tools to look before you act: Read a file before editing it, prefer Edit over Write for changes to existing files, and use Bash for listing, searching, running tests and anything else. Paths are relative to the project root. Every Write, Edit and Bash call is shown to the user for approval before it runs; a declined call comes back as a message explaining why — do not retry it, adapt. Reply concisely.
@@ -25,4 +28,4 @@ EOF
 
 cd "$DESH_HOME"
 mkdir -p "$SESSIONS_DIR"
-chat-des -sf ${SESSIONS_DIR} -cl ${COMPLETIONS_LOG} -dl ${DES_LOG} "$@" -sp "$SYSTEM_PROMPT" -mtr 100 -ts coding 
+chat-des -sf ${SESSIONS_DIR} -cl ${COMPLETIONS_LOG} -dl ${DES_LOG} "$@" -sp "$SYSTEM_PROMPT" -mtr 100 -ts coding -m "$MODEL" -c "$CONTEXT" -mt "$TURN_TOKENS"
