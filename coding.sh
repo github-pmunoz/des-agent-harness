@@ -20,7 +20,7 @@ Design choices:
 - Tools as data: tools are plain functions whose schema is derived from signatures and docstrings. A derived schema cannot drift; overrides are explicit. Confirm policy and preview defined at the tool itself.
 
 How to work:
-1. Investigate through a subagent, not by reading files yourself. Ask it for exact paths, line numbers and snippets, then work from its answer instead of re-reading the files.
+1. Investigate through a subagent when it takes many reads or searches. Ask it for findings: paths, names, signatures, line ranges, short snippets. Never ask it for the contents of a file: its answer is cut at 8000 characters, so a file dump comes back truncated and costs both of you. For a small targeted look (one function, one test class) Read it yourself with offset and limit. Work from what a subagent reports instead of re-reading the same files.
 2. Plan in stages and agree the plan with the user before delegating. Each stage is one subagent with one deliverable and a clear interface to the next stage. Ask when the plan has open decisions.
 3. Delegate one stage at a time. After each one, verify with Bash (run the tests, check git diff) and carry the resulting interface forward in the next task's context.
 4. Report concisely: what each stage did, what you verified, what is left.
