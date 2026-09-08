@@ -8,6 +8,7 @@ import sys
 import time
 import os
 import uuid
+from typing import TextIO
 
 from desh_chat.state import ChatState
 from desh.llama.logger import Logger
@@ -24,10 +25,14 @@ from desh_chat.coding import Workspace, edit_preview
 from desh_chat.delegate import with_delegate
 
 
-def build_tools(args: argparse.Namespace, inference: Type[InferenceEngine], settings: Settings) -> ToolRegistry:
-    """The toolsets are additive: each flag contributes its tools, none of them means no tools."""
+def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: Settings, *,
+                session_file: str | None = None, completions_log: Logger | None = None,
+                des_log: TextIO | None = None) -> ToolRegistry:
+    """The toolsets are additive: each flag contributes its tools, none of them means no tools.
+    The delegate tool is built from the RESOLVED session path, completions Logger and DES log file,
+    never from the raw flags: a subagent writes to the same log objects the parent's engine does."""
     ws = Workspace(args.workspace)
-    tools = ToolRegistry()
+    tools = ToolRegistry(debug=args.debug)
     if args.read:
         tools = tools.add(ws.read, name="Read", confirm=False)
     if args.write:
@@ -40,7 +45,7 @@ def build_tools(args: argparse.Namespace, inference: Type[InferenceEngine], sett
         tools = tools.add(current_time, name="Current time")
     if args.delegate:
         tools = with_delegate(tools, inference=inference, settings=settings, system_prompt=args.system_prompt,
-                              session_file=args.session, completions_log=args.completions_log, des_log=args.des_log, debug=args.debug)
+                              session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
     return tools
 
 
@@ -127,8 +132,8 @@ def main():
         models=client.models(),
         max_context=client.max_context()
     )
-    tools = build_tools(args, inference, settings)
     completions_log = Logger(args.completions_log) if args.completions_log else None
+    tools = build_tools(args, inference, settings, session_file=session_file, completions_log=completions_log, des_log=des_log)
     state = ChatState(
         settings=settings,
         inference=inference,

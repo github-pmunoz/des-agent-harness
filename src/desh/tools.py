@@ -26,6 +26,7 @@ import json
 import re
 import types
 import typing
+import traceback
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
 
@@ -158,6 +159,7 @@ class ToolRegistry:
     stays absent and the model cannot call anything."""
     tools: tuple[Tool, ...] = ()
     max_result_chars: int = 8000    # every result is bounded here so no tool can flood the context window
+    debug : bool = False
 
     def register(self, tool: Tool) -> ToolRegistry:
         if tool.name in self:
@@ -217,7 +219,7 @@ class ToolRegistry:
         try:
             result = tool.fn(**decoded)
         except Exception as e:
-            return f"Tool {name!r} raised {type(e).__name__}: {e}"
+            return f"Tool {name!r} raised {type(e).__name__}: {e}" +( f"\n{traceback.format_exc()}" if self.debug else "")
 
         if isinstance(result, str):
             return result

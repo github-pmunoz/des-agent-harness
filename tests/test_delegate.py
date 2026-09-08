@@ -54,6 +54,33 @@ def parent_with_delegate(make_state, server, tools=ToolRegistry(), **overrides):
 
 
 # ---------------------
+# CLI wiring: the delegate is built from the resolved objects, not the raw flags
+# ---------------------
+
+class TestCliWiring:
+    def test_build_tools_hands_the_delegate_the_resolved_logs_and_session(self, tmp_path):
+        """The flags are strings; the delegate needs what main() resolves them into — the parent's
+        session PATH (derived from --sessions-folder), the completions Logger and the open DES log
+        file — or the child engine writes to a str and its session file has no parent stem."""
+        import argparse
+        from desh.llama.logger import Logger
+        from desh_chat.cli import build_tools
+        args = argparse.Namespace(workspace=str(tmp_path), read=True, write=False, edit=False, bash=False,
+                                  current_time=False, delegate=True, system_prompt="sp", debug=False,
+                                  session="", sessions_folder=str(tmp_path), completions_log="c.jsonl", des_log="d.jsonl")
+        inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=FakeServer(script=[]), port=PORT)
+        session_file = str(tmp_path / "run1.json")
+        logger = Logger(str(tmp_path / "c.jsonl"))
+        with open(tmp_path / "d.jsonl", "a") as des_log:
+            tools = build_tools(args, inference, SETTINGS, session_file=session_file, completions_log=logger, des_log=des_log)
+            delegate = tools.get("delegate").fn.__self__
+            assert delegate.session_file == session_file
+            assert delegate.completions_log is logger
+            assert delegate.des_log is des_log
+            assert [t.name for t in tools.tools] == ["Read", "delegate"]
+
+
+# ---------------------
 # answer(): the child's final state as tool text
 # ---------------------
 
