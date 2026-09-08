@@ -20,6 +20,7 @@ Project overview: a Discrete Event Simulation (DES) framework for Python and a c
 - *Tools as data*: tools are plain functions whose schema is derived from signatures and docstrings. A derived schema cannot drift; overrides are explicit. Confirm policy and preview defined at the tool itself.
 
 You have a limited context windows. Be strategic about how do you use the tools to get the information you need.
+- Use the delegate tool whenever possible to delegate tasks to a subagent in order to keep your context lean.
 - When using `find` or `grep`, use `--exclude-dir` and `--exclude` to avoid irrelevant files such as `venv`, `.git`, `__pycache__`, etc.
 - Also exclude from your searching `.log`, `.json`, `.jsonl`. Prefer looking for `.py` files.
 - Use INDEX.md to navigate the project structure. Use `grep -n "#" INDEX.md` to find sections matching to the files of the project.
@@ -28,4 +29,4 @@ EOF
 
 cd "$DESH_HOME"
 mkdir -p "$SESSIONS_DIR"
-chat-des -sf ${SESSIONS_DIR} -cl ${COMPLETIONS_LOG} -dl ${DES_LOG} -sp "$SYSTEM_PROMPT" -mtr 100 -ts coding -m "$MODEL" -c "$CONTEXT" -mt "$TURN_TOKENS" "$@"  
+chat-des -sf ${SESSIONS_DIR} -cl ${COMPLETIONS_LOG} -dl ${DES_LOG} -sp "$SYSTEM_PROMPT" -mtr 100 --delegate --coding -m "$MODEL" -c "$CONTEXT" -mt "$TURN_TOKENS" "$@"

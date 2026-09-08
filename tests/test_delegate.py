@@ -1,0 +1,183 @@
+"""
+The delegate tool: a subagent is a nested Engine run whose final turn becomes the parent's tool
+result. Three layers are covered: what the parent reads for each way a child run can end
+(answer()), what a child is built from (settings, session file, tools), and the full loop —
+parent asks for delegate, child runs to drain on the same FakeServer script, parent answers —
+including the two exits that must NOT become tool text: a harness bug does, Ctrl+C does not.
+"""
+import os
+
+import pytest
+
+from desh.engine import Engine
+from desh.tools import ToolRegistry
+from desh_chat import gate
+from desh_chat.delegate import WORKER_NOTE, answer, child_session_file, child_settings, with_delegate
+from desh_chat.events import UserMessage
+from desh_chat.gate import Answer
+from desh_chat.state import ChatHistory, InferenceEngine, Round, Settings, ToolResult, Turn
+from desh.llama.wire import ToolCall
+
+from conftest import FakeServer, MAX_CONTEXT, MODELS, PORT
+
+
+SETTINGS = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, max_tool_rounds=3)
+
+
+def turn(assistant: str, rounds: int = 0, cancelled: bool = False) -> Turn:
+    tc = ToolCall(index=0, id="c", type="function", name="Read", arguments="{}")
+    return Turn("task", assistant, cancelled=cancelled,
+                rounds=tuple(Round("", (tc,), results=(ToolResult("c", "Read", "x"),)) for _ in range(rounds)))
+
+
+def child_of(make_state, *turns: Turn):
+    return make_state(settings=SETTINGS, history=ChatHistory(tuple(turns)), running=False)
+
+
+@pytest.fixture
+def always_yes(monkeypatch):
+    monkeypatch.setattr(gate, "ask", lambda tc: Answer("yes"))
+
+
+def with_server(make_state, server, **overrides):
+    inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT)
+    return inference, make_state(inference=inference, settings=SETTINGS, **overrides)
+
+
+def parent_with_delegate(make_state, server, tools=ToolRegistry(), **overrides):
+    """A parent state whose registry is `tools` plus delegate; subagents get `tools`. Not running,
+    so the parent drains after its turn instead of prompting for another."""
+    inference, state = with_server(make_state, server, running=False, **overrides)
+    registry = with_delegate(tools, inference=inference, settings=state.settings, system_prompt=state.system_prompt,
+                             session_file=state.session_file)
+    return state.__class__(**{**state.__dict__, "tools": registry})
+
+
+# ---------------------
+# answer(): the child's final state as tool text
+# ---------------------
+
+class TestAnswer:
+    def test_no_turn_means_the_request_never_fit(self, make_state):
+        assert "context window" in answer(child_of(make_state))
+
+    def test_cancelled_turn_is_reported_not_passed_on(self, make_state):
+        text = answer(child_of(make_state, turn("partial...", cancelled=True)))
+        assert "cancelled" in text and "partial" not in text
+
+    def test_plain_answer_is_returned_verbatim(self, make_state):
+        assert answer(child_of(make_state, turn("42", rounds=1))) == "42"
+
+    def test_empty_answer_is_named(self, make_state):
+        assert answer(child_of(make_state, turn(""))) == "(no answer)"
+
+    def test_using_every_round_qualifies_the_answer(self, make_state):
+        text = answer(child_of(make_state, turn("so far: x", rounds=SETTINGS.max_tool_rounds)))
+        assert text.startswith("so far: x") and f"all {SETTINGS.max_tool_rounds} tool rounds" in text
+
+    def test_round_cap_with_no_text_composes_both_notes(self, make_state):
+        text = answer(child_of(make_state, turn("", rounds=SETTINGS.max_tool_rounds)))
+        assert text.startswith("(no answer)") and "tool rounds" in text
+
+    def test_a_pending_turn_at_drain_is_a_harness_bug(self, make_state):
+        from desh_chat.state import PendingTurn
+        with pytest.raises(AssertionError):
+            answer(make_state(settings=SETTINGS, running=False, pending=PendingTurn("t")))
+
+
+# ---------------------
+# What a child is built from
+# ---------------------
+
+class TestChildSetup:
+    def test_child_settings_inherit_everything_but_compaction(self):
+        child = child_settings(SETTINGS)
+        assert child.compaction_threshold == float("inf")
+        assert {k: v for k, v in child.__dict__.items() if k != "compaction_threshold"} == \
+               {k: v for k, v in SETTINGS.__dict__.items() if k != "compaction_threshold"}
+
+    def test_child_session_file_sits_beside_the_parents(self):
+        path = child_session_file("/tmp/runs/abc.json")
+        assert os.path.dirname(path) == "/tmp/runs"
+        assert os.path.basename(path).startswith("abc.delegate-") and path.endswith(".json")
+        assert child_session_file(None) is None
+
+    def test_delegate_is_added_asking_and_subagents_do_not_get_it(self, make_state):
+        inference, state = with_server(make_state, FakeServer())
+        base = ToolRegistry().add(lambda: "x", name="Read", confirm=False)
+        registry = with_delegate(base, inference=inference, settings=SETTINGS, system_prompt="sp")
+        tool = registry.get("delegate")
+        assert tool is not None and tool.confirm is True
+        assert [t.name for t in registry.tools] == ["Read", "delegate"]
+        assert [t.name for t in tool.fn.__self__.tools.tools] == ["Read"]
+
+    def test_the_model_sees_task_and_context_only(self, make_state):
+        inference, _ = with_server(make_state, FakeServer())
+        params = with_delegate(ToolRegistry(), inference=inference, settings=SETTINGS, system_prompt="sp").get("delegate").parameters
+        assert set(params["properties"]) == {"task", "context"} and params["required"] == ["task"]
+
+
+# ---------------------
+# The full loop: parent -> child -> parent, one server script
+# ---------------------
+
+class TestFullLoop:
+    DELEGATION = {"tool_calls": [{"name": "delegate", "arguments": '{"task": "count the files", "context": "src only"}'}]}
+
+    def test_child_answer_is_the_parents_tool_result(self, make_state, always_yes, no_esc_watcher):
+        server = FakeServer(script=[self.DELEGATION, {"content": "There are 12 files."}, {"content": "Twelve."}])
+        state = parent_with_delegate(make_state, server)
+        final = Engine[type(state)]().run(state, seed=[UserMessage("how many files?")])
+        assert len(final.history.turns) == 1 and final.pending is None
+        parent_turn = final.history.turns[0]
+        assert parent_turn.assistant == "Twelve."
+        assert [r.content for r in parent_turn.rounds[0].results] == ["There are 12 files."]
+
+    def test_child_request_is_built_from_the_parents_prompt_plus_task_and_context(self, make_state, always_yes, no_esc_watcher):
+        server = FakeServer(script=[self.DELEGATION, {"content": "12"}, {"content": "12"}])
+        state = parent_with_delegate(make_state, server)
+        Engine[type(state)]().run(state, seed=[UserMessage("how many files?")])
+        _, child_req = server.calls[1]
+        system, user = child_req.messages
+        assert system["role"] == "system" and system["content"].startswith(state.system_prompt)
+        assert WORKER_NOTE in system["content"] and system["content"].endswith("src only")
+        assert user == {"role": "user", "content": "count the files"}
+        assert child_req.tools == []      # subagents of a tool-less parent have no tools, and never delegate
+        assert child_req.temperature == SETTINGS.temperature and child_req.model == SETTINGS.model
+
+    def test_child_keeps_its_own_session_file_beside_the_parents(self, make_state, always_yes, no_esc_watcher, tmp_path):
+        parent_file = str(tmp_path / "run.json")
+        server = FakeServer(script=[self.DELEGATION, {"content": "12"}, {"content": "12"}])
+        state = parent_with_delegate(make_state, server, session_file=parent_file)
+        Engine[type(state)]().run(state, seed=[UserMessage("how many files?")])
+        files = {p.name for p in tmp_path.iterdir()}
+        assert "run.json" in files and len(files) == 2
+        child_file, = files - {"run.json"}
+        assert child_file.startswith("run.delegate-") and child_file.endswith(".json")
+        import json
+        child_doc = json.load(open(tmp_path / child_file))
+        assert [t["assistant"] for t in child_doc["turns"]] == ["12"]
+        assert WORKER_NOTE in child_doc["meta"]["system_prompt"]
+
+    def test_a_bug_in_the_child_becomes_tool_text(self, make_state, always_yes, no_esc_watcher):
+        class Broken(FakeServer):
+            def stream(self, req, renderer, cancelled=lambda: False):
+                if len(self.calls) == 1:          # the child's first completion
+                    self.calls.append(("stream", req))
+                    raise RuntimeError("boom")
+                return super().stream(req, renderer, cancelled)
+        server = Broken(script=[self.DELEGATION, {"content": "ok, no child"}])
+        state = parent_with_delegate(make_state, server)
+        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        result = final.history.turns[0].rounds[0].results[0].content
+        assert result.startswith("Tool 'delegate' raised RuntimeError") and "boom" in result
+
+    def test_ctrl_c_in_the_child_reaches_the_parent(self, make_state, always_yes, no_esc_watcher):
+        class Interrupted(FakeServer):
+            def stream(self, req, renderer, cancelled=lambda: False):
+                if len(self.calls) == 1:
+                    raise KeyboardInterrupt
+                return super().stream(req, renderer, cancelled)
+        state = parent_with_delegate(make_state, Interrupted(script=[self.DELEGATION]))
+        with pytest.raises(KeyboardInterrupt):
+            Engine[type(state)]().run(state, seed=[UserMessage("go")])

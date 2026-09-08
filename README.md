@@ -56,7 +56,7 @@ chat-des \
   --context 16384 \
   --max-turn-tokens 8192 \
   --max-tool-rounds 10 \
-  --toolset coding \
+  --coding --delegate \
   --workspace . \
   --think
 ```
@@ -72,8 +72,10 @@ The most useful options are:
 | `--max-turn-tokens` | `8192` | Completion-token limit for one turn. |
 | `--max-tool-rounds` | `10` | Maximum number of tool-call rounds in a single turn. |
 | `--think` | off | Ask the server to enable reasoning/thinking. |
-| `--toolset` | `basic` | Tools offered to the model: `none`, `basic` (current time), or `coding`. |
-| `--workspace` | `.` | Root directory available to the `coding` toolset. |
+| `--basic` | off | Offer the basic tools (current time). Toolset flags are additive; none of them means no tools. |
+| `--coding` | off | Offer the coding tools: `Read`, `Write`, `Edit`, `Bash`. |
+| `--delegate` | off | Offer `delegate`: subagents with the same tools and settings, minus `delegate` itself. |
+| `--workspace` | `.` | Root directory available to the coding tools. |
 | `--session PATH` | none | Load an existing session or save the current session to `PATH`. |
 | `--sessions-folder DIR` | none | Create a uniquely named session file in `DIR`; ignored when `--session` is supplied. |
 | `--completions-log PATH` | none | Append successful model requests and completions as JSONL. |
@@ -82,9 +84,11 @@ The most useful options are:
 | `--timeout SECONDS` | derived from context | Per-request HTTP timeout; `0` derives one from `--context`. |
 | `--system-prompt TEXT` | toolset-specific | Override the default system prompt. |
 
-With `--toolset coding`, the model can `Read` without confirmation. `Write`, `Edit`, and `Bash` are shown for approval before they run, one call at a time. File paths are confined to `--workspace` (no escaping the root, no symlinks); `Bash` runs with the workspace as its working directory and must state a `reason` alongside the command. An `Edit` is shown as a diff.
+With `--coding`, the model can `Read` without confirmation. `Write`, `Edit`, and `Bash` are shown for approval before they run, one call at a time. File paths are confined to `--workspace` (no escaping the root, no symlinks); `Bash` runs with the workspace as its working directory and must state a `reason` alongside the command. An `Edit` is shown as a diff.
 
 At the approval prompt one key decides: `y` runs the call, `n` declines it, `m` declines it with a message the model reads as the tool result, `c` (or ESC) cancels the turn. Enter is `y`. A declined call short-circuits the rest of that round: the model sees the denial and adapts on its next round.
+
+With `--delegate`, the model can hand a self-contained task to a subagent and read back only its final answer, which keeps the reads and tool rounds of a subtask out of the main context window. The subagent is a nested engine run: it inherits the model, settings, system prompt and tools of the main agent (never `delegate` itself, so there is no nesting), streams to the terminal between two banner lines, and its confirmed tools ask for approval exactly as the main agent's do. Each delegation asks for approval, with the task and context shown. ESC or cancel inside the subagent ends only the subagent; the main agent reads that it was cancelled. When a session file is set, every subagent run keeps its own beside it, named `<session stem>.delegate-<timestamp>_<hash>.json`.
 
 ### In-chat commands
 
@@ -194,7 +198,7 @@ def search_notes(query: str, limit: int = 10) -> str:
 registry = ToolRegistry().add(search_notes, confirm=False)
 ```
 
-Pass the registry into your `ChatState`, or add it to a toolset builder in `desh_chat.cli.TOOLSETS`. Functions must accept keyword arguments and have supported type hints; a parameter without a usable hint fails at registration, not at the model's first call. `add()` also takes `name=` and `description=` overrides, `parameters={...}` as a JSON Schema escape hatch for unusual signatures, and `preview=` to render a call for approval in a custom way (the coding toolset's `Edit` shows a diff). Bound methods work too, which is how the coding toolset keeps its workspace root out of the schema.
+Pass the registry into your `ChatState`, or give it a flag in `desh_chat.cli.build_tools`. Functions must accept keyword arguments and have supported type hints; a parameter without a usable hint fails at registration, not at the model's first call. `add()` also takes `name=` and `description=` overrides, `parameters={...}` as a JSON Schema escape hatch for unusual signatures, and `preview=` to render a call for approval in a custom way (the coding toolset's `Edit` shows a diff). Bound methods work too, which is how the coding toolset keeps its workspace root out of the schema.
 
 ### Add a command
 
