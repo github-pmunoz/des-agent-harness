@@ -13,7 +13,7 @@ import pytest
 from conftest import MAX_CONTEXT, MODELS, PORT
 from desh.llama.wire import ToolCall
 from desh.tools import Tool, ToolRegistry, json_type, parameters_schema, parse_docstring
-from desh_chat.display import Info
+from desh_chat.display import DisplayStats, Info
 from desh_chat.events import ExecuteToolCalls, NextRound
 from desh_chat.state import InferenceEngine, PendingTurn, Round, ToolResult
 
@@ -292,12 +292,12 @@ class TestExecuteToolCallsWithRegistry:
         broken = ToolCall(index=1, id="call_b", type="function", name="divide", arguments='{"a": 1, "b": 0}')
         state = make_state(pending=PendingTurn("q").add_round(Round("", (weather, broken))), tools=REGISTRY)
         mid, events = ExecuteToolCalls().execute(state)          # one call per step
-        assert [type(e) for e in events] == [Info, ExecuteToolCalls]
-        new_state, events = events[1].execute(mid)
+        assert [type(e) for e in events] == [Info, DisplayStats, ExecuteToolCalls]
+        new_state, events = events[2].execute(mid)
         results = new_state.pending.rounds[-1].results
         assert results[0] == ToolResult("call_a", "get_weather", "Santiago: sunny")
         assert results[1].tool_call_id == "call_b" and "ZeroDivisionError" in results[1].content
-        assert [type(e) for e in events] == [Info, NextRound]
+        assert [type(e) for e in events] == [Info, DisplayStats, NextRound]
 
     def test_full_turn_with_a_real_tool(self, make_state, no_esc_watcher):
         from conftest import FakeServer

@@ -210,13 +210,14 @@ class ExecuteToolCalls(Event):
             shown: list[Event] = [Warn(f"✗ {tc.name} declined" + (f": {answer.message}" if answer.message else ""))]
             if skipped:
                 shown.append(Warn(f"  {len(skipped)} later call(s) not run: {', '.join(r.name for r in skipped)}"))
-            return replace(state, pending=state.pending.add_results(denied, *skipped)), shown + [NextRound()]
+            return replace(state, pending=state.pending.add_results(denied, *skipped)), shown + [DisplayStats(colour=Palette.TOOL_STATS), NextRound()]
 
         result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments))
         last = self.index + 1 == len(round.tool_calls)
         # the echo is for the operator's eye, so it is short; the model gets the full result
         return (replace(state, pending=state.pending.add_results(result)),
                 [Info(shorten(result.content), colour=Palette.TOOL_RESULT),
+                 DisplayStats(colour=Palette.TOOL_STATS),
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
 

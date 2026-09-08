@@ -56,9 +56,12 @@ class DisplayHistory(DisplayEvent):
 
 @dataclass(frozen=True)
 class DisplayStats(DisplayEvent):
+    colour: str = Palette.STATS_LINE
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        # This event also accounts for tokens during a pending turn
+        pending_tokens = ( state.pending.priced_tokens() + estimate_tokens( state.pending.unpriced_text())) if  state.pending is not None else 0
         sys_prompt_tokens = estimate_tokens(state.system_prompt)
-        window_tokens = sys_prompt_tokens + state.history.window_tokens()
-        total_tokens = sys_prompt_tokens + state.history.get_total_tokens()
-        print(c_out(Palette.STATS_LINE, f"Context: {window_tokens} / {state.settings.context} tokens ({window_tokens/state.settings.context*100.0:.1f}%) \t Session: {total_tokens}"))
+        window_tokens = sys_prompt_tokens + state.history.window_tokens() + pending_tokens
+        total_tokens = sys_prompt_tokens + state.history.get_total_tokens() + pending_tokens
+        print(c_out(self.colour, f"Context: {window_tokens} / {state.settings.context} tokens ({window_tokens/state.settings.context*100.0:.1f}%) \t Session: {total_tokens}"))
         return state, []

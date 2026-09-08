@@ -17,7 +17,7 @@ from desh.engine import Engine
 from desh.llama.wire import ToolCall
 from desh.tools import Tool, ToolRegistry
 from desh_chat import gate
-from desh_chat.display import Info, Warn
+from desh_chat.display import DisplayStats, Info, Warn
 from desh_chat.events import ExecuteToolCalls, NextRound, PromptUser, TurnEnd, UserMessage
 from desh_chat.gate import DENIED_TEXT, SKIPPED_TEXT, Answer
 from desh_chat.state import InferenceEngine, PendingTurn, Round
@@ -115,7 +115,7 @@ class TestWhoIsAsked:
         assert asked == []
         assert RAN == ["read a"]
         assert [r.name for r in state.pending.rounds[-1].results] == ["read_file", "format_disk"]
-        assert [type(e) for e in evs] == [Info, NextRound]
+        assert [type(e) for e in evs] == [Info, DisplayStats, NextRound]
 
     def test_empty_registry_never_asks(self, make_state, answers):
         asked = answers()
@@ -139,12 +139,12 @@ class TestAnswers:
         mid, evs = ExecuteToolCalls(0).execute(make_state(pending=pending_with(WRITE, READ), tools=REGISTRY))
         assert RAN == ["write a"]
         assert mid.pending.rounds[-1].results[0].content == "ok"
-        assert [type(e) for e in evs] == [Info, ExecuteToolCalls] and evs[1].index == 1
+        assert [type(e) for e in evs] == [Info, DisplayStats, ExecuteToolCalls] and evs[2].index == 1
 
     def test_last_call_hands_off_to_next_round(self, make_state, answers):
         answers(Answer("yes"))
         _, evs = ExecuteToolCalls(0).execute(make_state(pending=pending_with(WRITE), tools=REGISTRY))
-        assert [type(e) for e in evs] == [Info, NextRound]
+        assert [type(e) for e in evs] == [Info, DisplayStats, NextRound]
 
     def test_no_records_the_denial_and_skips_the_rest_without_asking(self, make_state, answers):
         asked = answers(Answer("no"))
@@ -155,13 +155,13 @@ class TestAnswers:
         assert [r.tool_call_id for r in results] == [READ.id, WRITE.id, DELETE.id, READ.id]   # every call answered
         assert results[1].content == DENIED_TEXT
         assert results[2].content == SKIPPED_TEXT and results[3].content == SKIPPED_TEXT
-        assert [type(e) for e in evs] == [Warn, Warn, NextRound]
+        assert [type(e) for e in evs] == [Warn, Warn, DisplayStats, NextRound]
         assert "write_file" in evs[0].text and "delete_file" in evs[1].text
 
     def test_no_on_the_last_call_has_nothing_to_skip(self, make_state, answers):
         answers(Answer("no"))
         _, evs = run_round(make_state(pending=pending_with(WRITE), tools=REGISTRY))
-        assert [type(e) for e in evs] == [Warn, NextRound]
+        assert [type(e) for e in evs] == [Warn, DisplayStats, NextRound]
 
     def test_message_replaces_the_denial_text_on_the_wire(self, make_state, answers):
         answers(Answer("no", message="never touch a; use b instead"))

@@ -26,6 +26,7 @@ class Palette:
     TOOL_ARG_VALUE = "\033[0m"  # default: a tool argument value
     TOOL_CONFIRM = "\033[32m"  # green: a tool confirm message
     TOOL_RESULT = "\033[2m"   # dim: a tool result
+    TOOL_STATS = "\033[0m\033[36m"  # dim cyan: context stats during tool execution
     PY_KEYWORD = "\033[1m\033[35m"  # bright magenta: a python keyword
     PY_BUILTIN = "\033[36m"   # cyan: a builtin name or type
     PY_CALL = "\033[94m"      # bright blue: a name the code introduced, being called

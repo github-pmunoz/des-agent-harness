@@ -17,7 +17,7 @@ from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 from desh.engine import Engine
 from desh.llama.wire import Request, ToolCall
 from desh.llama.tokens import estimate_tokens
-from desh_chat.display import Error, Info, Warn
+from desh_chat.display import DisplayStats, Error, Info, Warn
 from desh_chat.events import (
     AppendRound, ExecuteToolCalls, MaybeCompact, NextRound, PromptUser,
     StreamCompletion, TurnEnd, UserMessage,
@@ -192,13 +192,13 @@ class TestExecuteToolCalls:
         state = make_state(pending=PendingTurn("q").add_round(Round("", (WEATHER, TIME))))
         mid, events = ExecuteToolCalls().execute(state)
         assert [(r.tool_call_id, r.name) for r in mid.pending.rounds[-1].results] == [("call_0", "get_weather")]
-        assert [type(e) for e in events] == [Info, ExecuteToolCalls] and events[1].index == 1
+        assert [type(e) for e in events] == [Info, DisplayStats, ExecuteToolCalls] and events[2].index == 1
         assert "get_weather" in events[0].text
-        final, events = events[1].execute(mid)
+        final, events = events[2].execute(mid)
         results = final.pending.rounds[-1].results
         assert [(r.tool_call_id, r.name) for r in results] == [("call_0", "get_weather"), ("call_1", "get_time")]
         assert all("not available" in r.content for r in results)
-        assert [type(e) for e in events] == [Info, NextRound]
+        assert [type(e) for e in events] == [Info, DisplayStats, NextRound]
 
 
 # ---------------------
