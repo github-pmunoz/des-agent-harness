@@ -187,6 +187,56 @@ class TestAppendRound:
         assert events[1].assistant == "one more?" and events[1].tokens == 10 and events[1].cancelled is False
 
 
+def round_of(assistant, calls, contents, round_no) -> Round:
+    """A completed round whose call ids are fresh for round_no — as every real round's are — so a
+    guard that compares rounds must look at (name, arguments) and (name, content), never wire ids."""
+    fresh = tuple(call(tc.index, tc.name, tc.arguments, id=f"r{round_no}_{tc.index}") for tc in calls)
+    return Round(assistant, fresh, tuple(result(tc, c) for tc, c in zip(fresh, contents)), tokens=10)
+
+
+class TestAppendRoundLoopGuard:
+    """A model that asks for the same calls a third time, having twice seen the same results, is
+    looping: the third round is not recorded and the turn ends the way the round cap ends it."""
+
+    def two_identical_rounds(self, calls=(WEATHER,), contents=("sunny",)) -> PendingTurn:
+        return PendingTurn("q").add_round(round_of("trying", calls, contents, 1)).add_round(round_of("again", calls, contents, 2))
+
+    def test_a_third_identical_call_after_two_identical_results_ends_the_turn(self, make_state):
+        pending = self.two_identical_rounds()
+        third = call(0, id="r3_0")
+        new_state, events = AppendRound(assistant="one more?", tool_calls=(third,), tokens=10).execute(make_state(pending=pending))
+        assert new_state.pending == pending                    # the looping round is not recorded
+        assert isinstance(events[0], Warn) and "get_weather" in events[0].text
+        assert isinstance(events[1], TurnEnd) and events[1].cancelled is False and events[1].tokens == 10
+        assert "one more?" in events[1].assistant             # what the model said is kept...
+        assert "repeat" in events[1].assistant.lower()        # ...and the reader learns why it stopped
+
+    def test_two_identical_calls_are_allowed(self, make_state):
+        pending = PendingTurn("q").add_round(round_of("trying", (WEATHER,), ("sunny",), 1))
+        new_state, events = AppendRound(assistant="", tool_calls=(call(0, id="r2_0"),), tokens=10).execute(make_state(pending=pending))
+        assert len(new_state.pending.rounds) == 2 and events == [ExecuteToolCalls()]
+
+    def test_identical_calls_with_changing_results_are_polling_not_a_loop(self, make_state):
+        pending = PendingTurn("q").add_round(round_of("", (WEATHER,), ("pending",), 1)).add_round(round_of("", (WEATHER,), ("still pending",), 2))
+        new_state, events = AppendRound(assistant="", tool_calls=(call(0, id="r3_0"),), tokens=10).execute(make_state(pending=pending))
+        assert len(new_state.pending.rounds) == 3 and events == [ExecuteToolCalls()]
+
+    def test_a_changed_argument_breaks_the_streak(self, make_state):
+        pending = self.two_identical_rounds()
+        other = call(0, arguments='{"city": "Lima"}', id="r3_0")
+        new_state, events = AppendRound(assistant="", tool_calls=(other,), tokens=10).execute(make_state(pending=pending))
+        assert len(new_state.pending.rounds) == 3 and events == [ExecuteToolCalls()]
+
+    def test_the_whole_round_is_compared(self, make_state):
+        pending = self.two_identical_rounds(calls=(WEATHER, TIME), contents=("sunny", "10:00"))
+        same = (call(0, id="r3_0"), call(1, name="get_time", arguments='{"tz": "CLT"}', id="r3_1"))
+        _, events = AppendRound(assistant="", tool_calls=same, tokens=10).execute(make_state(pending=pending))
+        assert [type(e) for e in events] == [Warn, TurnEnd]
+        partly = (call(0, id="r3_0"), call(1, name="get_time", arguments='{"tz": "UTC"}', id="r3_1"))
+        new_state, events = AppendRound(assistant="", tool_calls=partly, tokens=10).execute(make_state(pending=pending))
+        assert len(new_state.pending.rounds) == 3 and events == [ExecuteToolCalls()]
+
+
 class TestExecuteToolCalls:
     def test_one_call_per_step_each_unavailable_then_the_next_round(self, make_state):
         state = make_state(pending=PendingTurn("q").add_round(Round("", (WEATHER, TIME))))

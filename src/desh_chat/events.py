@@ -10,6 +10,7 @@ graph.
 import readline
 import sys
 from dataclasses import dataclass, replace
+from typing import Any
 
 from desh.engine import Event, Priority
 from desh.render import Palette, c_out, rl_prompt
@@ -164,8 +165,10 @@ class StreamCompletion(Event):
 
 @dataclass(frozen=True)
 class AppendRound(Event):
-    """The model asked for tools. Record the round on the pending turn and go run them — unless the
-    turn has already used its round budget, in which case it ends here with whatever the model said."""
+    """The model asked for tools. Record the round on the pending turn and go run them.. Emits a 
+    warning and ends the turn if:
+        - turn has already used its round budget, in which case it ends here with whatever the model said.
+        - a third repeated request, after two identical rounds with identical results"""
     assistant: str
     tool_calls: tuple[ToolCall, ...]
     tokens: int = 0
@@ -175,6 +178,23 @@ class AppendRound(Event):
             return state, [Warn(f"Tool-call round cap reached ({state.settings.max_tool_rounds}); ending the turn without running "
                                 f"{', '.join(tc.name for tc in self.tool_calls)}."),
                            TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False)]
+        
+        # A model that asks for the same calls a third time, having twice seen the same results, is
+        # looping: the third round is not recorded and the turn ends the way the round cap ends it.
+        # OBS: The results comparison relies on every recorded round having one result per call
+        def shape(calls: tuple[ToolCall, ...]) -> tuple[tuple[str, str], ...]:
+            return tuple(sorted([(tc.name, tc.arguments) for tc in calls]))
+        has_tail = len(state.pending.rounds) >= 2
+        if has_tail:
+            last, before = state.pending.rounds[-1:], state.pending.rounds[-2:-1]
+            if last and before and shape(self.tool_calls) == shape(last[0].tool_calls) == shape(before[0].tool_calls) \
+                    and [r.content for r in last[0].results] == [r.content for r in before[0].results]:
+                names = ", ".join(tc.name for tc in self.tool_calls)
+                return state, [Warn(f"Repeated round: {names} asked for a third time with identical results; ending the turn."),
+                            TurnEnd(assistant=f"{self.assistant}\n[stopped: {names} repeated three times with identical results]",
+                                    tokens=self.tokens, cancelled=False)]
+
+            
         pending = state.pending.add_round(Round(self.assistant, self.tool_calls, tokens=self.tokens))
         return replace(state, pending=pending), [ExecuteToolCalls()]
 
