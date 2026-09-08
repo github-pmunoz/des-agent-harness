@@ -104,7 +104,8 @@ def main():
     Timeout:      {args.timeout}s
     Session:      {session_file or "-"}
     Tools:        {", ".join(t.name + (" (asks)" if t.confirm else "") for t in tools.tools) or "none"}{" + delegate (asks)" if args.delegate else ""}
-    Workspace:    {os.path.realpath(args.workspace) if args.coding else "-"}"""))
+    Workspace:    {os.path.realpath(args.workspace) if args.coding else "-"}
+    System:       {system_prompt[:40]}{f"...[{len(system_prompt) - 40} more chars]" if len(system_prompt) > 40 else ""}"""))
     print(c_out(Palette.CHROME, f"\n{"═"*50}"))
 
     # Setup logging
