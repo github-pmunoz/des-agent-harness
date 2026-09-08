@@ -40,15 +40,15 @@ EOF
 BIN="./src/desh_chat/cli.py"
 mkdir -p "$SESSIONS_DIR"
 $BIN \
-    -sf "$SESSIONS_DIR"\
-    -cl "$COMPLETIONS_LOG"\
-    -dl "$DES_LOG"\
-    -sp "$SYSTEM_PROMPT"\
-    -mtr "$MAX_TURN_ROUNDS"\
-    -m "$MODEL"\ 
-    -c "$CONTEXT"\
-    -mt "$TURN_TOKENS"\
-    --delegate\
-    --read\
-    --bash\
+    -sf "$SESSIONS_DIR" \
+    -cl "$COMPLETIONS_LOG" \
+    -dl "$DES_LOG" \
+    -sp "$SYSTEM_PROMPT" \
+    -m "$MODEL"\
+    -c $CONTEXT\
+    -mtr $MAX_TURN_ROUNDS \
+    -mt $TURN_TOKENS \
+    --delegate \
+    --read \
+    --bash \
     "$@"

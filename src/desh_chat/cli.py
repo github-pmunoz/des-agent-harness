@@ -24,7 +24,7 @@ from desh_chat.coding import Workspace, edit_preview
 from desh_chat.delegate import with_delegate
 
 
-def build_tools(args: argparse.Namespace) -> ToolRegistry:
+def build_tools(args: argparse.Namespace, inference: Type[InferenceEngine], settings: Settings) -> ToolRegistry:
     """The toolsets are additive: each flag contributes its tools, none of them means no tools."""
     ws = Workspace(args.workspace)
     tools = ToolRegistry()
@@ -39,7 +39,7 @@ def build_tools(args: argparse.Namespace) -> ToolRegistry:
     if args.current_time:
         tools = tools.add(current_time, name="Current time")
     if args.delegate:
-        tools = with_delegate(tools, inference=args.inference, settings=args.settings, system_prompt=args.system_prompt,
+        tools = with_delegate(tools, inference=inference, settings=settings, system_prompt=args.system_prompt,
                               session_file=args.session, completions_log=args.completions_log, des_log=args.des_log, debug=args.debug)
     return tools
 
@@ -97,26 +97,9 @@ def main():
 
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
     session_file = resolve_session_file(args.session, args.sessions_folder, run_id)
-    tools = build_tools(args)
     system_prompt = args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely."
 
-    print(c_out(Palette.CHROME, f"\n{"═"*50}"))
-    print(c_out(Palette.CHROME, f""" DES Chat v0.1
-    Server:       http://127.0.0.1:{args.port}
-    Model:        {args.model}
-    Temperature:  {args.temperature}
-    Think mode:   {"enabled" if args.think else "disabled"}
-    Context:      {args.context}
-    Turn tokens:  {args.max_turn_tokens}
-    Tool rounds:  {args.max_tool_rounds}
-    Compl log:    {args.completions_log}
-    DES log:      {args.des_log}
-    Debug:        {"enabled" if args.debug else "disabled"}
-    Timeout:      {args.timeout}s
-    Session:      {session_file or "-"}
-    Tools:        {", ".join(t.name + (" (asks)" if t.confirm else "") for t in tools.tools) or "none"}{" + delegate (asks)" if args.delegate else ""}
-    Workspace:    {os.path.realpath(args.workspace)}"""))
-    print(c_out(Palette.CHROME, f"\n{"═"*50}"))
+
 
     # Setup logging
     if args.des_log:
@@ -144,11 +127,8 @@ def main():
         models=client.models(),
         max_context=client.max_context()
     )
+    tools = build_tools(args, inference, settings)
     completions_log = Logger(args.completions_log) if args.completions_log else None
-    if args.delegate:
-        # subagents inherit what the parent has at this point: settings, prompt, tools, logs, session
-        tools = with_delegate(tools, inference=inference, settings=settings, system_prompt=system_prompt,
-                              session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
     state = ChatState(
         settings=settings,
         inference=inference,
@@ -167,6 +147,24 @@ def main():
         "max_turn_tokens": args.max_turn_tokens,
         "argv" : sys.argv[1:]
     }
+
+    print(c_out(Palette.CHROME, f"\n{"═"*50}"))
+    print(c_out(Palette.CHROME, f""" DES Chat v0.1
+    Server:       http://127.0.0.1:{args.port}
+    Model:        {args.model}
+    Temperature:  {args.temperature}
+    Think mode:   {"enabled" if args.think else "disabled"}
+    Context:      {args.context}
+    Turn tokens:  {args.max_turn_tokens}
+    Tool rounds:  {args.max_tool_rounds}
+    Compl log:    {args.completions_log}
+    DES log:      {args.des_log}
+    Debug:        {"enabled" if args.debug else "disabled"}
+    Timeout:      {args.timeout}s
+    Session:      {session_file or "-"}
+    Tools:        {", ".join(t.name + (" (asks)" if t.confirm else "") for t in tools.tools) or "none"}{" + delegate (asks)" if args.delegate else ""}
+    Workspace:    {os.path.realpath(args.workspace)}"""))
+    print(c_out(Palette.CHROME, f"\n{"═"*50}"))
     
     Engine[ChatState](
         des_log=des_log,
