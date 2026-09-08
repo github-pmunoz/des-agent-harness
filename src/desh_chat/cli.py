@@ -19,19 +19,28 @@ from desh_chat.events import PromptUser
 from desh_chat.session import LoadSession
 from desh_chat.state import ChatHistory, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
-from desh_chat.toolset import default_registry
-from desh_chat.coding import CODING_SYSTEM_PROMPT, coding_registry
+from desh_chat.toolset import current_time, ToolRegistry
+from desh_chat.coding import Workspace, edit_preview
 from desh_chat.delegate import with_delegate
 
 
-def build_tools(basic: bool, coding: bool, workspace: str) -> ToolRegistry:
-    """The toolsets are additive: each flag contributes its tools, none of them means no tools.
-    delegate is added afterwards by the caller, once the inputs its subagents inherit exist."""
+def build_tools(args: argparse.Namespace) -> ToolRegistry:
+    """The toolsets are additive: each flag contributes its tools, none of them means no tools."""
+    ws = Workspace(args.workspace)
     tools = ToolRegistry()
-    if basic:
-        tools = ToolRegistry(tools.tools + default_registry().tools)
-    if coding:
-        tools = ToolRegistry(tools.tools + coding_registry(workspace).tools)
+    if args.read:
+        tools = tools.add(ws.read, name="Read", confirm=False)
+    if args.write:
+        tools = tools.add(ws.write, name="Write")
+    if args.edit:
+        tools = tools.add(ws.edit, name="Edit", preview=edit_preview)
+    if args.bash:
+        tools = tools.add(ws.bash, name="Bash")
+    if args.current_time:
+        tools = tools.add(current_time, name="Current time")
+    if args.delegate:
+        tools = with_delegate(tools, inference=args.inference, settings=args.settings, system_prompt=args.system_prompt,
+                              session_file=args.session, completions_log=args.completions_log, des_log=args.des_log, debug=args.debug)
     return tools
 
 
@@ -76,18 +85,20 @@ def main():
     ap.add_argument("-s",   "--session",        default="", help="session file to load or create")
     ap.add_argument("-sf",  "--sessions-folder", default="", help="folder where a new session file is created per run")
     ap.add_argument("-d",   "--debug",          action="store_true", help="Enable debug output")
-    # toolsets are additive flags: any combination, none means the model is offered no tools
-    ap.add_argument("--basic",    action="store_true", help="offer the basic tools (current time)")
-    ap.add_argument("--coding",   action="store_true", help="offer the coding tools: Read, Write, Edit, Bash")
-    ap.add_argument("--delegate", action="store_true", help="offer delegate: subagents with the same tools and settings")
     ap.add_argument("-w",   "--workspace",      default=".", help="project root for the coding toolset")
+    # toolsets are additive flags: any combination, none means the model is offered no tools
+    ap.add_argument("--read",      action="store_true", help="offer the Read tool")
+    ap.add_argument("--write",     action="store_true", help="offer the Write tool")
+    ap.add_argument("--edit",      action="store_true", help="offer the Edit tool")
+    ap.add_argument("--bash",      action="store_true", help="offer the Bash tool")
+    ap.add_argument("--delegate", action="store_true", help="offer delegate: subagents with the same tools and settings")
+    ap.add_argument("--current_time", action="store_true", help="offer the current time")
     args = ap.parse_args()
 
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
     session_file = resolve_session_file(args.session, args.sessions_folder, run_id)
-    tools = build_tools(args.basic, args.coding, args.workspace)
-    system_prompt = args.system_prompt if args.system_prompt is not None else (
-        CODING_SYSTEM_PROMPT if args.coding else "You are a helpful assistant. Reply concisely.")
+    tools = build_tools(args)
+    system_prompt = args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely."
 
     print(c_out(Palette.CHROME, f"\n{"═"*50}"))
     print(c_out(Palette.CHROME, f""" DES Chat v0.1
@@ -104,8 +115,7 @@ def main():
     Timeout:      {args.timeout}s
     Session:      {session_file or "-"}
     Tools:        {", ".join(t.name + (" (asks)" if t.confirm else "") for t in tools.tools) or "none"}{" + delegate (asks)" if args.delegate else ""}
-    Workspace:    {os.path.realpath(args.workspace) if args.coding else "-"}
-    System:       {system_prompt[:40]}{f"...[{len(system_prompt) - 40} more chars]" if len(system_prompt) > 40 else ""}"""))
+    Workspace:    {os.path.realpath(args.workspace)}"""))
     print(c_out(Palette.CHROME, f"\n{"═"*50}"))
 
     # Setup logging

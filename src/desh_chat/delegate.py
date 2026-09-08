@@ -36,10 +36,9 @@ from desh_chat.state import ChatHistory, ChatState, InferenceEngine, Settings
 from desh_chat.events import UserMessage
 
 
-WORKER_NOTE = (
-    "You are handling a subtask delegated by another agent. Complete it using your tools, then reply "
-    "with your final answer only: what you found or did, concretely, without narrating the steps. "
-    "Your reply is all the delegating agent will see."
+DELEGATE_SYSTEM_PROMPT = (
+"You are a coding agent working inside one project directory. Use the tools to look before you act: Read a file before editing it, prefer Edit over Write for changes to existing files, and use Bash for listing, searching, running tests and anything else. Paths are relative to the project root. Every Write, Edit and Bash call is shown to the user for approval before it runs; a declined call comes back as a message explaining why — do not retry it, adapt."
+"You are handling a subtask delegated by another agent. Complete it using your tools, then reply with your final answer only: what you found or did, concretely, without narrating the steps. Your reply is all the delegating agent will see. If the task cannot be completed as specified, stop and report why."
 )
 
 
@@ -83,9 +82,7 @@ class Delegate:
             task: What the subagent must do and what it must report back, complete and specific.
             context: Background it needs that is not in the task: relevant facts, paths, constraints.
         """
-        system_prompt = self.system_prompt + "\n\n" + WORKER_NOTE
-        if context:
-            system_prompt += "\n\nContext from the delegating agent:\n" + context
+        system_prompt = DELEGATE_SYSTEM_PROMPT + ("\n\nContext from the delegating agent:\n" + context if context else "")
         session_file = child_session_file(self.session_file)
         child = ChatState(
             settings=self.settings,

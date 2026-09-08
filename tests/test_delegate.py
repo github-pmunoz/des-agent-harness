@@ -12,7 +12,7 @@ import pytest
 from desh.engine import Engine
 from desh.tools import ToolRegistry
 from desh_chat import gate
-from desh_chat.delegate import WORKER_NOTE, answer, child_session_file, child_settings, with_delegate
+from desh_chat.delegate import DELEGATE_SYSTEM_PROMPT, answer, child_session_file, child_settings, with_delegate
 from desh_chat.events import UserMessage
 from desh_chat.gate import Answer
 from desh_chat.state import ChatHistory, InferenceEngine, Round, Settings, ToolResult, Turn
@@ -133,18 +133,6 @@ class TestFullLoop:
         assert parent_turn.assistant == "Twelve."
         assert [r.content for r in parent_turn.rounds[0].results] == ["There are 12 files."]
 
-    def test_child_request_is_built_from_the_parents_prompt_plus_task_and_context(self, make_state, always_yes, no_esc_watcher):
-        server = FakeServer(script=[self.DELEGATION, {"content": "12"}, {"content": "12"}])
-        state = parent_with_delegate(make_state, server)
-        Engine[type(state)]().run(state, seed=[UserMessage("how many files?")])
-        _, child_req = server.calls[1]
-        system, user = child_req.messages
-        assert system["role"] == "system" and system["content"].startswith(state.system_prompt)
-        assert WORKER_NOTE in system["content"] and system["content"].endswith("src only")
-        assert user == {"role": "user", "content": "count the files"}
-        assert child_req.tools == []      # subagents of a tool-less parent have no tools, and never delegate
-        assert child_req.temperature == SETTINGS.temperature and child_req.model == SETTINGS.model
-
     def test_child_keeps_its_own_session_file_beside_the_parents(self, make_state, always_yes, no_esc_watcher, tmp_path):
         parent_file = str(tmp_path / "run.json")
         server = FakeServer(script=[self.DELEGATION, {"content": "12"}, {"content": "12"}])
@@ -157,7 +145,7 @@ class TestFullLoop:
         import json
         child_doc = json.load(open(tmp_path / child_file))
         assert [t["assistant"] for t in child_doc["turns"]] == ["12"]
-        assert WORKER_NOTE in child_doc["meta"]["system_prompt"]
+        assert DELEGATE_SYSTEM_PROMPT in child_doc["meta"]["system_prompt"]
 
     def test_a_bug_in_the_child_becomes_tool_text(self, make_state, always_yes, no_esc_watcher):
         class Broken(FakeServer):

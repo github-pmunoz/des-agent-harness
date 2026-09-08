@@ -25,15 +25,6 @@ from desh.render import Palette, c_out
 from desh.tools import ToolRegistry
 
 
-CODING_SYSTEM_PROMPT = (
-    "You are a coding agent working inside one project directory. Use the tools to look before you "
-    "act: Read a file before editing it, prefer Edit over Write for changes to existing files, and use "
-    "Bash for listing, searching, running tests and anything else. Paths are relative to the project "
-    "root. Every Write, Edit and Bash call is shown to the user for approval before it runs; a declined "
-    "call comes back as a message explaining why — do not retry it, adapt. Reply concisely."
-)
-
-
 @dataclass(frozen=True)
 class Workspace:
     """One project root. The tool methods below are what the model calls."""
