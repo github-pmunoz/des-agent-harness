@@ -24,6 +24,7 @@ class Palette:
     TOOL_NAME = "\033[1m\033[36m"  # bright cyan: a tool name
     TOOL_ARG_KEY = "\033[36m"  # cyan: a tool argument key
     TOOL_ARG_VALUE = "\033[0m"  # default: a tool argument value
+    TOOL_REASON = "\033[38;5;208m"  # orange: the value of a "reason" argument
     TOOL_CONFIRM = "\033[32m"  # green: a tool confirm message
     TOOL_RESULT = "\033[2m"   # dim: a tool result
     TOOL_STATS = "\033[0m\033[36m"  # dim cyan: context stats during tool execution

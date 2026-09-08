@@ -108,8 +108,8 @@ def describe_call(tc: ToolCall, tool: Optional[Tool] = None) -> str:
     def key(text: str) -> str:
         return c_out(Palette.TOOL_ARG_KEY, text)
 
-    def value(text: str) -> str:
-        return c_out(Palette.TOOL_ARG_VALUE, text)
+    def value(text: str, reason: bool = False) -> str:
+        return c_out(Palette.TOOL_REASON if reason else Palette.TOOL_ARG_VALUE, text)
 
     try:
         args = json.loads(tc.arguments)
@@ -124,10 +124,10 @@ def describe_call(tc: ToolCall, tool: Optional[Tool] = None) -> str:
         except Exception:
             pass
     lines = [head]
-    for name, arg in args.items():
+    for name, arg in sorted(args.items()):
         if isinstance(arg, str) and "\n" in arg:
             lines.append(f"  {key(name)}:")
-            lines.extend(f"    {value(line)}" for line in arg.splitlines())
+            lines.extend(f"    {value(line, reason=name == 'reason')}" for line in arg.splitlines())
         else:
-            lines.append(f"  {key(name)}: {value(json.dumps(arg, ensure_ascii=False))}")
+            lines.append(f"  {key(name)}: {value(json.dumps(arg, ensure_ascii=False), reason=name == 'reason')}")
     return "\n".join(lines)

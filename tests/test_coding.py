@@ -234,11 +234,27 @@ class TestEditPreview:
 class TestDescribeCall:
     def test_multi_line_values_become_blocks(self):
         tc = ToolCall(index=0, id="c", type="function", name="Write", arguments='{"file_path": "a.py", "content": "x = 1\\ny = 2\\n"}')
-        assert describe_call(tc).splitlines() == ["→ Write", '  file_path: "a.py"', "  content:", "    x = 1", "    y = 2"]
+        assert describe_call(tc).splitlines() == ["→ Write", "  content:", "    x = 1", "    y = 2", '  file_path: "a.py"']
 
-    def test_scalar_values_stay_inline_in_wire_order(self):
-        tc = ToolCall(index=0, id="c", type="function", name="Bash", arguments='{"reason": "list files", "command": "ls", "timeout": 5}')
-        assert describe_call(tc) == '→ Bash\n  reason: "list files"\n  command: "ls"\n  timeout: 5'
+    def test_scalar_values_are_shown_in_sorted_key_order(self):
+        tc = ToolCall(index=0, id="c", type="function", name="Bash", arguments='{"timeout": 5, "reason": "list files", "command": "ls"}')
+        assert describe_call(tc) == '→ Bash\n  command: "ls"\n  reason: "list files"\n  timeout: 5'
+
+    def test_the_reason_value_is_rendered_in_the_reason_colour(self, monkeypatch):
+        from desh import render
+        monkeypatch.setattr(render.c_out, "enabled", True)
+        tc = ToolCall(index=0, id="c", type="function", name="Bash", arguments='{"command": "ls", "reason": "list files"}')
+        out = describe_call(tc)
+        assert '\033[38;5;208m"list files"' in out
+        assert '\033[0m"ls"' in out
+
+    def test_only_the_reason_key_gets_the_reason_colour(self, monkeypatch):
+        from desh import render
+        monkeypatch.setattr(render.c_out, "enabled", True)
+        tc = ToolCall(index=0, id="c", type="function", name="Bash", arguments='{"reason": "list files", "command": "ls"}')
+        out = describe_call(tc)
+        assert "\033[38;5;208m" in out
+        assert '\033[38;5;208m"ls"' not in out
 
     def test_non_object_arguments_fall_back_to_the_wire_string(self):
         assert describe_call(ToolCall(index=0, id="c", type="function", name="T", arguments="oops")) == "→ T(oops)"
