@@ -21,7 +21,7 @@ EOF
 )
 
 # Append README.md and INDEX.md to the system prompt to explain the project and the design
-SYSTEM_PROMPT="$SYSTEM_PROMPT\n\nREADME.md:\n$(cat README.md)\n\nINDEX.md:\n$(cat INDEX.md)"
+SYSTEM_PROMPT="$SYSTEM_PROMPT$'\n\n'README.md:$'\n'$(cat README.md)\n\nINDEX.md:$'\n'$(cat INDEX.md)"
 
 BIN="./src/desh_chat/cli.py"
 mkdir -p "$SESSIONS_DIR"
