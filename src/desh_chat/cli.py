@@ -9,6 +9,7 @@ import time
 import os
 import uuid
 from typing import TextIO
+from dataclasses import replace
 
 from desh_chat.state import ChatState
 from desh.llama.logger import Logger
@@ -22,7 +23,7 @@ from desh_chat.state import ChatHistory, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
 from desh_chat.coding import Workspace, edit_preview
-from desh_chat.delegate import with_delegate
+from desh_chat.delegate import Delegate
 
 
 def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: Settings, *,
@@ -44,8 +45,15 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     if args.current_time:
         tools = tools.add(current_time, name="Current time")
     if args.delegate:
-        tools = with_delegate(tools, inference=inference, settings=settings, system_prompt=args.system_prompt,
-                              session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
+        delegate_tools = ToolRegistry(debug=args.debug)
+        delegate_tools = (delegate_tools.add(ws.read, name="Read", confirm=False)
+                          .add(ws.write, name="Write")
+                          .add(ws.edit, name="Edit", preview=edit_preview)
+                          .add(ws.bash, name="Bash"))
+        delegate_settings = replace(settings, compaction_threshold=2.0, model="Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-256K", context=262144, max_turn_tokens=262144)
+        delegate = Delegate(inference=inference, settings=delegate_settings, tools=delegate_tools,
+                            session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
+        tools = tools.add(delegate.delegate, name="delegate")
     return tools
 
 
@@ -167,8 +175,10 @@ def main():
     Debug:        {"enabled" if args.debug else "disabled"}
     Timeout:      {args.timeout}s
     Session:      {session_file or "-"}
-    Tools:        {", ".join(t.name + (" (asks)" if t.confirm else "") for t in tools.tools) or "none"}{" + delegate (asks)" if args.delegate else ""}
-    Workspace:    {os.path.realpath(args.workspace)}"""))
+    Tools:        {", ".join(t.name + (" (asks)" if t.confirm else "") for t in tools.tools) or "none"}
+    Workspace:    {os.path.realpath(args.workspace)}
+    System prompt:{args.system_prompt[0:40] if args.system_prompt else "none"}{"..." if len(args.system_prompt) > 40 else ""}
+"""))
     print(c_out(Palette.CHROME, f"\n{"═"*50}"))
     
     Engine[ChatState](
