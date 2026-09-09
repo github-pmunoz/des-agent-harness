@@ -138,10 +138,10 @@ class TestChildSetup:
         assert [t.name for t in registry.tools] == ["Read", "delegate"]
         assert [t.name for t in tool.fn.__self__.tools.tools] == ["Read"]
 
-    def test_the_model_sees_task_and_context_only(self, make_state):
+    def test_the_model_sees_the_full_signature(self, make_state):
         inference, _ = with_server(make_state, FakeServer())
         params = with_delegate(ToolRegistry(), inference=inference, settings=SETTINGS, system_prompt="sp").get("delegate").parameters
-        assert set(params["properties"]) == {"task", "context"} and params["required"] == ["task"]
+        assert set(params["properties"]) == {"task", "context", "gate", "check"} and params["required"] == ["task"]
 
 
 # ---------------------
@@ -196,3 +196,70 @@ class TestFullLoop:
         state = parent_with_delegate(make_state, Interrupted(script=[self.DELEGATION]))
         with pytest.raises(KeyboardInterrupt):
             Engine[type(state)]().run(state, seed=[UserMessage("go")])
+
+
+# ---------------------
+# gate and check: optional parameters on the delegate tool
+# ---------------------
+
+class TestGateAndCheck:
+    def test_schema_pins_four_parameters(self, make_state):
+        registry = with_delegate(ToolRegistry(), inference=InferenceEngine(models=MODELS, max_context=MAX_CONTEXT,
+                                                                           server=FakeServer(script=[]), port=PORT),
+                                 settings=SETTINGS, system_prompt="sp")
+        schema = registry.get("delegate").parameters
+        assert set(schema["properties"]) == {"task", "context", "gate", "check"}
+        assert schema["required"] == ["task"]
+        assert schema["properties"]["gate"]["description"]
+        assert schema["properties"]["check"]["description"]
+
+    def test_gate_is_appended_to_the_child_system_prompt(self, make_state, always_yes, no_esc_watcher):
+        script = {"tool_calls": [{"name": "delegate",
+                                  "arguments": '{"task": "count the files", "context": "src only", "gate": "report a number"}'}]}
+        server = FakeServer(script=[script, {"content": "12"}, {"content": "12"}])
+        state = parent_with_delegate(make_state, server)
+        Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        child_req = server.calls[1][1]
+        system = child_req.messages[0]["content"]
+        assert "Context from the delegating agent:\nsrc only" in system
+        assert system.endswith("\n\nSuccess criterion:\nreport a number")
+
+    def test_check_block_is_appended_on_success(self, make_state, always_yes, no_esc_watcher):
+        script = {"tool_calls": [{"name": "delegate",
+                                  "arguments": '{"task": "count the files", "check": "printf \'ok line1\\\\nok line2\\\\n\'"}'}]}
+        server = FakeServer(script=[script, {"content": "12"}, {"content": "12"}])
+        state = parent_with_delegate(make_state, server)
+        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        result = final.history.turns[0].rounds[0].results[0].content
+        assert result.endswith(
+            "[check `printf 'ok line1\\nok line2\\n'`: exit 0]\n"
+            "ok line1\n"
+            "ok line2"
+        )
+
+    def test_check_failure_is_a_result_not_an_error(self, make_state, always_yes, no_esc_watcher):
+        script = {"tool_calls": [{"name": "delegate", "arguments": '{"task": "count the files", "check": "exit 3"}'}]}
+        server = FakeServer(script=[script, {"content": "12"}, {"content": "12"}])
+        state = parent_with_delegate(make_state, server)
+        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        result = final.history.turns[0].rounds[0].results[0].content
+        assert "raised" not in result
+        assert result.endswith("[check `exit 3`: exit 3]")
+
+    def test_check_is_skipped_when_the_child_produced_no_answer(self, make_state, always_yes, no_esc_watcher):
+        script = {"tool_calls": [{"name": "delegate", "arguments": '{"task": "count the files", "check": "echo ran"}'}]}
+        server = FakeServer(script=[script, {"content": "partial...", "finish_reason": "cancelled"}, {"content": "done"}])
+        state = parent_with_delegate(make_state, server)
+        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        result = final.history.turns[0].rounds[0].results[0].content
+        assert "cancelled" in result and "[check" not in result
+
+    def test_check_command_is_invisible_to_the_child(self, make_state, always_yes, no_esc_watcher):
+        script = {"tool_calls": [{"name": "delegate",
+                                  "arguments": '{"task": "count the files", "context": "src only", "gate": "report a number", "check": "echo secret-check"}'}]}
+        server = FakeServer(script=[script, {"content": "12"}, {"content": "12"}])
+        state = parent_with_delegate(make_state, server)
+        Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        child_req = server.calls[1][1]
+        blob = child_req.messages[0]["content"] + "".join(m["content"] for m in child_req.messages[1:])
+        assert "secret-check" not in blob

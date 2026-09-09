@@ -23,6 +23,7 @@ work the parent never saw stays inspectable.
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -71,7 +72,7 @@ class Delegate:
     des_log: TextIO | None = field(default=None, repr=False)
     debug: bool = False
 
-    def delegate(self, task: str, context: str = "") -> str:
+    def delegate(self, task: str, context: str = "", gate: str = "", check: str = "") -> str:
         """Hand a self-contained task to a subagent and get back only its final answer. Use it
         to keep your own context small: the subagent does the reading, searching and tool calls in
         its own conversation, and none of that comes back to you, only the answer. Prefer it for
@@ -82,8 +83,12 @@ class Delegate:
         Args:
             task: What the subagent must do and what it must report back, complete and specific.
             context: Background it needs that is not in the task: relevant facts, paths, constraints.
+            gate: The success criterion in words: when the subagent is done. Appended to the subagent's instructions, so it knows what "done" means.
+            check: A shell command the harness runs in the project root after the subagent finishes; its exit code and last output lines are appended to the answer you receive. The subagent never sees it.
         """
         system_prompt = DELEGATE_SYSTEM_PROMPT + ("\n\nContext from the delegating agent:\n" + context if context else "")
+        if gate:
+            system_prompt += "\n\nSuccess criterion:\n" + gate
         session_file = child_session_file(self.session_file)
         child = ChatState(
             settings=self.settings,
@@ -101,8 +106,33 @@ class Delegate:
                 child, seed=[UserMessage(task)], log_header={"delegate": True, "session": session_file})
         finally:
             print(c_out(Palette.CHROME, "╰─ delegate ─ back to the main agent"))
-        return answer(final)
+        has_answer = bool(final.history.turns) and not final.history.turns[0].cancelled and final.history.turns[0].assistant != ""
+        text = answer(final)
+        return self._checked(text, check) if has_answer else text
 
+    def _checked(self, text: str, check: str) -> str:
+        """Append the check block to a real answer. Canned strings are not checked by this 
+        method and are assumed to be checked earlier. The check runs in the project root
+        and must never raise — a timeout or a crash is reported inside the block."""
+        if not check:
+            return text
+        code, output, note = 0, "", ""
+        try:
+            proc = subprocess.run(check, shell=True, capture_output=True, text=True, timeout=60)
+            code, output = proc.returncode, (proc.stdout + proc.stderr).strip()
+        except subprocess.TimeoutExpired:
+            note = "timed out after 60s"
+        except Exception as e:
+            note = str(e)
+        block = "\n".join(output.splitlines()[-20:])
+        if len(block) > 2000:
+            block = block[-2000:]
+        suffix = f"\n\n[check `{check}`: exit {code}]"
+        if block:
+            suffix += f"\n{block}"
+        if note:
+            suffix += f"\n{note}"
+        return text + suffix
 
 def answer(state: ChatState) -> str:
     """The subagent's final state as the text the parent's model reads.
