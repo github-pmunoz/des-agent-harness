@@ -50,7 +50,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
                           .add(ws.write, name="Write")
                           .add(ws.edit, name="Edit", preview=edit_preview)
                           .add(ws.bash, name="Bash"))
-        delegate_settings = replace(settings, compaction_threshold=2.0, model="Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-256K", context=262144, max_turn_tokens=262144)
+        delegate_settings = replace(settings, compaction_threshold=2.0)
         delegate = Delegate(inference=inference, settings=delegate_settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
         tools = tools.add(delegate.delegate, name="delegate")
@@ -90,7 +90,7 @@ def main():
     ap.add_argument("-c",   "--context",        type=int, default=16384, help="context window size")
     ap.add_argument("-mt",  "--max-turn-tokens",type=int, default=8192, help="max tokens per turn")
     ap.add_argument("-mtr",  "--max-tool-rounds",type=int, default=10, help="max tool rounds per turn")
-    ap.add_argument("-sp",  "--system-prompt",  default=None, help="default: a plain assistant prompt, or the coding-agent prompt with --coding")
+    ap.add_argument("-sp",  "--system-prompt",  default="You are a helpful assistant. Reply concisely.", help="default: a plain assistant prompt, or the coding-agent prompt with --coding")
     ap.add_argument("-th",  "--think",          action="store_true", help="enable thinking")
     ap.add_argument("-cl",  "--completions-log", default="", help="JSONL telemetry file")
     ap.add_argument("-dl",  "--des-log",        default="", help="DES engine log")
