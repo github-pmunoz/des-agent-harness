@@ -16,14 +16,17 @@ parent at startup (the operator's choice, not the model's), minus delegate itsel
 cannot delegate.
 
 The child streams to the terminal exactly as the parent does and its confirmed tools ask the
-operator exactly as the parent's do; a banner marks the hand-over and the return. When the parent
+operator exactly as the parent's do; a banner marks the hand-over and the return, and every line
+in between is drawn behind a gutter (sys.stdout is wrapped for the duration). When the parent
 keeps a session file, each subagent run keeps its own beside it, named from the parent's, so the
 work the parent never saw stays inspectable.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -31,7 +34,7 @@ from typing import TextIO
 
 from desh.engine import Engine
 from desh.llama.logger import Logger
-from desh.render import Palette, c_out
+from desh.render import Gutter, Palette, c_out
 from desh.tools import ToolRegistry
 from desh_chat.state import ChatHistory, ChatState, InferenceEngine, Settings
 from desh_chat.events import UserMessage
@@ -104,8 +107,12 @@ class Delegate:
         )
         print(c_out(Palette.CHROME, "╭─ delegate ─ subagent starts" + (f" ({session_file})" if session_file else "")))
         try:
-            final = Engine[ChatState](des_log=self.des_log, debug=self.debug).run(
-                child, seed=[UserMessage(task)], log_header={"delegate": True, "session": session_file})
+            # Everything the child prints — its streamed answer, tool echoes, results, prompts —
+            # goes through sys.stdout, so one redirect for the duration of the run draws the gutter.
+            # The prefix starts with a reset: it is drawn in whatever colour state the child left.
+            with contextlib.redirect_stdout(Gutter(sys.stdout, c_out(Palette.RESET + Palette.CHROME, "│") + " ")):
+                final = Engine[ChatState](des_log=self.des_log, debug=self.debug).run(
+                    child, seed=[UserMessage(task)], log_header={"delegate": True, "session": session_file})
         finally:
             print(c_out(Palette.CHROME, "╰─ delegate ─ back to the main agent"))
         has_answer = bool(final.history.turns) and not final.history.turns[0].cancelled and final.history.turns[0].assistant != ""

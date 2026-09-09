@@ -12,7 +12,7 @@ import pytest
 from desh.engine import Engine
 from desh.tools import ToolRegistry
 from desh_chat import gate
-from desh_chat.delegate import DELEGATE_SYSTEM_PROMPT, answer, child_session_file, child_settings, with_delegate
+from desh_chat.delegate import DELEGATE_SYSTEM_PROMPT, Delegate, answer, child_session_file, child_settings
 from desh_chat.events import UserMessage
 from desh_chat.gate import Answer
 from desh_chat.state import ChatHistory, InferenceEngine, Round, Settings, ToolResult, Turn
@@ -42,6 +42,13 @@ def always_yes(monkeypatch):
 def with_server(make_state, server, **overrides):
     inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT)
     return inference, make_state(inference=inference, settings=SETTINGS, **overrides)
+
+
+def with_delegate(tools: ToolRegistry, *, inference, settings, system_prompt="", session_file=None) -> ToolRegistry:
+    """`tools` plus the delegate tool, whose subagents get `tools` as given — without delegate.
+    What cli.build_tools does for the real run, minus the per-flag toolsets."""
+    d = Delegate(inference=inference, settings=settings, system_prompt=system_prompt, tools=tools, session_file=session_file)
+    return tools.add(d.delegate, name="delegate")
 
 
 def parent_with_delegate(make_state, server, tools=ToolRegistry(), **overrides):
