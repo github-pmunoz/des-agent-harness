@@ -44,19 +44,19 @@ def with_server(make_state, server, **overrides):
     return inference, make_state(inference=inference, settings=SETTINGS, **overrides)
 
 
-def with_delegate(tools: ToolRegistry, *, inference, settings, system_prompt="", session_file=None) -> ToolRegistry:
+def with_delegate(tools: ToolRegistry, *, inference, settings, system_prompt="", session_file=None, root=".") -> ToolRegistry:
     """`tools` plus the delegate tool, whose subagents get `tools` as given — without delegate.
     What cli.build_tools does for the real run, minus the per-flag toolsets."""
-    d = Delegate(inference=inference, settings=settings, system_prompt=system_prompt, tools=tools, session_file=session_file)
+    d = Delegate(root=root, inference=inference, settings=settings, system_prompt=system_prompt, tools=tools, session_file=session_file)
     return tools.add(d.delegate, name="delegate")
 
 
-def parent_with_delegate(make_state, server, tools=ToolRegistry(), **overrides):
+def parent_with_delegate(make_state, server, tools=ToolRegistry(), delegate_root=".", **overrides):
     """A parent state whose registry is `tools` plus delegate; subagents get `tools`. Not running,
     so the parent drains after its turn instead of prompting for another."""
     inference, state = with_server(make_state, server, running=False, **overrides)
     registry = with_delegate(tools, inference=inference, settings=state.settings, system_prompt=state.system_prompt,
-                             session_file=state.session_file)
+                             session_file=state.session_file, root=delegate_root)
     return state.__class__(**{**state.__dict__, "tools": registry})
 
 
@@ -260,6 +260,20 @@ class TestGateAndCheck:
         final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
         result = final.history.turns[0].rounds[0].results[0].content
         assert "cancelled" in result and "[check" not in result
+
+    def test_check_runs_in_the_specified_root(self, make_state, always_yes, no_esc_watcher, tmp_path):
+        """The check command must run with cwd set to the delegate's root, not the harness's own
+        directory: a command that only succeeds from the right place proves where it ran."""
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "marker.txt").write_text("here")
+        script = {"tool_calls": [{"name": "delegate",
+                                  "arguments": '{"task": "count the files", "check": "pwd && test -f marker.txt && echo found"}'}]}
+        server = FakeServer(script=[script, {"content": "12"}, {"content": "12"}])
+        state = parent_with_delegate(make_state, server, delegate_root=str(root))
+        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        result = final.history.turns[0].rounds[0].results[0].content
+        assert result.endswith(f"[check `pwd && test -f marker.txt && echo found`: exit 0]\n{root}\nfound")
 
     def test_check_command_is_invisible_to_the_child(self, make_state, always_yes, no_esc_watcher):
         script = {"tool_calls": [{"name": "delegate",

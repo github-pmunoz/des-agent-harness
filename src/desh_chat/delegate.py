@@ -68,6 +68,7 @@ def child_session_file(parent: str | None) -> str | None:
 class Delegate:
     """What every subagent is built from. The tool method below is what the model calls; the
     registry derives its schema from the method alone, so none of these fields reach the model."""
+    root: str
     inference: InferenceEngine = field(repr=False)
     settings: Settings
     system_prompt: str = ""
@@ -127,7 +128,7 @@ class Delegate:
             return text
         code, output, note = 0, "", ""
         try:
-            proc = subprocess.run(check, shell=True, capture_output=True, text=True, timeout=60)
+            proc = subprocess.run(check, shell=True, cwd=self.root, capture_output=True, text=True, timeout=60)
             code, output = proc.returncode, (proc.stdout + proc.stderr).strip()
         except subprocess.TimeoutExpired:
             note = "timed out after 60s"

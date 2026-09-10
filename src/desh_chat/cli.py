@@ -51,7 +51,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
                           .add(ws.edit, name="Edit", preview=edit_preview)
                           .add(ws.bash, name="Bash"))
         delegate_settings = replace(settings, compaction_threshold=2.0)
-        delegate = Delegate(inference=inference, settings=delegate_settings, tools=delegate_tools,
+        delegate = Delegate(root=ws.root, inference=inference, settings=delegate_settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
         tools = tools.add(delegate.delegate, name="delegate")
     return tools
