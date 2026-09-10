@@ -56,7 +56,7 @@ chat-des \
   --context 16384 \
   --max-turn-tokens 8192 \
   --max-tool-rounds 10 \
-  --coding --delegate \
+  --read --write --edit --bash --delegate \
   --workspace . \
   --think
 ```
@@ -72,8 +72,11 @@ The most useful options are:
 | `--max-turn-tokens` | `8192` | Completion-token limit for one turn. |
 | `--max-tool-rounds` | `10` | Maximum number of tool-call rounds in a single turn. |
 | `--think` | off | Ask the server to enable reasoning/thinking. |
-| `--basic` | off | Offer the basic tools (current time). Toolset flags are additive; none of them means no tools. |
-| `--coding` | off | Offer the coding tools: `Read`, `Write`, `Edit`, `Bash`. |
+| `--read` | off | Offer the `Read` tool. Toolset flags are additive; none of them means no tools. |
+| `--write` | off | Offer the `Write` tool. |
+| `--edit` | off | Offer the `Edit` tool. |
+| `--bash` | off | Offer the `Bash` tool. |
+| `--current_time` | off | Offer the current time. |
 | `--delegate` | off | Offer `delegate`: subagents with the same tools and settings, minus `delegate` itself. |
 | `--workspace` | `.` | Root directory available to the coding tools. |
 | `--session PATH` | none | Load an existing session or save the current session to `PATH`. |
@@ -84,13 +87,26 @@ The most useful options are:
 | `--timeout SECONDS` | derived from context | Per-request HTTP timeout; `0` derives one from `--context`. |
 | `--system-prompt TEXT` | toolset-specific | Override the default system prompt. |
 
-With `--coding`, the model can `Read` without confirmation. `Write`, `Edit`, and `Bash` are shown for approval before they run, one call at a time. File paths are confined to `--workspace` (no escaping the root, no symlinks); `Bash` runs with the workspace as its working directory and must state a `reason` alongside the command. An `Edit` is shown as a diff.
+With `--read`, the model can `Read` without confirmation. `Write`, `Edit`, and `Bash` are shown for approval before they run, one call at a time. File paths are confined to `--workspace` (no escaping the root, no symlinks); `Bash` runs with the workspace as its working directory and must state a `reason` alongside the command. An `Edit` is shown as a diff.
 
 At the approval prompt one key decides: `y` runs the call, `n` declines it, `m` declines it with a message the model reads as the tool result, `c` (or ESC) cancels the turn, `a` enables auto mode for the session. Enter is `y`. A declined call short-circuits the rest of that round: the model sees the denial and adapts on its next round.
 
 Auto mode turns the confirmation gate off: confirmed tools run without asking. It is on for the rest of the session — `Ctrl+C` turns it off (in auto mode `Ctrl+C` does not exit; it turns auto mode off and returns to the prompt), and `/noauto` does the same. Delegate subagents inherit it, so their confirmed tools run unconfirmed too.
 
-With `--delegate`, the model can hand a self-contained task to a subagent and read back only its final answer, which keeps the reads and tool rounds of a subtask out of the main context window. The subagent is a nested engine run: it inherits the model, settings, system prompt and tools of the main agent (never `delegate` itself, so there is no nesting), streams to the terminal between two banner lines, and its confirmed tools ask for approval exactly as the main agent's do. Each delegation asks for approval, with the task and context shown. ESC or cancel inside the subagent ends only the subagent; the main agent reads that it was cancelled. When a session file is set, every subagent run keeps its own beside it, named `<session stem>.delegate-<timestamp>_<hash>.json`.
+With `--delegate`, the model can hand a self-contained task to a subagent and read back only its final answer, which keeps the reads and tool rounds of a subtask out of the main context window. The subagent is a nested engine run: it inherits the model, settings, system prompt and tools of the main agent (never `delegate` itself, so there is no nesting), streams to the terminal between two banner lines, and its confirmed tools ask for approval exactly as the main agent's do. Each delegation asks for approval, with the task and context shown. ESC or cancel inside the subagent ends only the subagent; the main agent reads that it was cancelled. When a session file is set, every subagent run keeps its own beside it, named `<session stem>.delegate-<timestamp>_<hash>.json`. The delegate's `root` attribute (set from `--workspace`) is the working directory for the subagent's tools and for any `check` command the orchestrator supplies, so validation runs in the project root rather than the harness's own directory.
+
+### Orchestrator mode (`coding.sh`)
+
+`coding.sh` is a ready-made orchestrator entry point that wraps `chat-des` with a delegation-focused system prompt. It launches the agent with `--delegate` and a dynamically generated project file tree appended to the system prompt, so the orchestrator always has an up-to-date map of the codebase.
+
+```bash
+./coding.sh [MODEL] [extra chat-des args...]
+```
+
+- **`MODEL`** (optional, first positional argument): overrides the default model (`Qwen3.8-27B-UD-Q4_K_M-64K`). All remaining positional arguments are passed through to `chat-des`.
+- The orchestrator prompt instructs the agent to decompose work into gated stages (investigation → tests → implementation) and to delegate each stage to a subagent.
+- The file tree is generated at launch via `find`, excluding `venv`, `.git`, `sandbox`, `.sessions`, `__pycache__`, `*.egg-info`, `.pytest_cache`, and log/JSON files.
+- `README.md` and `INDEX.md` are **not** included in the orchestrator's prompt; they are available to subagents on demand.
 
 ### In-chat commands
 
