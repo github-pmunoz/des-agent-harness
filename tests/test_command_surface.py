@@ -7,6 +7,8 @@ import pytest
 from desh_chat.commands import Command
 from desh_chat.display import DisplayHistory, Info, Warn
 from desh_chat.events import Exit, MaybeRegenerate
+from desh_chat.state import InferenceEngine
+from conftest import FakeServer
 
 
 def run_command(make_state, command, args, **state_overrides):
@@ -133,6 +135,17 @@ class TestContext:
         switched, _, _ = run_command(make_state, "model", "model-b")
         _, first, _ = run_command(make_state, "context", "20000", settings=switched.settings)
         assert isinstance(first, Warn)
+
+    def test_no_max_context_accepts_any_positive_value(self, make_state):
+        # When the server did not report a ctx-size for the active model,
+        # max_context has no entry for it; /context must accept any positive
+        # value and emit Info, not crash with KeyError.
+        inference = InferenceEngine(
+            models=["model-a"], max_context={}, server=FakeServer(), port=8012
+        )
+        final, first, _ = run_command(make_state, "context", "4096", inference=inference)
+        assert final.settings.context == 4096
+        assert isinstance(first, Info)
 
 
 class TestMaxTurnTokens:

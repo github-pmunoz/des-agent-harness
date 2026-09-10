@@ -63,7 +63,7 @@ class Command(Event):
     def _cmd_context(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not self.args:
             return state, [Info(f"context: {state.settings.context}"), MaybeRegenerate()]
-        value = self._int(0, state.inference.max_context[state.settings.model])
+        value = self._int(0, state.inference.max_context.get(state.settings.model))
         return state.change_setting("context", value), [Info(f"↪ context set to: {value}"), MaybeRegenerate()]
 
     def _cmd_exit(self, state: ChatState) -> tuple[ChatState, list[Event]]:
