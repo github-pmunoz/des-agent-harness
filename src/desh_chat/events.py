@@ -33,12 +33,45 @@ _TTY = sys.stdout.isatty()
 
 @dataclass(frozen=True)
 class MaybeRegenerate(Event):
-    """Schedules PromptUser if running."""
+    """What happens when the loop has nothing left to do: nothing once running is off (Exit), the
+    state's idle event when one is set (a subagent's Continue), else the operator is prompted."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not state.running:
             return state, []
+        if state.on_idle is not None:
+            return state, [state.on_idle]
         return state, [DisplayStats(), PromptUser()]
 
+
+@dataclass(frozen=True)
+class Continue(Event):
+    """The idle event of a run with no operator: after a turn that hit the round cap, open another
+    turn with `msg` so the model goes on from the checkpoint (MaybeCompact has already summarised
+    the capped turn when it was large enough); after any other turn, drain.
+
+    The turn read is the last non-summary one, so the summary appended by compaction does not
+    hide the reason the previous turn ended. A continuation that cannot fit the window must NOT be
+    issued: NextRound would reject it without recording anything, MaybeRegenerate would run again
+    with history unchanged, and this event would issue it again, forever. The guard mirrors the
+    room NextRound needs — the system prompt, the message and the window must leave space for a
+    completion — and drains instead, leaving the capped turn as the answer."""
+    msg: str
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        last = state.history.last_non_summary()
+        if last is None or last.cancelled or last.stop != "cap":
+            return state, []
+        # Mirror NextRound's fit check for this message: the system prompt, the message and the
+        # window since the last summary must leave room for a completion (gen_budget > 0), or
+        # NextRound would reject it and this event would issue it again forever.
+        sys_prompt_tokens = estimate_tokens(state.system_prompt)
+        pending_tokens = estimate_tokens(self.msg)
+        gen_budget = int(min(
+            state.settings.max_turn_tokens,
+            state.settings.context - pending_tokens - sys_prompt_tokens - state.history.window_tokens(),
+            state.settings.turn_token_cap * state.settings.context))
+        if gen_budget <= 0:
+            return state, []
+        return state, [UserMessage(self.msg)]
 
 @dataclass(frozen=True)
 class Exit(Event):
@@ -182,9 +215,11 @@ class AppendRound(Event):
         
         # A model that asks for the same calls a third time, having twice seen the same results, is
         # looping: the third round is not recorded and the turn ends the way the round cap ends it.
+        # Calls are compared by the registry's identity (Tool.identity), not the wire string: a call
+        # that differs only in an argument the tool does not count (Bash's reason) is the same call.
         # OBS: The results comparison relies on every recorded round having one result per call
         def shape(calls: tuple[ToolCall, ...]) -> tuple[tuple[str, str], ...]:
-            return tuple(sorted([(tc.name, tc.arguments) for tc in calls]))
+            return tuple(sorted(state.tools.identity(tc.name, tc.arguments) for tc in calls))
         has_tail = len(state.pending.rounds) >= 2
         if has_tail:
             last, before = state.pending.rounds[-1:], state.pending.rounds[-2:-1]

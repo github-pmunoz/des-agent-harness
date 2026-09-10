@@ -13,8 +13,8 @@ import pytest
 from desh.engine import Engine
 from desh.tools import ToolRegistry
 from desh_chat import gate
-from desh_chat.delegate import DELEGATE_SYSTEM_PROMPT, Delegate, answer, child_session_file, child_settings
-from desh_chat.events import UserMessage
+from desh_chat.delegate import CAP_CONTINUE_MSG, DELEGATE_SYSTEM_PROMPT, Delegate, answer, child_session_file, child_settings
+from desh_chat.events import Continue, MaybeRegenerate, PromptUser, UserMessage
 from desh_chat.gate import Answer
 from desh_chat.state import ChatHistory, InferenceEngine, Round, Settings, ToolResult, Turn
 from desh.llama.wire import ToolCall
@@ -144,6 +144,17 @@ class TestAnswer:
         text = answer(child_of(make_state, turn("", rounds=2, cancelled=True, stop="overflow")))
         assert text == "The subagent ran out of context window before finishing."
 
+    def test_the_last_non_summary_turn_is_the_answer_after_a_checkpoint(self, make_state):
+        """A child that checkpointed leaves capped turn, summary, final turn: the final turn answers."""
+        history = (ChatHistory().append(turn("so far", rounds=3, stop="cap"))
+                   .compact("what it did so far")
+                   .append(Turn(CAP_CONTINUE_MSG, "done: 42")))
+        assert answer(make_state(settings=SETTINGS, history=history, running=True)) == "done: 42"
+
+    def test_a_checkpoint_that_could_not_continue_reports_the_capped_turn(self, make_state):
+        history = ChatHistory().append(turn("so far", rounds=3, stop="cap")).compact("summary")
+        assert answer(make_state(settings=SETTINGS, history=history, running=True)) == "so far\n[Subagent hit the tool round cap]"
+
     def test_a_pending_turn_at_drain_is_a_harness_bug(self, make_state):
         from desh_chat.state import PendingTurn
         with pytest.raises(AssertionError):
@@ -155,11 +166,9 @@ class TestAnswer:
 # ---------------------
 
 class TestChildSetup:
-    def test_child_settings_inherit_everything_but_compaction(self):
-        child = child_settings(SETTINGS)
-        assert child.compaction_threshold == float("inf")
-        assert {k: v for k, v in child.__dict__.items() if k != "compaction_threshold"} == \
-               {k: v for k, v in SETTINGS.__dict__.items() if k != "compaction_threshold"}
+    def test_child_settings_are_the_parents_compaction_included(self):
+        """Compaction is the checkpoint mechanism, so the child keeps the parent's threshold."""
+        assert child_settings(SETTINGS) == SETTINGS
 
     def test_child_session_file_sits_beside_the_parents(self):
         path = child_session_file("/tmp/runs/abc.json")
@@ -182,14 +191,15 @@ class TestChildSetup:
         assert set(params["properties"]) == {"task", "context", "gate", "check"} and params["required"] == ["task"]
 
     def test_child_is_built_from_child_settings_of_the_fallback(self, make_state, monkeypatch, capsys):
-        """No settings injected: the Delegate's own (startup) settings, with compaction off."""
+        """No settings injected: the Delegate's own (startup) settings. The child runs with Continue
+        as its idle event and running on, so MaybeRegenerate reaches it after every turn."""
         monkeypatch.setattr("desh_chat.delegate.Engine", RecordingEngine)
         RecordingEngine.states.clear()
         inference, _ = with_server(make_state, FakeServer())
         Delegate(root=".", inference=inference, settings=SETTINGS).delegate("task")
         child, = RecordingEngine.states
         assert child.settings == child_settings(SETTINGS)
-        assert child.settings.compaction_threshold == float("inf")
+        assert child.on_idle == Continue(CAP_CONTINUE_MSG) and child.running is True
 
     def test_injected_settings_replace_the_startup_ones(self, make_state, monkeypatch, capsys):
         """The parent flipped auto mode and switched model after the registry was built: the child
@@ -202,6 +212,57 @@ class TestChildSetup:
         child, = RecordingEngine.states
         assert child.settings == child_settings(current)
         assert (child.settings.auto, child.settings.model, child.settings.temperature) == (True, MODELS[1], 0.9)
+
+
+# ---------------------
+# Continue: the child's idle event, and the checkpoint loop it drives
+# ---------------------
+
+def capped(assistant="so far", tokens=0) -> Turn:
+    t = turn(assistant, rounds=2, stop="cap")
+    return replace(t, tokens=tokens) if tokens else t
+
+
+class TestContinue:
+    def test_maybe_regenerate_emits_the_idle_event_instead_of_prompting(self, make_state):
+        _, events = MaybeRegenerate().execute(make_state(running=True, on_idle=Continue("go")))
+        assert events == [Continue("go")]
+        _, events = MaybeRegenerate().execute(make_state(running=False, on_idle=Continue("go")))
+        assert events == []
+        _, events = MaybeRegenerate().execute(make_state(running=True))
+        assert isinstance(events[-1], PromptUser)
+
+    def test_last_non_summary_skips_the_summary_appended_by_compaction(self):
+        history = ChatHistory().append(capped()).compact("s")
+        assert history.last_non_summary() == capped()
+        assert ChatHistory().last_non_summary() is None
+        assert ChatHistory().compact("s").last_non_summary() is None
+
+    def test_a_capped_turn_is_continued(self, make_state):
+        for history in (ChatHistory().append(capped()), ChatHistory().append(capped()).compact("s")):
+            _, events = Continue("go").execute(make_state(settings=SETTINGS, history=history))
+            assert events == [UserMessage("go")]
+
+    def test_any_other_ending_drains(self, make_state):
+        for history in (ChatHistory(),
+                        ChatHistory().append(turn("done", rounds=2)),
+                        ChatHistory().append(turn("", cancelled=True)),
+                        ChatHistory().append(turn("", cancelled=True, stop="overflow")),
+                        ChatHistory().append(capped()).compact("s").append(Turn("go", "done"))):
+            _, events = Continue("go").execute(make_state(settings=SETTINGS, history=history))
+            assert events == [], history
+
+    def test_a_continuation_that_cannot_fit_drains_instead_of_looping(self, make_state):
+        """NextRound would reject the message without recording a turn, MaybeRegenerate would bring
+        Continue back with history unchanged, and the same message would go out again, forever.
+        The capped turn here fills the window: the child must drain and answer with it."""
+        settings = replace(SETTINGS, context=200, compaction_threshold=2.0)      # compaction never ran
+        full = ChatHistory().append(capped(tokens=190))
+        _, events = Continue("go").execute(make_state(settings=settings, history=full, system_prompt="x" * 40))
+        assert events == []
+        fits = ChatHistory().append(capped(tokens=100))
+        _, events = Continue("go").execute(make_state(settings=settings, history=fits, system_prompt="x" * 40))
+        assert events == [UserMessage("go")]
 
 
 # ---------------------
@@ -263,6 +324,46 @@ class TestFullLoop:
         assert final.history.turns[0].rounds[0].results[0].content == "12"
         child_req = server.calls[2][1]
         assert child_req.model == SETTINGS.model
+
+    def checkpointing_parent(self, make_state, server, **settings):
+        """A parent whose delegate children hit the cap after one round; `settings` overrides apply
+        to parent and child alike (the child inherits them through the injection)."""
+        s = replace(SETTINGS, max_tool_rounds=1, **settings)
+        inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT)
+        registry = with_delegate(ToolRegistry(), inference=inference, settings=s)
+        return make_state(inference=inference, settings=s, running=False, tools=registry)
+
+    CHILD_ROUND = {"tool_calls": [{"name": "Read"}]}     # "not available" on an empty registry, still a round
+
+    def test_a_capped_child_continues_and_the_parent_reads_the_final_answer(self, make_state, always_yes, no_esc_watcher):
+        """Round 1 runs, round 2 hits the cap (max_tool_rounds=1), Continue opens a second turn,
+        the model answers it, Continue drains. The capped turn is small, so no compaction."""
+        server = FakeServer(script=[self.DELEGATION, self.CHILD_ROUND, self.CHILD_ROUND, {"content": "done: 12"}, {"content": "12"}])
+        state = self.checkpointing_parent(make_state, server)
+        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        assert final.history.turns[0].rounds[0].results[0].content == "done: 12"
+        continuation = server.calls[3][1]
+        assert continuation.messages[-1] == {"role": "user", "content": CAP_CONTINUE_MSG}
+        assert [m["role"] for m in continuation.messages[:2]] == ["system", "user"]     # the capped turn is still in view
+
+    def test_the_checkpoint_chain_compacts_the_capped_turn_before_continuing(self, make_state, always_yes, no_esc_watcher):
+        """TurnEnd -> MaybeCompact -> CompactHistory -> MaybeRegenerate -> Continue -> UserMessage:
+        with the threshold at zero every turn compacts, so the continuation sees the summary of the
+        capped turn, not the turn itself, and the parent still reads the final answer."""
+        server = FakeServer(script=[self.DELEGATION, self.CHILD_ROUND, self.CHILD_ROUND,
+                                    {"content": "summary of round one"},        # complete(): the capped turn
+                                    {"content": "done: 12"},
+                                    {"content": "summary of the answer"},       # complete(): the final turn, unused
+                                    {"content": "12"}])
+        state = self.checkpointing_parent(make_state, server, compaction_threshold=0.0)
+        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        assert final.history.turns[0].rounds[0].results[0].content == "done: 12"
+        kinds = [k for k, _ in server.calls]
+        assert kinds[:6] == ["stream", "stream", "stream", "complete", "stream", "complete"]
+        continuation = server.calls[4][1]
+        assert [m["role"] for m in continuation.messages] == ["system", "user", "assistant", "user"]
+        assert continuation.messages[1]["content"] == ChatHistory.SUMMARY_PREFIX + "summary of round one"
+        assert continuation.messages[-1]["content"] == CAP_CONTINUE_MSG
 
     def test_ctrl_c_in_the_child_reaches_the_parent(self, make_state, always_yes, no_esc_watcher):
         class Interrupted(FakeServer):

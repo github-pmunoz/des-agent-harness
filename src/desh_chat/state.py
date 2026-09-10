@@ -3,7 +3,7 @@ from desh.llama.logger import Logger
 from desh.llama.server import LlamaServer
 from desh.llama.wire import ToolCall
 from desh.llama.tokens import estimate_tokens
-from desh.engine import State
+from desh.engine import State, Event
 from desh.tools import ToolRegistry
 from typing import Any
 
@@ -44,6 +44,8 @@ class ChatState(State):
     session_file: str | None = None     # where LoadSession reads / SaveSession writes; None -> no persistence
     pending: PendingTurn | None = None  # the turn in progress between UserMessage and TurnEnd; never persisted
     tools: ToolRegistry = field(default_factory=ToolRegistry, repr=False)  # what the model may call; empty -> no tools offered
+    on_idle: Event | None = None        # a callback for MaybeRegenerate when the queue is drained is idle
+
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))
@@ -286,6 +288,13 @@ class ChatHistory:
             if turn.summary:
                 break
         return list(reversed(view))
+
+    def last_non_summary(self) -> Turn | None:
+        """The last turn that is not a summary."""
+        for turn in reversed(self.turns):
+            if not turn.summary:
+                return turn
+        return None
 
     def __len__(self):
         return len(self.turns)

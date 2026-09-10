@@ -38,7 +38,7 @@ from desh.llama.logger import Logger
 from desh.render import Gutter, Palette, c_out
 from desh.tools import ToolRegistry
 from desh_chat.state import ChatHistory, ChatState, InferenceEngine, Settings
-from desh_chat.events import UserMessage
+from desh_chat.events import UserMessage, Continue
 
 
 DELEGATE_SYSTEM_PROMPT = (
@@ -50,10 +50,14 @@ You are handling a subtask delegated by another agent. Complete it using your to
 )
 
 
+CAP_CONTINUE_MSG = "You hit a tool round cap. Continue or report back to orchestrator."
+
+
 def child_settings(parent: Settings) -> Settings:
-    """The subagent's settings: the parent's, with compaction off. A child's history is one turn,
-    so a summary would replace the very answer the parent is waiting for."""
-    return replace(parent, compaction_threshold=float("inf"))
+    """The subagent's settings: the parent's, as they are. Compaction stays on: the round cap is the
+    child's checkpoint, and MaybeCompact is what turns the capped turn into a summary before
+    Continue asks the model to go on."""
+    return parent
 
 
 def child_session_file(parent: str | None) -> str | None:
@@ -103,11 +107,12 @@ class Delegate:
             settings=child_settings(settings if settings is not None else self.settings),
             inference=self.inference,
             history=ChatHistory(),
-            running=False,          # drain after one turn: MaybeRegenerate prompts nobody
+            running=True,
             system_prompt=system_prompt,
             completions_log=self.completions_log,
             session_file=session_file,
             tools=self.tools,
+            on_idle=Continue(CAP_CONTINUE_MSG),   # checkpoint: a capped turn is compacted and continued, not returned
         )
         print(c_out(Palette.CHROME, "╭─ delegate ─ subagent starts" + (f" ({session_file})" if session_file else "")))
         try:
@@ -119,7 +124,8 @@ class Delegate:
                     child, seed=[UserMessage(task)], log_header={"delegate": True, "session": session_file})
         finally:
             print(c_out(Palette.CHROME, "╰─ delegate ─ back to the main agent"))
-        has_answer = bool(final.history.turns) and not final.history.turns[0].cancelled and final.history.turns[0].assistant != ""
+        last = final.history.last_non_summary()
+        has_answer = last is not None and not last.cancelled and last.assistant != ""
         text = answer(final)
         return self._checked(text, check) if has_answer else text
 
@@ -150,22 +156,23 @@ class Delegate:
 def answer(state: ChatState) -> str:
     """The subagent's final state as the text the parent's model reads.
 
-    A child run leaves at most one turn in history: none if the request never fit the context
-    window even on round one; otherwise a turn whose `stop` and `cancelled` say how it ended:
+    The turn that matters is the last one that is not a summary: a child that checkpointed has
+    capped turns and summaries before it. None at all means the request never fit the context
+    window even on round one; otherwise that turn's `stop` and `cancelled` say how it ended:
       stop == "overflow"   the window filled up mid-task (cancelled is True as well)
       cancelled            the operator pressed ESC or cancelled at a confirmation prompt
-      stop == "cap"        the round cap cut the turn short; the model's text so far is the answer
+      stop == "cap"        the round cap cut the turn short and Continue could not go on; the
+                           model's text so far is the answer
       neither              the answer, verbatim ("(no answer)" when the model said nothing)
     Every case must come back as text the parent can act on — it cannot see the child's history.
     The texts the parent reads: "The subagent ran out of context window before finishing.",
     "The operator cancelled the request.", and for a capped turn the answer followed by
     "\\n[Subagent hit the tool round cap]".
     """
-    assert len(state.history.turns) <= 1
     assert state.pending is None
-    if len(state.history.turns) == 0:
+    turn = state.history.last_non_summary()
+    if turn is None:
         return "The request didn't fit the context window."
-    turn = state.history.turns[0]
     child_msg = turn.assistant or "(no answer)"
     if turn.stop == "overflow":
         return "The subagent ran out of context window before finishing."
