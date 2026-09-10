@@ -63,12 +63,8 @@ class Continue(Event):
         # Mirror NextRound's fit check for this message: the system prompt, the message and the
         # window since the last summary must leave room for a completion (gen_budget > 0), or
         # NextRound would reject it and this event would issue it again forever.
-        sys_prompt_tokens = estimate_tokens(state.system_prompt)
         pending_tokens = estimate_tokens(self.msg)
-        gen_budget = int(min(
-            state.settings.max_turn_tokens,
-            state.settings.context - pending_tokens - sys_prompt_tokens - state.history.window_tokens(),
-            state.settings.turn_token_cap * state.settings.context))
+        gen_budget = state.gen_budget(pending_tokens)
         if gen_budget <= 0:
             return state, []
         return state, [Info("Checkpoint: round cap reached, continuing the task."), UserMessage(self.msg)]
@@ -360,12 +356,8 @@ class NextRound(Event):
         sys_prompt_tokens = estimate_tokens(state.system_prompt)
         # What the pending turn costs in the prompt: rounds already priced by usage frames, plus the
         # heuristic for the text no frame has priced yet (user message on round one, latest results after).
-        pending_tokens = pending.priced_tokens() + estimate_tokens(pending.unpriced_text())
-        used_tokens = pending_tokens + sys_prompt_tokens
-        gen_budget = int(min(
-            state.settings.max_turn_tokens,
-            state.settings.context - used_tokens - state.history.window_tokens(),
-            state.settings.turn_token_cap * state.settings.context))
+        pending_tokens = state.pending_tokens()
+        gen_budget = state.gen_budget(pending_tokens)
         reserved = sys_prompt_tokens + pending_tokens + gen_budget
         if gen_budget <= 0:
             if not pending.rounds:      # nothing happened yet: reject the message, no turn recorded

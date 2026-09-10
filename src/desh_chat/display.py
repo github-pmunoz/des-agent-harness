@@ -59,9 +59,7 @@ class DisplayStats(DisplayEvent):
     colour: str = Palette.STATS_LINE
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         # This event also accounts for tokens during a pending turn
-        pending_tokens = ( state.pending.priced_tokens() + estimate_tokens( state.pending.unpriced_text())) if  state.pending is not None else 0
-        sys_prompt_tokens = estimate_tokens(state.system_prompt)
-        window_tokens = sys_prompt_tokens + state.history.window_tokens() + pending_tokens
-        total_tokens = sys_prompt_tokens + state.history.get_total_tokens() + pending_tokens
-        print(c_out(self.colour, f"Context: {window_tokens} / {state.settings.context} tokens ({window_tokens/state.settings.context*100.0:.1f}%) \t Session: {total_tokens}"))
+        pending_tokens = state.pending_tokens()
+        window_tokens = state.prompt_tokens(pending_tokens)
+        print(c_out(self.colour, f"Context: {window_tokens} / {state.settings.context} tokens ({window_tokens/state.settings.context*100.0:.1f}%) \t Session: {state.session_tokens(pending_tokens)}"))
         return state, []

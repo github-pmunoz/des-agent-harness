@@ -57,10 +57,26 @@ class ChatState(State):
     tools: ToolRegistry = field(default_factory=ToolRegistry, repr=False)  # what the model may call; empty -> no tools offered
     on_idle: Event | None = None        # a callback for MaybeRegenerate when the queue is drained is idle
 
-
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))
 
+    def pending_tokens(self) -> int:
+        """What the pending turn costs in the prompt: priced rounds plus the heuristic for the text no usage frame has priced."""
+        p = self.pending
+        return 0 if p is None else p.priced_tokens() + estimate_tokens(p.unpriced_text())
+
+    def prompt_tokens(self, pending_tokens: int) -> int:
+        """What the next request costs before generation: system prompt, window since the last summary, pending."""
+        return estimate_tokens(self.system_prompt) + self.history.window_tokens() + pending_tokens
+
+    def gen_budget(self, pending_tokens: int) -> int:
+        """Room for the next completion: the turn cap, the fraction cap, and what the window leaves."""
+        s = self.settings
+        return int(min(s.max_turn_tokens, s.context - self.prompt_tokens(pending_tokens), s.turn_token_cap * s.context))
+
+    def session_tokens(self, pending_tokens: int) -> int:
+        """Whole priced tokens of the session so far."""
+        return estimate_tokens(self.system_prompt) + self.history.get_total_tokens() + pending_tokens
 
 # -----------------------
 # Tool exchange inside a turn
