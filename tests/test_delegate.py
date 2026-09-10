@@ -14,6 +14,7 @@ from desh.engine import Engine
 from desh.tools import ToolRegistry
 from desh_chat import gate
 from desh_chat.delegate import CAP_CONTINUE_MSG, DELEGATE_SYSTEM_PROMPT, Delegate, answer, child_session_file, child_settings
+from desh_chat.display import Info
 from desh_chat.events import Continue, MaybeRegenerate, PromptUser, UserMessage
 from desh_chat.gate import Answer
 from desh_chat.state import ChatHistory, InferenceEngine, Round, Settings, ToolResult, Turn
@@ -241,7 +242,7 @@ class TestContinue:
     def test_a_capped_turn_is_continued(self, make_state):
         for history in (ChatHistory().append(capped()), ChatHistory().append(capped()).compact("s")):
             _, events = Continue("go").execute(make_state(settings=SETTINGS, history=history))
-            assert events == [UserMessage("go")]
+            assert [type(e) for e in events] == [Info, UserMessage] and events[-1] == UserMessage("go")
 
     def test_any_other_ending_drains(self, make_state):
         for history in (ChatHistory(),
@@ -262,7 +263,7 @@ class TestContinue:
         assert events == []
         fits = ChatHistory().append(capped(tokens=100))
         _, events = Continue("go").execute(make_state(settings=settings, history=fits, system_prompt="x" * 40))
-        assert events == [UserMessage("go")]
+        assert events[-1] == UserMessage("go")
 
 
 # ---------------------

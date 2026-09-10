@@ -50,7 +50,9 @@ You are handling a subtask delegated by another agent. Complete it using your to
 )
 
 
-CAP_CONTINUE_MSG = "You hit a tool round cap. Continue or report back to orchestrator."
+CAP_CONTINUE_MSG = ("Checkpoint: the tool round cap was reached, and the tool calls you asked for last were not run. "
+                    "If the task is not finished, continue from here and ask again for any call you still need. "
+                    "If it is finished, reply with your final answer.")
 
 
 def child_settings(parent: Settings) -> Settings:

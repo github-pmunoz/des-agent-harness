@@ -343,6 +343,21 @@ class TestCompactHistory:
         events[0].execute(new_state)  # the summary is now surfaced to the user, not just logged
         assert "a tidy summary" in capsys.readouterr().out
 
+    def test_the_instruction_comes_from_settings(self, make_state):
+        """The compaction prompt is a setting with a default written for tool sessions, so a run
+        (an eval of compaction strategies) can be built with another without touching the event."""
+        from desh_chat.state import COMPACTION_PROMPT
+        server = FakeServer(script=[{"content": "summary"}, {"content": "summary"}])
+        history = ChatHistory().append(Turn("q", "a", tokens=100))
+        CompactHistory().execute(with_server(make_state, server, history=history))
+        assert server.calls[0][1].messages[0] == {"role": "system", "content": COMPACTION_PROMPT}
+        for must_keep in ("file path", "line numbers", "verbatim", "next steps"):
+            assert must_keep in COMPACTION_PROMPT
+        custom = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192,
+                          compaction_prompt="Summarise for a robot.")
+        CompactHistory().execute(with_server(make_state, server, settings=custom, history=history))
+        assert server.calls[1][1].messages[0] == {"role": "system", "content": "Summarise for a robot."}
+
     def test_compaction_request_is_non_streaming_and_deterministic(self, make_state):
         server = FakeServer(script=[{"content": "summary"}])
         history = ChatHistory().append(Turn("q", "a", tokens=100))

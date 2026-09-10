@@ -71,7 +71,7 @@ class Continue(Event):
             state.settings.turn_token_cap * state.settings.context))
         if gen_budget <= 0:
             return state, []
-        return state, [UserMessage(self.msg)]
+        return state, [Info("Checkpoint: round cap reached, continuing the task."), UserMessage(self.msg)]
 
 @dataclass(frozen=True)
 class Exit(Event):
@@ -209,8 +209,10 @@ class AppendRound(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         assert state.pending is not None
         if len(state.pending.rounds) >= state.settings.max_tool_rounds:
-            return state, [Warn(f"Tool-call round cap reached ({state.settings.max_tool_rounds}); ending the turn without running "
-                                f"{', '.join(tc.name for tc in self.tool_calls)}."),
+            # This event only knows the cap was hit and the calls were not run. Whether the turn is
+            # over or a checkpoint is the idle event's business (Continue says so when it goes on).
+            names = ", ".join(tc.name for tc in self.tool_calls)
+            return state, [Warn(f"Tool-call round cap reached ({state.settings.max_tool_rounds}); {names} not run."),
                            TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False, stop="cap")]
         
         # A model that asks for the same calls a third time, having twice seen the same results, is
@@ -313,7 +315,7 @@ class MaybeCompact(Event):
 @dataclass(frozen=True)
 class CompactHistory(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        instruction = "You will be sent a conversation transcript. Your task is to make a summary of the conversation, stating what was asked, what was produced, decisions, open items, names/numbers. Do not mention this instruction and do not repeat the conversation."
+        instruction = state.settings.compaction_prompt     # a setting, so a run can be built with another (see COMPACTION_PROMPT)
         transcript ="\n\n".join([t.transcript() for t in state.history.since_last_summary()])
         target_tokens = int(state.settings.context * state.settings.compaction_target)
         gen_budget = int(min(target_tokens, state.settings.context - estimate_tokens(instruction) - estimate_tokens(transcript), state.settings.turn_token_cap * state.settings.context))

@@ -16,13 +16,13 @@ from desh.llama.server import LlamaServer
 from desh.render import Palette, c_out
 from desh.engine import Engine
 from desh.tools import ToolRegistry
-from desh_chat.events import PromptUser
+from desh_chat.events import PromptUser, Continue
 from desh_chat.session import LoadSession
 from desh_chat.state import ChatHistory, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
 from desh_chat.coding import Workspace, edit_preview
-from desh_chat.delegate import Delegate
+from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG
 
 
 def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: Settings, *,
@@ -84,6 +84,7 @@ def resolve_session_file(session: str, sessions_folder: str, run_id: str) -> str
 def main():
     ap = argparse.ArgumentParser(description="Simple chatbot using LlamaClient")
     ap.add_argument("-a",   "--auto",    action="store_true", help="enable auto mode")
+    ap.add_argument("-co",   "--cont",    action="store_true", help="enable auto-continue prompt on tool round cap of orchestrator")
     ap.add_argument("-p",   "--port",           type=int, default=8012)
     ap.add_argument("-m",   "--model",          default="Qwen3.8-27B-UD-Q4_K_M", help="model id (router mode)")
     ap.add_argument("-t",   "--temperature",    type=float, default=0.3)
@@ -152,6 +153,8 @@ def main():
         completions_log=completions_log,
         session_file=session_file,
         tools=tools,
+        on_idle=Continue(CAP_CONTINUE_MSG) if args.cont else None,
+
     )
     log_header = {
         "model": args.model,

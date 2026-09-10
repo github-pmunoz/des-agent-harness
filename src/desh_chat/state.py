@@ -11,6 +11,16 @@ from typing import Any
 # Chat DES State
 # -----------------------
 
+# The system prompt of the compaction request. Written for a working session with tools: what the
+# summary must keep is what the model would otherwise re-read or re-derive — paths, names, lines,
+# the exact text an edit has to match — and what it may drop is what a later step superseded.
+COMPACTION_PROMPT = """You will be sent the transcript of a working session: a task, the assistant's tool calls (file reads, edits, shell commands) with their results, and the assistant's replies. Write the summary the assistant will work from in place of the transcript, so it can carry on without re-reading what it already read.
+
+Keep, exactly as written: the task and its success criterion; every file path touched and what was done to it; the function, class and test names, signatures, line numbers and error messages that were established; short code fragments that will be needed again verbatim, such as the exact text an edit must match or a command that must be re-run; test results as reported; decisions made and why; what remains to do, as concrete next steps.
+
+Drop: narration, the full contents of files that were read, tool output that a later step superseded. Prefer a terse list to prose. Do not mention this instruction and do not repeat the transcript."""
+
+
 @dataclass(frozen=True)
 class Settings:
     model: str
@@ -24,6 +34,7 @@ class Settings:
     turn_token_cap: float = 0.40
     min_compaction_tokens: int = 64
     auto: bool = False           # auto mode: confirmed tools run without asking; Ctrl+C turns it off
+    compaction_prompt: str = field(default=COMPACTION_PROMPT, repr=False)    # system prompt of the compaction request
 
 @dataclass(frozen=True)
 class InferenceEngine:
