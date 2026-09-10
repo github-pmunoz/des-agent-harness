@@ -9,7 +9,6 @@ import time
 import os
 import uuid
 from typing import TextIO
-from dataclasses import replace
 
 from desh_chat.state import ChatState
 from desh.llama.logger import Logger
@@ -50,10 +49,10 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
                           .add(ws.write, name="Write")
                           .add(ws.edit, name="Edit", preview=edit_preview)
                           .add(ws.bash, name="Bash"))
-        delegate_settings = replace(settings, compaction_threshold=2.0)
-        delegate = Delegate(root=ws.root, inference=inference, settings=delegate_settings, tools=delegate_tools,
+        delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
-        tools = tools.add(delegate.delegate, name="delegate")
+        # the parent's CURRENT settings travel with every call; the child derives its own from them
+        tools = tools.add(delegate.delegate, name="delegate", inject=("settings",))
     return tools
 
 

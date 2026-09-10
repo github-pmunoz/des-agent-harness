@@ -37,6 +37,17 @@ class TestSerialization:
         t = Turn("u", "a", tokens=7, cancelled=True, summary=True)
         assert Turn.from_dict(t.to_dict()) == t
 
+    def test_stop_round_trips_and_is_absent_from_a_plain_turn(self):
+        """A plain turn serialises exactly as it did before `stop` existed — no key — so format 2
+        files stay byte-identical; a turn that ended early carries the reason."""
+        assert "stop" not in Turn("u", "a", tokens=7).to_dict()
+        capped = Turn("u", "so far", tokens=7, stop="cap")
+        overflow = Turn("u", "", tokens=7, cancelled=True, stop="overflow")
+        assert capped.to_dict()["stop"] == "cap"
+        assert Turn.from_dict(json.loads(json.dumps(capped.to_dict()))) == capped
+        assert Turn.from_dict(json.loads(json.dumps(overflow.to_dict()))) == overflow
+        assert Turn.from_dict({"user": "u", "assistant": "a", "tokens": 7}).stop == ""
+
     def test_turn_from_dict_with_zero_tokens_reprices_by_heuristic(self):
         # tokens=0 is "unpriced" everywhere else too; a file that carries 0 gets the same treatment
         t = Turn.from_dict({"user": "hello there", "assistant": "general kenobi", "tokens": 0})

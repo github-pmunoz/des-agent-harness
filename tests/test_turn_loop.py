@@ -185,6 +185,7 @@ class TestAppendRound:
         assert isinstance(events[0], Warn) and "get_time" in events[0].text
         assert isinstance(events[1], TurnEnd)
         assert events[1].assistant == "one more?" and events[1].tokens == 10 and events[1].cancelled is False
+        assert events[1].stop == "cap"                          # recorded on the Turn, so a reader need not count rounds
 
 
 def round_of(assistant, calls, contents, round_no) -> Round:
@@ -279,6 +280,16 @@ class TestNextRoundWithRounds:
         assert new_state.pending is state.pending       # TurnEnd, not NextRound, clears it
         assert isinstance(events[0], Error)
         assert isinstance(events[1], TurnEnd) and events[1].cancelled is True
+        assert events[1].stop == "overflow"             # cancelled keeps it out of the view; stop says why
+
+    def test_turn_end_writes_stop_on_the_turn(self, make_state):
+        state = make_state(pending=PendingTurn("q").add_round(Round("", (WEATHER,), (result(WEATHER),), tokens=200)))
+        capped, _ = TurnEnd(assistant="so far", tokens=5, stop="cap").execute(state)
+        overflow, _ = TurnEnd(assistant="", tokens=0, cancelled=True, stop="overflow").execute(state)
+        plain, _ = TurnEnd(assistant="done", tokens=5).execute(state)
+        assert capped.history.turns[0].stop == "cap" and capped.history.turns[0].cancelled is False
+        assert overflow.history.turns[0].stop == "overflow" and overflow.history.turns[0].cancelled is True
+        assert plain.history.turns[0].stop == ""
 
 
 # ---------------------
@@ -342,6 +353,7 @@ class TestFullLoop:
         final, server = run_chat(make_state, script, ["q"], settings=settings)
         turn = final.history.turns[0]
         assert len(turn.rounds) == 2
+        assert turn.stop == "cap"
         assert turn.assistant == ""                 # the capped round's text (none here) is the final answer
         assert len(server.calls) == 3               # 2 rounds + the one that hit the cap; no more
         assert len(server.script) == 3              # the rest of the script was never consumed

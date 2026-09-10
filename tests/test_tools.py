@@ -267,6 +267,48 @@ class TestInvoke:
 
 
 # ---------------------
+# Tool.inject: parameters the harness supplies, which the model never sees
+# ---------------------
+
+def greet(name: str, *, settings: dict) -> str:
+    """Greet someone in the configured tone.
+
+    Args:
+        name: Who to greet.
+        settings: Supplied by the harness.
+    """
+    return f"{name}:{settings['tone']}"
+
+
+class TestInject:
+    INJECTING = ToolRegistry().add(greet, confirm=False, inject=("settings",)).add(now, confirm=False)
+
+    def test_injected_parameters_are_left_out_of_the_schema(self):
+        params = self.INJECTING.get("greet").parameters
+        assert set(params["properties"]) == {"name"} and params["required"] == ["name"]
+        assert Tool.define(greet, inject=("settings",)).inject == ("settings",)
+
+    def test_declared_names_are_passed_through_and_the_rest_dropped(self):
+        assert self.INJECTING.invoke("greet", '{"name": "ana"}', settings={"tone": "warm"}, other=1) == "ana:warm"
+
+    def test_a_tool_that_declared_nothing_gets_nothing(self):
+        assert self.INJECTING.invoke("now", "", settings={"tone": "warm"}) == "10:00"
+
+    def test_the_model_cannot_pass_an_injected_name(self):
+        content = self.INJECTING.invoke("greet", '{"name": "ana", "settings": {"tone": "rude"}}', settings={"tone": "warm"})
+        assert "rejected" in content and "settings" in content
+
+    def test_a_missing_injection_is_rejected_not_raised(self):
+        assert "rejected" in self.INJECTING.invoke("greet", '{"name": "ana"}')
+
+    def test_an_undeclared_parameter_without_a_hint_still_fails_at_definition(self):
+        def bad(name, *, settings: dict) -> str:
+            return name
+        with pytest.raises(TypeError):
+            Tool.define(bad, inject=("settings",))
+
+
+# ---------------------
 # Wiring: NextRound offers the registry's schemas
 # ---------------------
 

@@ -11,9 +11,10 @@ interrupt handler. The child engine therefore gets no handlers of its own.
 
 What the tool is for is context management: the parent's window holds the task and the answer,
 never the subagent's reads, searches and tool rounds. The model is told this and nothing else —
-its schema is `task` and `context`; model, temperature, budgets and tools are inherited from the
-parent at startup (the operator's choice, not the model's), minus delegate itself, so a subagent
-cannot delegate.
+its schema is task, context, gate and check. The tools are fixed at startup (the operator's
+choice, not the model's), minus delegate itself, so a subagent cannot delegate. The settings are
+the parent's CURRENT ones: the registry injects state.settings on every call (see Tool.inject),
+so /model, /temperature and auto mode reach the next subagent the moment they change.
 
 The child streams to the terminal exactly as the parent does and its confirmed tools ask the
 operator exactly as the parent's do; a banner marks the hand-over and the return, and every line
@@ -41,7 +42,7 @@ from desh_chat.events import UserMessage
 
 
 DELEGATE_SYSTEM_PROMPT = (
-"""You are a coding agent working inside one project directory. Use the tools to look before you act: Read a file before editing it, prefer Edit over Write for changes to existing files, and use Bash for listing, searching, running tests and anything else. Paths are relative to the project root. Every Write, Edit and Bash call is shown to the user for approval before it runs; a declined call comes back as a message explaining why — do not retry it, adapt.". Never modify files through Bash; instead use your Edit and Write tools.
+"""You are a coding agent working inside one project directory. Use the tools to look before you act: Read a file before editing it, prefer Edit over Write for changes to existing files, and use Bash for listing, searching, running tests and anything else. Paths are relative to the project root. Every Write, Edit and Bash call is shown to the user for approval before it runs; a declined call comes back as a message explaining why — do not retry it, adapt. Never modify files through Bash; instead use your Edit and Write tools.
 
 Orient yourself before searching: if the project root has an INDEX.md, `grep -n \"#\" INDEX.md` maps its files; if it has a README.md, read it for the design. When you use find or grep, exclude venv, .git and __pycache__ and skip .log, .json and .jsonl files. Tool output is cut at 8000 characters, so keep it short: run tests with -q and pipe long output through tail.
 
@@ -70,15 +71,15 @@ class Delegate:
     registry derives its schema from the method alone, so none of these fields reach the model."""
     root: str
     inference: InferenceEngine = field(repr=False)
-    settings: Settings
-    system_prompt: str = ""
+    settings: Settings                  # the fallback when no settings are injected at call time
     tools: ToolRegistry = field(default_factory=ToolRegistry, repr=False)
     session_file: str | None = None     # the PARENT's; each run derives its own from it
     completions_log: Logger | None = field(default=None, repr=False)
     des_log: TextIO | None = field(default=None, repr=False)
     debug: bool = False
 
-    def delegate(self, task: str, context: str = "", gate: str = "", check: str = "") -> str:
+    def delegate(self, task: str, context: str = "", gate: str = "", check: str = "", *,
+                 settings: Settings | None = None) -> str:
         """Hand a self-contained task to a subagent and get back only its final answer. Use it
         to keep your own context small: the subagent does the reading, searching and tool calls in
         its own conversation, and none of that comes back to you, only the answer. Prefer it for
@@ -92,12 +93,14 @@ class Delegate:
             gate: The success criterion in words: when the subagent is done. Appended to the subagent's instructions, so it knows what "done" means.
             check: A shell command the harness runs in the project root after the subagent finishes; its exit code and last output lines are appended to the answer you receive. The subagent never sees it.
         """
+        # `settings` is not in the Args block on purpose: the registry injects it (Tool.inject) and
+        # the schema leaves it out, so the model cannot pass it. Register with inject=("settings",).
         system_prompt = DELEGATE_SYSTEM_PROMPT + ("\n\nContext from the delegating agent:\n" + context if context else "")
         if gate:
             system_prompt += "\n\nSuccess criterion:\n" + gate
         session_file = child_session_file(self.session_file)
         child = ChatState(
-            settings=self.settings,
+            settings=child_settings(settings if settings is not None else self.settings),
             inference=self.inference,
             history=ChatHistory(),
             running=False,          # drain after one turn: MaybeRegenerate prompts nobody
@@ -148,19 +151,26 @@ def answer(state: ChatState) -> str:
     """The subagent's final state as the text the parent's model reads.
 
     A child run leaves at most one turn in history: none if the request never fit the context
-    window, a cancelled one if the operator pressed ESC or cancelled at a confirmation prompt, an
-    empty answer if the round cap cut the turn short, and otherwise the answer. Every case must
-    come back as text the parent can act on — it cannot see the child's history.
+    window even on round one; otherwise a turn whose `stop` and `cancelled` say how it ended:
+      stop == "overflow"   the window filled up mid-task (cancelled is True as well)
+      cancelled            the operator pressed ESC or cancelled at a confirmation prompt
+      stop == "cap"        the round cap cut the turn short; the model's text so far is the answer
+      neither              the answer, verbatim ("(no answer)" when the model said nothing)
+    Every case must come back as text the parent can act on — it cannot see the child's history.
+    The texts the parent reads: "The subagent ran out of context window before finishing.",
+    "The operator cancelled the request.", and for a capped turn the answer followed by
+    "\\n[Subagent hit the tool round cap]".
     """
     assert len(state.history.turns) <= 1
     assert state.pending is None
     if len(state.history.turns) == 0:
         return "The request didn't fit the context window."
-    if state.history.turns[0].cancelled:
+    turn = state.history.turns[0]
+    child_msg = turn.assistant or "(no answer)"
+    if turn.stop == "overflow":
+        return "The subagent ran out of context window before finishing."
+    if turn.cancelled:
         return "The operator cancelled the request."
-    child_msg = state.history.turns[0].assistant
-    if len(child_msg) == 0:
-        child_msg = "(no answer)"
-    if len(state.history.turns[0].rounds) == state.settings.max_tool_rounds:
-        return f"{child_msg}\n[Subagent used all {state.settings.max_tool_rounds} tool rounds]"
+    if turn.stop == "cap":
+        return f"{child_msg}\n[Subagent hit the tool round cap]"
     return child_msg

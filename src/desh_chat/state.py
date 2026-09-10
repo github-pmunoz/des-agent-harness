@@ -151,11 +151,11 @@ class PendingTurn:
         """Append results to the latest round, in call order: the round is answered one call per step."""
         return self.with_results(self.rounds[-1].results + results)
 
-    def finish(self, assistant: str, tokens: int, cancelled: bool) -> Turn:
+    def finish(self, assistant: str, tokens: int, cancelled: bool, stop: str = "") -> Turn:
         """The final answer arrived (or the turn was cut short): freeze into a history Turn.
         tokens prices only the final completion; the rounds carry their own."""
         return Turn(self.user, assistant, tokens=tokens + self.priced_tokens() if tokens else 0,
-                    cancelled=cancelled, rounds=self.rounds)
+                    cancelled=cancelled, rounds=self.rounds, stop=stop)
 
 
 # -----------------------
@@ -170,6 +170,10 @@ class Turn:
     cancelled: bool = False
     summary: bool = False
     rounds: tuple[Round, ...] = ()   # tool exchanges between user and assistant; () for a plain turn
+    # why the turn ended early, "" when the model answered: "cap" (round cap hit; the model's text
+    # so far is the answer) or "overflow" (no room left for a completion; cancelled as well, so the
+    # turn stays out of the view). Read by whoever must tell the cases apart, the delegate's answer().
+    stop: str = ""
 
     def __post_init__(self):
         if self.tokens == 0:
@@ -197,13 +201,16 @@ class Turn:
              "cancelled": self.cancelled, "summary": self.summary}
         if self.rounds:     # plain turns serialize exactly as they did in format 1
             d["rounds"] = [r.to_dict() for r in self.rounds]
+        if self.stop:       # likewise: the key exists only when there is a reason to record
+            d["stop"] = self.stop
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> Turn:
         return cls(user=d["user"], assistant=d["assistant"], tokens=d.get("tokens", 0),
                    cancelled=d.get("cancelled", False), summary=d.get("summary", False),
-                   rounds=tuple(Round.from_dict(r) for r in d.get("rounds", [])))
+                   rounds=tuple(Round.from_dict(r) for r in d.get("rounds", [])),
+                   stop=d.get("stop", ""))
 
 
 @dataclass(frozen=True)

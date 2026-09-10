@@ -6,6 +6,7 @@ parent asks for delegate, child runs to drain on the same FakeServer script, par
 including the two exits that must NOT become tool text: a harness bug does, Ctrl+C does not.
 """
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -24,9 +25,9 @@ from conftest import FakeServer, MAX_CONTEXT, MODELS, PORT
 SETTINGS = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, max_tool_rounds=3)
 
 
-def turn(assistant: str, rounds: int = 0, cancelled: bool = False) -> Turn:
+def turn(assistant: str, rounds: int = 0, cancelled: bool = False, stop: str = "") -> Turn:
     tc = ToolCall(index=0, id="c", type="function", name="Read", arguments="{}")
-    return Turn("task", assistant, cancelled=cancelled,
+    return Turn("task", assistant, cancelled=cancelled, stop=stop,
                 rounds=tuple(Round("", (tc,), results=(ToolResult("c", "Read", "x"),)) for _ in range(rounds)))
 
 
@@ -44,20 +45,38 @@ def with_server(make_state, server, **overrides):
     return inference, make_state(inference=inference, settings=SETTINGS, **overrides)
 
 
-def with_delegate(tools: ToolRegistry, *, inference, settings, system_prompt="", session_file=None, root=".") -> ToolRegistry:
+def with_delegate(tools: ToolRegistry, *, inference, settings, session_file=None, root=".") -> ToolRegistry:
     """`tools` plus the delegate tool, whose subagents get `tools` as given — without delegate.
-    What cli.build_tools does for the real run, minus the per-flag toolsets."""
-    d = Delegate(root=root, inference=inference, settings=settings, system_prompt=system_prompt, tools=tools, session_file=session_file)
-    return tools.add(d.delegate, name="delegate")
+    What cli.build_tools does for the real run, minus the per-flag toolsets: registered with
+    inject=("settings",) so every call carries the parent's current settings."""
+    d = Delegate(root=root, inference=inference, settings=settings, tools=tools, session_file=session_file)
+    return tools.add(d.delegate, name="delegate", inject=("settings",))
 
 
 def parent_with_delegate(make_state, server, tools=ToolRegistry(), delegate_root=".", **overrides):
     """A parent state whose registry is `tools` plus delegate; subagents get `tools`. Not running,
     so the parent drains after its turn instead of prompting for another."""
     inference, state = with_server(make_state, server, running=False, **overrides)
-    registry = with_delegate(tools, inference=inference, settings=state.settings, system_prompt=state.system_prompt,
+    registry = with_delegate(tools, inference=inference, settings=state.settings,
                              session_file=state.session_file, root=delegate_root)
     return state.__class__(**{**state.__dict__, "tools": registry})
+
+
+class RecordingEngine:
+    """Stands in for Engine inside delegate.py: records the child state it was asked to run and
+    returns it with one answered turn, so a test can look at what the child was BUILT from
+    without driving a server script."""
+    states: list = []
+
+    def __class_getitem__(cls, item):
+        return cls
+
+    def __init__(self, **kwargs):
+        pass
+
+    def run(self, state, seed, **kwargs):
+        RecordingEngine.states.append(state)
+        return replace(state, history=ChatHistory((Turn("t", "42"),)))
 
 
 # ---------------------
@@ -85,6 +104,9 @@ class TestCliWiring:
             assert delegate.completions_log is logger
             assert delegate.des_log is des_log
             assert [t.name for t in tools.tools] == ["Read", "delegate"]
+            # the parent's settings go in untouched; the child derives its own per call (item below)
+            assert delegate.settings == SETTINGS
+            assert tools.get("delegate").inject == ("settings",)
 
 
 # ---------------------
@@ -105,13 +127,22 @@ class TestAnswer:
     def test_empty_answer_is_named(self, make_state):
         assert answer(child_of(make_state, turn(""))) == "(no answer)"
 
-    def test_using_every_round_qualifies_the_answer(self, make_state):
-        text = answer(child_of(make_state, turn("so far: x", rounds=SETTINGS.max_tool_rounds)))
-        assert text.startswith("so far: x") and f"all {SETTINGS.max_tool_rounds} tool rounds" in text
+    def test_a_capped_turn_qualifies_the_answer(self, make_state):
+        text = answer(child_of(make_state, turn("so far: x", rounds=SETTINGS.max_tool_rounds, stop="cap")))
+        assert text == "so far: x\n[Subagent hit the tool round cap]"
 
     def test_round_cap_with_no_text_composes_both_notes(self, make_state):
-        text = answer(child_of(make_state, turn("", rounds=SETTINGS.max_tool_rounds)))
-        assert text.startswith("(no answer)") and "tool rounds" in text
+        text = answer(child_of(make_state, turn("", rounds=SETTINGS.max_tool_rounds, stop="cap")))
+        assert text == "(no answer)\n[Subagent hit the tool round cap]"
+
+    def test_finishing_on_the_last_allowed_round_is_not_a_cap(self, make_state):
+        """The reason lives on the turn, not in the round count: a model that answers exactly at the
+        limit answered, and the parent must not be told otherwise."""
+        assert answer(child_of(make_state, turn("42", rounds=SETTINGS.max_tool_rounds))) == "42"
+
+    def test_overflow_is_reported_as_overflow_not_as_a_cancel(self, make_state):
+        text = answer(child_of(make_state, turn("", rounds=2, cancelled=True, stop="overflow")))
+        assert text == "The subagent ran out of context window before finishing."
 
     def test_a_pending_turn_at_drain_is_a_harness_bug(self, make_state):
         from desh_chat.state import PendingTurn
@@ -139,7 +170,7 @@ class TestChildSetup:
     def test_delegate_is_added_asking_and_subagents_do_not_get_it(self, make_state):
         inference, state = with_server(make_state, FakeServer())
         base = ToolRegistry().add(lambda: "x", name="Read", confirm=False)
-        registry = with_delegate(base, inference=inference, settings=SETTINGS, system_prompt="sp")
+        registry = with_delegate(base, inference=inference, settings=SETTINGS)
         tool = registry.get("delegate")
         assert tool is not None and tool.confirm is True
         assert [t.name for t in registry.tools] == ["Read", "delegate"]
@@ -147,8 +178,30 @@ class TestChildSetup:
 
     def test_the_model_sees_the_full_signature(self, make_state):
         inference, _ = with_server(make_state, FakeServer())
-        params = with_delegate(ToolRegistry(), inference=inference, settings=SETTINGS, system_prompt="sp").get("delegate").parameters
+        params = with_delegate(ToolRegistry(), inference=inference, settings=SETTINGS).get("delegate").parameters
         assert set(params["properties"]) == {"task", "context", "gate", "check"} and params["required"] == ["task"]
+
+    def test_child_is_built_from_child_settings_of_the_fallback(self, make_state, monkeypatch, capsys):
+        """No settings injected: the Delegate's own (startup) settings, with compaction off."""
+        monkeypatch.setattr("desh_chat.delegate.Engine", RecordingEngine)
+        RecordingEngine.states.clear()
+        inference, _ = with_server(make_state, FakeServer())
+        Delegate(root=".", inference=inference, settings=SETTINGS).delegate("task")
+        child, = RecordingEngine.states
+        assert child.settings == child_settings(SETTINGS)
+        assert child.settings.compaction_threshold == float("inf")
+
+    def test_injected_settings_replace_the_startup_ones(self, make_state, monkeypatch, capsys):
+        """The parent flipped auto mode and switched model after the registry was built: the child
+        must be built from the CURRENT settings, still with compaction off."""
+        monkeypatch.setattr("desh_chat.delegate.Engine", RecordingEngine)
+        RecordingEngine.states.clear()
+        inference, _ = with_server(make_state, FakeServer())
+        current = replace(SETTINGS, auto=True, model=MODELS[1], temperature=0.9)
+        Delegate(root=".", inference=inference, settings=SETTINGS).delegate("task", settings=current)
+        child, = RecordingEngine.states
+        assert child.settings == child_settings(current)
+        assert (child.settings.auto, child.settings.model, child.settings.temperature) == (True, MODELS[1], 0.9)
 
 
 # ---------------------
@@ -194,6 +247,23 @@ class TestFullLoop:
         result = final.history.turns[0].rounds[0].results[0].content
         assert result.startswith("Tool 'delegate' raised RuntimeError") and "boom" in result
 
+    def test_the_parents_current_settings_reach_the_child_through_execute_tool_calls(self, make_state, monkeypatch, no_esc_watcher):
+        """End to end: the Delegate was built with auto OFF, the parent state has auto ON (the
+        operator pressed "a" after startup). ExecuteToolCalls injects state.settings, so neither
+        the parent's delegate call nor the child's confirmed tool ever reaches gate.ask."""
+        asked = []
+        monkeypatch.setattr(gate, "ask", lambda tc: asked.append(tc.name) or Answer("yes"))
+        child_tools = ToolRegistry().add(lambda: "touched", name="Touch")        # confirm=True by default
+        server = FakeServer(script=[self.DELEGATION, {"tool_calls": [{"name": "Touch"}]}, {"content": "12"}, {"content": "12"}])
+        inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT)
+        registry = with_delegate(child_tools, inference=inference, settings=SETTINGS)      # startup: auto off
+        state = make_state(inference=inference, settings=replace(SETTINGS, auto=True), running=False, tools=registry)
+        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        assert asked == []
+        assert final.history.turns[0].rounds[0].results[0].content == "12"
+        child_req = server.calls[2][1]
+        assert child_req.model == SETTINGS.model
+
     def test_ctrl_c_in_the_child_reaches_the_parent(self, make_state, always_yes, no_esc_watcher):
         class Interrupted(FakeServer):
             def stream(self, req, renderer, cancelled=lambda: False):
@@ -213,7 +283,7 @@ class TestGateAndCheck:
     def test_schema_pins_four_parameters(self, make_state):
         registry = with_delegate(ToolRegistry(), inference=InferenceEngine(models=MODELS, max_context=MAX_CONTEXT,
                                                                            server=FakeServer(script=[]), port=PORT),
-                                 settings=SETTINGS, system_prompt="sp")
+                                 settings=SETTINGS)
         schema = registry.get("delegate").parameters
         assert set(schema["properties"]) == {"task", "context", "gate", "check"}
         assert schema["required"] == ["task"]

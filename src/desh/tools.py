@@ -83,14 +83,17 @@ def parse_docstring(doc: Optional[str]) -> tuple[str, dict[str, str]]:
     return summary, params
 
 
-def parameters_schema(fn: Callable[..., Any]) -> dict:
+def parameters_schema(fn: Callable[..., Any], inject: tuple[str, ...] = ()) -> dict:
     """The `parameters` object for fn: one property per parameter, required when it has no default.
-    Only parameters that can be passed by keyword are expressible (the engine calls fn(**arguments))."""
+    Only parameters that can be passed by keyword are expressible (the engine calls fn(**arguments)).
+    Parameters named in `inject` are supplied by the harness, not the model, and are left out."""
     _, param_docs = parse_docstring(fn.__doc__)
     hints = typing.get_type_hints(fn)
     properties: dict[str, dict] = {}
     required: list[str] = []
     for p in inspect.signature(fn).parameters.values():
+        if p.name in inject:
+            continue
         if p.kind not in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY):
             raise TypeError(f"{fn.__name__}: parameter {p.name!r} cannot be passed by keyword; tools take keyword arguments only")
         try:
@@ -122,15 +125,19 @@ class Tool:
     confirm: bool = True    # ask the operator before running; False only for a tool declared read-only
     # how the call is shown at the confirmation prompt: decoded arguments -> text. None -> generic rendering.
     preview: Optional[Callable[[dict], str]] = field(default=None, repr=False, compare=False)
+    # parameters the HARNESS supplies at call time (invoke(name, arguments, **provided)); the model
+    # never sees them in the schema and cannot pass them. Names not declared here are never injected.
+    inject: tuple[str, ...] = ()
 
     @classmethod
     def define(cls, fn: Callable[..., Any], *, name: Optional[str] = None, description: Optional[str] = None,
                parameters: Optional[dict] = None, confirm: bool = True,
-               preview: Optional[Callable[[dict], str]] = None) -> Tool:
+               preview: Optional[Callable[[dict], str]] = None, inject: tuple[str, ...] = ()) -> Tool:
         """Derive the schema from fn's signature, type hints and docstring. Each keyword is an override
         slot that replaces the derived part verbatim — `parameters` is the hand-written JSON Schema escape
         hatch for a signature the derivation cannot express. `confirm=False` declares the tool read-only;
-        `preview` renders the call for the operator (an Edit as a diff) instead of the generic listing."""
+        `preview` renders the call for the operator (an Edit as a diff) instead of the generic listing;
+        `inject` names the parameters the harness fills in, which the derived schema leaves out."""
         summary, _ = parse_docstring(fn.__doc__)
         name = name or fn.__name__
         schema = {
@@ -138,10 +145,10 @@ class Tool:
             "function": {
                 "name": name,
                 "description": description if description is not None else summary,
-                "parameters": parameters if parameters is not None else parameters_schema(fn),
+                "parameters": parameters if parameters is not None else parameters_schema(fn, inject),
             },
         }
-        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview)
+        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview, inject=inject)
 
     @property
     def description(self) -> str:
@@ -177,17 +184,19 @@ class ToolRegistry:
         """What goes on Request.tools."""
         return [t.schema for t in self.tools]
 
-    def invoke(self, name: str, arguments: str) -> str:
+    def invoke(self, name: str, arguments: str, **provided: Any) -> str:
         """Run the tool the model asked for and return the content of its role:tool message.
 
         `arguments` is the wire string from ToolCall.arguments — json.loads happens here, nowhere
-        earlier. This method never raises for anything the MODEL can cause or the TOOL can do:
-        an unknown tool, malformed JSON, arguments the function rejects, or an exception inside the
-        tool all come back as text the model reads and can recover from (the same rule CommandError
-        follows). Engine.on_error is reserved for bugs in the harness, so nothing tool-side may
-        propagate past this boundary. The result is bounded to max_result_chars (head and tail kept).
+        earlier. `provided` is what the harness offers every call (the current settings, say); a
+        tool receives only the names it declared in Tool.inject, the rest are dropped. This method
+        never raises for anything the MODEL can cause or the TOOL can do: an unknown tool, malformed
+        JSON, arguments the function rejects, or an exception inside the tool all come back as text
+        the model reads and can recover from (the same rule CommandError follows). Engine.on_error
+        is reserved for bugs in the harness, so nothing tool-side may propagate past this boundary.
+        The result is bounded to max_result_chars (head and tail kept).
         """
-        return self.bound(self._invoke(name, arguments))
+        return self.bound(self._invoke(name, arguments, provided))
 
     def bound(self, text: str) -> str:
         """text cut to max_result_chars: the head and the tail survive, the middle is replaced by a
@@ -200,7 +209,7 @@ class ToolRegistry:
         dropped = len(text) - head - tail
         return text[:head] + f"\n[... {dropped} characters truncated ...]\n" + text[-tail:]
 
-    def _invoke(self, name: str, arguments: str) -> str:
+    def _invoke(self, name: str, arguments: str, provided: dict[str, Any]) -> str:
         tool = self.get(name)
         if tool is None:
             return f"Tool {name!r} is not available."
@@ -210,14 +219,17 @@ class ToolRegistry:
             return f"Could not decode arguments as JSON: {e}"
         if not isinstance(decoded, dict):
             return f"Arguments must be a JSON object, got {_JSON_NAMES.get(type(decoded), type(decoded).__name__)}."
+        if reserved := sorted(set(decoded) & set(tool.inject)):
+            return f"Tool {name!r} rejected the arguments: {', '.join(reserved)} cannot be passed."
+        injected = {k: v for k, v in provided.items() if k in tool.inject}
 
         try:
-            inspect.signature(tool.fn).bind(**decoded)
+            inspect.signature(tool.fn).bind(**decoded, **injected)
         except TypeError as e:
             return f"Tool {name!r} rejected the arguments: {e}"
 
         try:
-            result = tool.fn(**decoded)
+            result = tool.fn(**decoded, **injected)
         except Exception as e:
             return f"Tool {name!r} raised {type(e).__name__}: {e}" +( f"\n{traceback.format_exc()}" if self.debug else "")
 

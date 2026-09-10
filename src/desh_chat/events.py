@@ -112,11 +112,12 @@ class LogCompletion(Event):
 #                              cancelled            -> TurnEnd(cancelled=True)
 #                              tool_calls           -> AppendRound
 #                              anything else        -> TurnEnd
-#   AppendRound              round cap check; records the calls on pending  -> ExecuteToolCalls(0) | Warn + TurnEnd
+#   AppendRound              round cap check; records the calls on pending  -> ExecuteToolCalls(0) | Warn + TurnEnd(stop="cap")
 #   ExecuteToolCalls(i)      ONE call per step, in order: asks the operator
 #                            if the tool wants confirmation, runs it or
 #                            records the denial, attaches the result       -> ExecuteToolCalls(i+1) | NextRound | TurnEnd(cancelled)
 #   TurnEnd                  freezes pending into a history Turn, clears it  -> MaybeCompact (+ SaveSession)
+#                            (NextRound out of room mid-loop -> TurnEnd(cancelled, stop="overflow"))
 #
 # Today's plain chat is the one-round case: NextRound -> StreamCompletion -> TurnEnd.
 # Only TurnEnd touches history, so view(), compaction and persistence never see a turn in progress;
@@ -177,7 +178,7 @@ class AppendRound(Event):
         if len(state.pending.rounds) >= state.settings.max_tool_rounds:
             return state, [Warn(f"Tool-call round cap reached ({state.settings.max_tool_rounds}); ending the turn without running "
                                 f"{', '.join(tc.name for tc in self.tool_calls)}."),
-                           TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False)]
+                           TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False, stop="cap")]
         
         # A model that asks for the same calls a third time, having twice seen the same results, is
         # looping: the third round is not recorded and the turn ends the way the round cap ends it.
@@ -240,7 +241,9 @@ class ExecuteToolCalls(Event):
                 shown.append(Warn(f"  {len(skipped)} later call(s) not run: {', '.join(r.name for r in skipped)}"))
             return replace(state, pending=state.pending.add_results(denied, *skipped)), shown + [DisplayStats(colour=Palette.TOOL_STATS), NextRound()]
 
-        result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments))
+        # the settings go along for tools that declared them (delegate): a subagent inherits the
+        # parent's CURRENT settings, not the ones captured when the registry was built
+        result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments, settings=state.settings))
         last = self.index + 1 == len(round.tool_calls)
         # the echo is for the operator's eye, so it is short; the model gets the full result
         return (replace(state, pending=state.pending.add_results(result)),
@@ -256,9 +259,10 @@ class TurnEnd(Event):
     assistant: str
     tokens: int = 0     # prices the final completion only; 0 -> the Turn falls back to the character heuristic
     cancelled: bool = False
+    stop: str = ""      # recorded on the Turn: "cap" | "overflow" | "" (see Turn.stop)
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         assert state.pending is not None
-        turn = state.pending.finish(self.assistant, self.tokens, self.cancelled)
+        turn = state.pending.finish(self.assistant, self.tokens, self.cancelled, self.stop)
         new_state = replace(state, history=state.history.append(turn), pending=None)
         return new_state, [MaybeCompact()] + persist(state)
 
@@ -329,9 +333,10 @@ class NextRound(Event):
         if gen_budget <= 0:
             if not pending.rounds:      # nothing happened yet: reject the message, no turn recorded
                 return replace(state, pending=None), [Error("Request exceeds context window."), MaybeRegenerate()]
-            # mid-loop: the rounds so far are a real exchange; keep them as a cancelled turn
+            # mid-loop: the rounds so far are a real exchange; keep them as a cancelled turn, marked
+            # so a reader can tell an overflow from the operator's cancel
             return state, [Error("Request exceeds context window; ending the turn."),
-                           TurnEnd(assistant="", tokens=0, cancelled=True)]
+                           TurnEnd(assistant="", tokens=0, cancelled=True, stop="overflow")]
         view = state.history.view_turns(state.settings.context - reserved)
         return state, [StreamCompletion(
             request=Request(
