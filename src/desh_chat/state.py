@@ -23,6 +23,7 @@ class Settings:
     compaction_target: float = 0.25
     turn_token_cap: float = 0.40
     min_compaction_tokens: int = 64
+    auto: bool = False           # auto mode: confirmed tools run without asking; Ctrl+C turns it off
 
 @dataclass(frozen=True)
 class InferenceEngine:

@@ -20,7 +20,9 @@ from desh_chat import gate
 from desh_chat.display import DisplayStats, Info, Warn
 from desh_chat.events import ExecuteToolCalls, NextRound, PromptUser, TurnEnd, UserMessage
 from desh_chat.gate import DENIED_TEXT, SKIPPED_TEXT, Answer
-from desh_chat.state import InferenceEngine, PendingTurn, Round
+from dataclasses import replace
+
+from desh_chat.state import InferenceEngine, PendingTurn, Round, Settings
 
 
 RAN: list[str] = []     # what actually executed, to prove denied/skipped calls never do
@@ -186,6 +188,32 @@ class TestAnswers:
 
 
 # ---------------------
+# Auto mode: confirmed tools run without asking; "a" at the prompt turns it on
+# ---------------------
+
+class TestAutoMode:
+    def test_auto_on_runs_confirmed_tools_without_asking(self, make_state, answers):
+        asked = answers()
+        state, evs = run_round(make_state(
+            settings=replace(Settings(model="model-a", temperature=0.3, think=False,
+                                      context=16384, max_turn_tokens=8192), auto=True),
+            pending=pending_with(WRITE, DELETE), tools=REGISTRY))
+        assert asked == []                       # auto-approve: the prompt never opens
+        assert RAN == ["write a", "delete a"]
+        assert [type(e) for e in evs] == [Info, DisplayStats, NextRound]
+
+    def test_auto_answer_enables_auto_mode_and_reasks_the_same_call(self, make_state, answers):
+        # "a" does not run the call and does not deny it: it turns auto mode on and re-asks
+        # the SAME call index; on the re-ask auto is on, so the call runs without asking.
+        asked = answers(Answer("auto"))
+        state, evs = run_round(make_state(pending=pending_with(WRITE), tools=REGISTRY))
+        assert asked == ["write_file"]           # asked exactly once; the re-ask never prompts
+        assert RAN == ["write a"]                # the call ran, on the re-ask
+        assert state.settings.auto is True
+        assert any(isinstance(e, Info) for e in evs)
+
+
+# ---------------------
 # Through the engine: the model sees the denial and adapts
 # ---------------------
 
@@ -251,11 +279,19 @@ def keys(monkeypatch):
 class TestAsk:
     @pytest.mark.parametrize("typed, kind", [("y", "yes"), ("Y", "yes"), ("\n", "yes"), ("\r", "yes"),
                                              ("n", "no"), ("N", "no"),
-                                             ("c", "cancel"), ("C", "cancel"), ("\x1b", "cancel")])
+                                             ("c", "cancel"), ("C", "cancel"), ("\x1b", "cancel"),
+                                             ("a", "auto"), ("A", "auto")])
     def test_single_key_decides_without_enter(self, keys, typed, kind):
         seen = keys(typed)
         assert ask(WRITE) == Answer(kind)
         assert seen == []                       # no line-mode prompt was opened
+
+    def test_prompt_offers_auto_mode(self, keys, capsys):
+        # the key prompt is written via sys.stdout.write, not input() — capture stdout
+        keys("y")
+        ask(WRITE)
+        out = capsys.readouterr().out
+        assert "[a] enable auto-mode for this session" in out
 
     def test_unknown_keys_ask_again_until_a_decision(self, keys):
         keys("x?7n")

@@ -233,6 +233,28 @@ class TestExitQuit:
         assert isinstance(terminal, MaybeRegenerate)
 
 
+class TestAuto:
+    def test_auto_enables_auto_mode(self, make_state):
+        final, first, regen = run_command(make_state, "auto", "")
+        assert final.settings.auto is True
+        assert isinstance(first, Info)
+        assert isinstance(regen, MaybeRegenerate)
+
+    def test_noauto_disables_auto_mode(self, make_state):
+        final, first, regen = run_command(make_state, "noauto", "")
+        assert final.settings.auto is False
+        assert isinstance(first, Info)
+        assert isinstance(regen, MaybeRegenerate)
+
+    def test_auto_takes_no_arg(self, make_state):
+        _, first, _ = run_command(make_state, "auto", "now")
+        assert isinstance(first, Warn)
+
+    def test_noauto_takes_no_arg(self, make_state):
+        _, first, _ = run_command(make_state, "noauto", "now")
+        assert isinstance(first, Warn)
+
+
 class TestUnknownAndEdgeCases:
     def test_unknown_command_rejected(self, make_state, capsys):
         _, first, _ = run_command(make_state, "bogus", "")

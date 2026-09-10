@@ -104,6 +104,14 @@ class Command(Event):
         value = self._float(lo=0.0, hi=2.0)
         return state.change_setting("temperature", value), [Info(f"↪ temperature set to: {value}"), MaybeRegenerate()]
 
+    def _cmd_auto(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        self._no_args()
+        return state.change_setting("auto", True), [Info(f"↪ auto mode enabled"), MaybeRegenerate()]
+
+    def _cmd_noauto(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        self._no_args()
+        return state.change_setting("auto", False), [Info(f"↪ auto mode disabled"), MaybeRegenerate()]
+
     def _cmd_think(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         self._no_args()
         return state.change_setting("think", True), [Info(f"↪ thinking mode enabled"), MaybeRegenerate()]
@@ -150,6 +158,8 @@ class Command(Event):
 # any help listing all read from here. Keys are canonical names without the
 # leading slash. Must follow the Command class so the handlers resolve.
 COMMANDS: dict[str, CommandSpec] = {
+    "auto":            CommandSpec("enable auto mode for this session",     Command._cmd_auto),
+    "noauto":          CommandSpec("disable auto mode",                     Command._cmd_noauto),
     "compact":         CommandSpec("compact the conversation history",      Command._cmd_compact),
     "context":         CommandSpec("set the context window size",           Command._cmd_context),
     "exit":            CommandSpec("exit the chat",                         Command._cmd_exit, aliases=("quit",)),

@@ -36,4 +36,5 @@ $BIN \
     -mt $TURN_TOKENS \
     --delegate \
     --read \
+    --bash \
     "$@"

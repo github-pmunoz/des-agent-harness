@@ -86,7 +86,9 @@ The most useful options are:
 
 With `--coding`, the model can `Read` without confirmation. `Write`, `Edit`, and `Bash` are shown for approval before they run, one call at a time. File paths are confined to `--workspace` (no escaping the root, no symlinks); `Bash` runs with the workspace as its working directory and must state a `reason` alongside the command. An `Edit` is shown as a diff.
 
-At the approval prompt one key decides: `y` runs the call, `n` declines it, `m` declines it with a message the model reads as the tool result, `c` (or ESC) cancels the turn. Enter is `y`. A declined call short-circuits the rest of that round: the model sees the denial and adapts on its next round.
+At the approval prompt one key decides: `y` runs the call, `n` declines it, `m` declines it with a message the model reads as the tool result, `c` (or ESC) cancels the turn, `a` enables auto mode for the session. Enter is `y`. A declined call short-circuits the rest of that round: the model sees the denial and adapts on its next round.
+
+Auto mode turns the confirmation gate off: confirmed tools run without asking. It is on for the rest of the session — `Ctrl+C` turns it off (in auto mode `Ctrl+C` does not exit; it turns auto mode off and returns to the prompt), and `/noauto` does the same. Delegate subagents inherit it, so their confirmed tools run unconfirmed too.
 
 With `--delegate`, the model can hand a self-contained task to a subagent and read back only its final answer, which keeps the reads and tool rounds of a subtask out of the main context window. The subagent is a nested engine run: it inherits the model, settings, system prompt and tools of the main agent (never `delegate` itself, so there is no nesting), streams to the terminal between two banner lines, and its confirmed tools ask for approval exactly as the main agent's do. Each delegation asks for approval, with the task and context shown. ESC or cancel inside the subagent ends only the subagent; the main agent reads that it was cancelled. When a session file is set, every subagent run keeps its own beside it, named `<session stem>.delegate-<timestamp>_<hash>.json`.
 
@@ -105,6 +107,8 @@ Type these at the `You:` prompt. Tab completes canonical command names.
 | `/models` | List models reported by the server. |
 | `/model [name]` | Show or select a reported model. |
 | `/temperature [0.0–2.0]` | Show or set sampling temperature. |
+| `/auto` | Enable auto mode: confirmed tools run without asking. |
+| `/noauto` | Disable auto mode. |
 | `/think` | Enable thinking. |
 | `/nothink` | Disable thinking. |
 

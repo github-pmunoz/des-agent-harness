@@ -84,6 +84,7 @@ def resolve_session_file(session: str, sessions_folder: str, run_id: str) -> str
 
 def main():
     ap = argparse.ArgumentParser(description="Simple chatbot using LlamaClient")
+    ap.add_argument("-a",   "--auto",    action="store_true", help="enable auto mode")
     ap.add_argument("-p",   "--port",           type=int, default=8012)
     ap.add_argument("-m",   "--model",          default="Qwen3.8-27B-UD-Q4_K_M", help="model id (router mode)")
     ap.add_argument("-t",   "--temperature",    type=float, default=0.3)
@@ -132,7 +133,8 @@ def main():
         think=args.think,
         context=args.context,
         max_turn_tokens=args.max_turn_tokens,
-        max_tool_rounds=args.max_tool_rounds
+        max_tool_rounds=args.max_tool_rounds,
+        auto=args.auto,
     )
     inference = InferenceEngine(
         server=client,
@@ -167,6 +169,7 @@ def main():
     Model:        {args.model}
     Temperature:  {args.temperature}
     Think mode:   {"enabled" if args.think else "disabled"}
+    Auto mode:    {"on" if settings.auto else "off"}
     Context:      {args.context}
     Turn tokens:  {args.max_turn_tokens}
     Tool rounds:  {args.max_tool_rounds}

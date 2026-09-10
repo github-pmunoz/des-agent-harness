@@ -216,11 +216,19 @@ class ExecuteToolCalls(Event):
         tc = round.tool_calls[self.index]
         tool = state.tools.get(tc.name)
         print(describe_call(tc, tool))
-        if tool is not None and tool.confirm:
+        if state.settings.auto:
+            answer = Answer("yes")      # auto mode: confirmed tools run without asking
+        elif tool is not None and tool.confirm:
             answer = gate.ask(tc)       # through the module so a test can script the prompt
         else:
             answer = Answer("yes")
 
+        if answer.kind == "auto":
+            # "a" neither runs nor denies the call: it turns auto mode on and re-asks the SAME
+            # call; on the re-ask auto is on, so the call runs without asking.
+            return state.change_setting("auto", True), [
+                Info("auto mode on: confirmed tools run without asking; Ctrl+C turns it off"),
+                ExecuteToolCalls(self.index)]
         if answer.kind == "cancel":
             return state, [Warn("Turn cancelled at the confirmation prompt."),
                            TurnEnd(assistant="", tokens=0, cancelled=True)]

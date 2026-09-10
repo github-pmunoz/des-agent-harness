@@ -24,7 +24,7 @@ SKIPPED_TEXT = "Not run: the user declined an earlier tool call in this round. R
 class Answer:
     """One operator decision at the confirmation prompt. `message` is guidance the operator typed
     with a "no": it replaces DENIED_TEXT as the tool message, so the model learns why."""
-    kind: Literal["yes", "no", "cancel"]
+    kind: Literal["yes", "no", "cancel", "auto"]
     message: str = ""
 
 
@@ -69,7 +69,7 @@ def ask(tc: ToolCall) -> Answer:
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
                 except Exception:
                     pass
-    choice_prompt = "[y]es / [n]o / [m]essage / [c]ancel: (ESC to cancel, ENTER for yes)"
+    choice_prompt = "[y]es / [n]o / [m]essage / [c]ancel / [a] enable auto-mode for this session: (ESC to cancel, ENTER for yes)"
     print(c_out(Palette.CHROME, "─" * len(choice_prompt)))
     while True:
         choice = key_prompt(choice_prompt)
@@ -84,6 +84,8 @@ def ask(tc: ToolCall) -> Answer:
             return Answer(kind="yes")
         if choice == "c":
             return Answer(kind="cancel")
+        if choice == "a":
+            return Answer(kind="auto")
         if choice == "n":
             return Answer(kind="no")
         if choice == "m":
