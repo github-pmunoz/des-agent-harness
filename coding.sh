@@ -4,7 +4,9 @@ DESH_HOME=$(dirname $0)
 SESSIONS_DIR="$DESH_HOME/.sessions"
 COMPLETIONS_LOG="$DESH_HOME/.completions.log"
 DES_LOG="$DESH_HOME/.des.log"
-MODEL="Qwen3.8-27B-UD-Q4_K_M-64K"
+MODEL="Qwen3.8-27B-UD-Q4_K_M-64K" # default, override with first positional argument
+MODEL="${1:-$MODEL}"
+[ -n "$1" ] && shift
 CONTEXT=65536
 TURN_TOKENS=65536
 MAX_TURN_ROUNDS=1000
