@@ -140,6 +140,7 @@ class TestBash:
 
     def test_reason_is_mandatory_and_comes_before_the_command_in_the_schema(self, tmp_path):
         bash = coding_registry(str(tmp_path)).get("Bash")
+        assert bash.identity == ("command",)     # the reason is wording, not part of the call
         assert list(bash.parameters["properties"]) == ["reason", "command", "timeout"]
         assert bash.parameters["required"] == ["reason", "command"]
         assert "why" in bash.parameters["properties"]["reason"]["description"]

@@ -309,6 +309,42 @@ class TestInject:
 
 
 # ---------------------
+# Tool.identity: which arguments make two calls the same call
+# ---------------------
+
+def run(reason: str, command: str) -> str:
+    """A Bash-shaped tool: the reason is wording, the command is the call."""
+    return command
+
+
+class TestIdentity:
+    REGISTRY = ToolRegistry().add(run, identity=("command",)).add(get_weather)
+
+    def test_only_identity_arguments_count_and_key_order_does_not(self):
+        a = self.REGISTRY.identity("run", '{"reason": "first try", "command": "ls"}')
+        b = self.REGISTRY.identity("run", '{"command": "ls", "reason": "forty-first try"}')
+        assert a == b == ("run", '{"command": "ls"}')
+
+    def test_a_different_identity_argument_is_a_different_call(self):
+        assert self.REGISTRY.identity("run", '{"reason": "x", "command": "ls"}') != \
+               self.REGISTRY.identity("run", '{"reason": "x", "command": "ls -a"}')
+
+    def test_no_identity_means_every_argument_counts(self):
+        assert self.REGISTRY.identity("get_weather", '{"city": "Lima", "days": 1}') == ("get_weather", '{"city": "Lima", "days": 1}')
+        assert self.REGISTRY.identity("get_weather", '{"city": "Lima", "days": 1}') != \
+               self.REGISTRY.identity("get_weather", '{"days": 1, "city": "Lima"}')
+
+    def test_unknown_tool_or_unparseable_arguments_compare_as_is(self):
+        assert self.REGISTRY.identity("nope", '{"command": "ls"}') == ("nope", '{"command": "ls"}')
+        assert self.REGISTRY.identity("run", "{not json") == ("run", "{not json")
+        assert self.REGISTRY.identity("run", "[1]") == ("run", "[1]")
+
+    def test_define_records_the_identity(self):
+        assert Tool.define(run, identity=("command",)).identity == ("command",)
+        assert Tool.define(run).identity == ()
+
+
+# ---------------------
 # Wiring: NextRound offers the registry's schemas
 # ---------------------
 

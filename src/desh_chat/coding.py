@@ -12,7 +12,9 @@ Bash takes a mandatory `reason` BEFORE the command: the model states in words wh
 for, and the operator sees both at the confirmation prompt. Nothing guarantees the command does what
 the reason says, but a stated intent next to a dense command line is far better than the command
 alone — and asking for the reason first conditions the command on the intent, not the other way
-round.
+round. The reason is free text the model can reword at will, so it is NOT part of the call's
+identity (Tool.identity): the repetition guard counts the command alone, or a model that re-runs
+one command with a fresh reason each time is never caught looping.
 """
 from __future__ import annotations
 
@@ -161,4 +163,4 @@ def coding_registry(root: str = ".") -> ToolRegistry:
             .add(ws.read, name="Read", confirm=False)
             .add(ws.write, name="Write")
             .add(ws.edit, name="Edit", preview=edit_preview)
-            .add(ws.bash, name="Bash"))
+            .add(ws.bash, name="Bash", identity=("command",)))

@@ -128,16 +128,22 @@ class Tool:
     # parameters the HARNESS supplies at call time (invoke(name, arguments, **provided)); the model
     # never sees them in the schema and cannot pass them. Names not declared here are never injected.
     inject: tuple[str, ...] = ()
+    # the arguments that make two calls THE SAME CALL for a repetition guard; () means all of them.
+    # An argument the model is free to reword (Bash's reason) must not be one, or a loop that
+    # changes only the wording is never seen as a loop.
+    identity: tuple[str, ...] = ()
 
     @classmethod
     def define(cls, fn: Callable[..., Any], *, name: Optional[str] = None, description: Optional[str] = None,
                parameters: Optional[dict] = None, confirm: bool = True,
-               preview: Optional[Callable[[dict], str]] = None, inject: tuple[str, ...] = ()) -> Tool:
+               preview: Optional[Callable[[dict], str]] = None, inject: tuple[str, ...] = (),
+               identity: tuple[str, ...] = ()) -> Tool:
         """Derive the schema from fn's signature, type hints and docstring. Each keyword is an override
         slot that replaces the derived part verbatim — `parameters` is the hand-written JSON Schema escape
         hatch for a signature the derivation cannot express. `confirm=False` declares the tool read-only;
         `preview` renders the call for the operator (an Edit as a diff) instead of the generic listing;
-        `inject` names the parameters the harness fills in, which the derived schema leaves out."""
+        `inject` names the parameters the harness fills in, which the derived schema leaves out;
+        `identity` names the arguments that identify a call for the repetition guard."""
         summary, _ = parse_docstring(fn.__doc__)
         name = name or fn.__name__
         schema = {
@@ -148,7 +154,7 @@ class Tool:
                 "parameters": parameters if parameters is not None else parameters_schema(fn, inject),
             },
         }
-        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview, inject=inject)
+        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview, inject=inject, identity=identity)
 
     @property
     def description(self) -> str:
@@ -183,6 +189,20 @@ class ToolRegistry:
     def schemas(self) -> list[dict]:
         """What goes on Request.tools."""
         return [t.schema for t in self.tools]
+
+    def identity(self, name: str, arguments: str) -> tuple[str, str]:
+        """(name, canonical arguments) — what a repetition guard compares. The canonical form keeps
+        only the tool's `identity` arguments, sorted, so key order and the arguments the tool left
+        out (a reworded reason) do not tell two calls apart. An unknown tool, an empty identity or
+        arguments that are not a JSON object compare on the wire string as-is."""
+        tool = self.get(name)
+        try:
+            decoded = json.loads(arguments) if arguments.strip() else {}
+        except ValueError:
+            decoded = None
+        if tool is None or not tool.identity or not isinstance(decoded, dict):
+            return name, arguments
+        return name, json.dumps({k: decoded[k] for k in tool.identity if k in decoded}, sort_keys=True, ensure_ascii=False)
 
     def invoke(self, name: str, arguments: str, **provided: Any) -> str:
         """Run the tool the model asked for and return the content of its role:tool message.

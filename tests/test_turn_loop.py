@@ -228,6 +228,28 @@ class TestAppendRoundLoopGuard:
         new_state, events = AppendRound(assistant="", tool_calls=(other,), tokens=10).execute(make_state(pending=pending))
         assert len(new_state.pending.rounds) == 3 and events == [ExecuteToolCalls()]
 
+    def test_a_reworded_reason_does_not_hide_a_repeated_command(self, make_state):
+        """The loophole a model found in a real run: the same Bash command with a counter in the
+        reason ("... forty-first try") passed the guard forever, because the guard compared the
+        whole arguments string. With Bash declaring identity=("command",), the reason is wording."""
+        from desh.tools import ToolRegistry
+        def bash(reason: str, command: str) -> str:
+            return "same output"
+        tools = ToolRegistry().add(bash, name="Bash", identity=("command",))
+        def attempt(n: int) -> ToolCall:
+            return call(0, name="Bash", arguments=f'{{"reason": "attempt {n}", "command": "pytest -q"}}', id=f"r{n}_0")
+        pending = (PendingTurn("q")
+                   .add_round(Round("", (attempt(1),), (result(attempt(1), "1 failed"),), tokens=10))
+                   .add_round(Round("", (attempt(2),), (result(attempt(2), "1 failed"),), tokens=10)))
+        state = make_state(pending=pending, tools=tools)
+        new_state, events = AppendRound(assistant="", tool_calls=(attempt(3),), tokens=10).execute(state)
+        assert new_state.pending == pending
+        assert [type(e) for e in events] == [Warn, TurnEnd]
+        # ...while the same three calls through a registry that declares no identity are three different calls
+        plain = make_state(pending=pending, tools=ToolRegistry().add(bash, name="Bash"))
+        new_state, events = AppendRound(assistant="", tool_calls=(attempt(3),), tokens=10).execute(plain)
+        assert len(new_state.pending.rounds) == 3 and events == [ExecuteToolCalls()]
+
     def test_the_whole_round_is_compared(self, make_state):
         pending = self.two_identical_rounds(calls=(WEATHER, TIME), contents=("sunny", "10:00"))
         same = (call(0, id="r3_0"), call(1, name="get_time", arguments='{"tz": "CLT"}', id="r3_1"))

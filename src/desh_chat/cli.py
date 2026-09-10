@@ -40,7 +40,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     if args.edit:
         tools = tools.add(ws.edit, name="Edit", preview=edit_preview)
     if args.bash:
-        tools = tools.add(ws.bash, name="Bash")
+        tools = tools.add(ws.bash, name="Bash", identity=("command",))
     if args.current_time:
         tools = tools.add(current_time, name="Current time")
     if args.delegate:
@@ -48,7 +48,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         delegate_tools = (delegate_tools.add(ws.read, name="Read", confirm=False)
                           .add(ws.write, name="Write")
                           .add(ws.edit, name="Edit", preview=edit_preview)
-                          .add(ws.bash, name="Bash"))
+                          .add(ws.bash, name="Bash", identity=("command",)))
         delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
         # the parent's CURRENT settings travel with every call; the child derives its own from them
