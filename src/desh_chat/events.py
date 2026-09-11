@@ -58,10 +58,11 @@ class Continue(Event):
     room NextRound needs — the system prompt, the message and the window must leave space for a
     completion — and drains instead, leaving the capped turn as the answer."""
     msg: str
+    then: tuple[Event, ...] = ()
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         last = state.history.last_non_summary()
         if last is None or last.cancelled or last.stop != "cap":
-            return state, []
+            return state, list(self.then)
         # Mirror NextRound's fit check for this message: the system prompt, the message and the
         # window since the last summary must leave room for a completion (gen_budget > 0), or
         # NextRound would reject it and this event would issue it again forever.

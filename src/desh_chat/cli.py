@@ -16,7 +16,7 @@ from desh.llama.server import LlamaServer
 from desh.render import Palette, c_out
 from desh.engine import Engine
 from desh.tools import ToolRegistry
-from desh_chat.events import PromptUser, Continue
+from desh_chat.events import PromptUser, Continue, DisplayStats
 from desh_chat.session import LoadSession
 from desh_chat.state import ChatHistory, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
@@ -153,7 +153,7 @@ def main():
         completions_log=completions_log,
         session_file=session_file,
         tools=tools,
-        on_idle=Continue(CAP_CONTINUE_MSG) if args.cont else None,
+        on_idle=Continue(CAP_CONTINUE_MSG, then=(DisplayStats(), PromptUser(),)) if args.cont else None,
 
     )
     log_header = {
