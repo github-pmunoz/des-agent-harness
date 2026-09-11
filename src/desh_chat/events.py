@@ -9,6 +9,7 @@ graph.
 """
 import readline
 import sys
+import json
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -18,6 +19,7 @@ from desh.llama.stages import Seam, CodeFence, PyHighlight, Terminal, ToolProgre
 from desh.llama.wire import Completion, Request, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_tokens, turn_tokens
+from desh.tools import Tool
 from desh_chat.state import ChatState, ChatHistory, PendingTurn, Round, ToolResult
 from desh_chat.display import DisplayStats, Error, Info, Warn
 from desh_chat.session import persist
@@ -278,11 +280,32 @@ class ExecuteToolCalls(Event):
         # parent's CURRENT settings, not the ones captured when the registry was built
         result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments, settings=state.settings))
         last = self.index + 1 == len(round.tool_calls)
+        pending = state.pending.add_results(result)
+
+        # The call ran with its full arguments; what the round echoes back from now on is the tool's
+        # folded form of them (a delegate brief shrinks to its head once the answer supersedes it).
+        # Recorded here, before the round is ever sent, so the prefix cache only sees the fold.
+        if tool is not None and tool.fold is not None:
+            pending = pending.fold_call(self.index, folded_arguments(tool, tc.arguments))
+
         # the echo is for the operator's eye, so it is short; the model gets the full result
-        return (replace(state, pending=state.pending.add_results(result)),
+        return (replace(state, pending=pending),
                 [Info(shorten(result.content), colour=Palette.TOOL_RESULT),
                  DisplayStats(colour=Palette.TOOL_STATS),
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])
+
+
+def folded_arguments(tool: Tool, arguments: str) -> str:
+    """The wire string a call is recorded with after it ran: tool.fold applied to the decoded
+    arguments, re-serialised. Arguments that are not a JSON object are kept as they are — the
+    registry already answered such a call with an error, and there is nothing to fold."""
+    try:
+        args = json.loads(arguments)
+    except ValueError:
+        return arguments
+    if not isinstance(args, dict) or tool.fold is None:
+        return arguments
+    return json.dumps(tool.fold(args), ensure_ascii=False)
 
 
 @dataclass(frozen=True)

@@ -22,7 +22,7 @@ from desh_chat.state import ChatHistory, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
 from desh_chat.coding import Workspace, edit_preview
-from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG
+from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG, fold_brief
 
 
 def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: Settings, *,
@@ -52,7 +52,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
         # the parent's CURRENT settings travel with every call; the child derives its own from them
-        tools = tools.add(delegate.delegate, name="delegate", inject=("settings",))
+        tools = tools.add(delegate.delegate, name="delegate", inject=("settings",), fold=fold_brief)
     return tools
 
 

@@ -176,6 +176,13 @@ class PendingTurn:
         last = replace(self.rounds[-1], results=results)
         return replace(self, rounds=self.rounds[:-1] + (last,))
 
+    def fold_call(self, index: int, arguments: str) -> PendingTurn:
+        """Replace the arguments of call `index` in the latest round: the form the call is echoed
+        back in from now on (Tool.fold), once its result has superseded what it asked for."""
+        last = self.rounds[-1]
+        calls = last.tool_calls[:index] + (replace(last.tool_calls[index], arguments=arguments),) + last.tool_calls[index + 1:]
+        return replace(self, rounds=self.rounds[:-1] + (replace(last, tool_calls=calls),))
+
     def add_results(self, *results: ToolResult) -> PendingTurn:
         """Append results to the latest round, in call order: the round is answered one call per step."""
         return self.with_results(self.rounds[-1].results + results)

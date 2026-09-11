@@ -5,6 +5,7 @@ result. Three layers are covered: what the parent reads for each way a child run
 parent asks for delegate, child runs to drain on the same FakeServer script, parent answers —
 including the two exits that must NOT become tool text: a harness bug does, Ctrl+C does not.
 """
+import json
 import os
 from dataclasses import replace
 
@@ -13,7 +14,8 @@ import pytest
 from desh.engine import Engine
 from desh.tools import ToolRegistry
 from desh_chat import gate
-from desh_chat.delegate import CAP_CONTINUE_MSG, DELEGATE_SYSTEM_PROMPT, Delegate, answer, child_session_file, child_settings
+from desh_chat.delegate import (BRIEF_HEAD_CHARS, CAP_CONTINUE_MSG, DELEGATE_SYSTEM_PROMPT, Delegate, answer,
+                                child_session_file, child_settings, fold_brief)
 from desh_chat.display import Info
 from desh_chat.events import Continue, MaybeRegenerate, PromptUser, UserMessage
 from desh_chat.gate import Answer
@@ -51,7 +53,7 @@ def with_delegate(tools: ToolRegistry, *, inference, settings, session_file=None
     What cli.build_tools does for the real run, minus the per-flag toolsets: registered with
     inject=("settings",) so every call carries the parent's current settings."""
     d = Delegate(root=root, inference=inference, settings=settings, tools=tools, session_file=session_file)
-    return tools.add(d.delegate, name="delegate", inject=("settings",))
+    return tools.add(d.delegate, name="delegate", inject=("settings",), fold=fold_brief)
 
 
 def parent_with_delegate(make_state, server, tools=ToolRegistry(), delegate_root=".", **overrides):
@@ -108,6 +110,7 @@ class TestCliWiring:
             # the parent's settings go in untouched; the child derives its own per call (item below)
             assert delegate.settings == SETTINGS
             assert tools.get("delegate").inject == ("settings",)
+            assert tools.get("delegate").fold is fold_brief
 
 
 # ---------------------
@@ -216,6 +219,37 @@ class TestChildSetup:
 
 
 # ---------------------
+# fold_brief: what the parent keeps of a brief once the answer is in
+# ---------------------
+
+class TestFoldBrief:
+    LONG_TASK = "Investigate the failing tests under tests/ and report the root cause. " * 10
+    LONG_CONTEXT = "Facts: " + "the harness is a DES engine over frozen state; " * 20
+
+    def test_a_long_brief_keeps_the_head_of_the_task_and_says_what_was_dropped(self):
+        folded = fold_brief({"task": self.LONG_TASK, "context": self.LONG_CONTEXT, "gate": "tests green", "check": "pytest -q"})
+        assert set(folded) == {"task", "folded"}
+        assert folded["task"] == self.LONG_TASK[:BRIEF_HEAD_CHARS] + "..."
+        assert "context" in folded["folded"] and "check" in folded["folded"]
+
+    def test_the_whole_brief_decides_not_the_task_alone(self):
+        """A short task with a long context is still a long brief: the context is dropped and the
+        task, shorter than the head, is kept in full."""
+        args = {"task": "count the files", "context": self.LONG_CONTEXT}
+        assert len(json.dumps(args)) > BRIEF_HEAD_CHARS
+        folded = fold_brief(args)
+        assert folded["task"] == "count the files..." and "context" not in folded
+
+    def test_a_brief_that_fits_is_kept_whole(self):
+        args = {"task": "count the files", "context": "src only", "gate": "a number"}
+        assert fold_brief(args) is args
+
+    def test_a_task_that_is_not_a_string_is_kept(self):
+        args = {"task": ["not", "a", "string"], "context": self.LONG_CONTEXT}
+        assert fold_brief(args) is args
+
+
+# ---------------------
 # Continue: the child's idle event, and the checkpoint loop it drives
 # ---------------------
 
@@ -281,6 +315,23 @@ class TestFullLoop:
         parent_turn = final.history.turns[0]
         assert parent_turn.assistant == "Twelve."
         assert [r.content for r in parent_turn.rounds[0].results] == ["There are 12 files."]
+
+    def test_the_child_gets_the_full_brief_and_the_parent_records_the_fold(self, make_state, always_yes, no_esc_watcher):
+        """The fold is a record-time change: the subagent runs on the whole brief, and only what the
+        parent's round echoes back afterwards is the head of the task."""
+        task = "Investigate the failing tests under tests/ and report the root cause. " * 10
+        context = "The suite is under tests/; the harness is a DES engine over frozen state. " * 5
+        delegation = {"tool_calls": [{"name": "delegate", "arguments": json.dumps({"task": task, "context": context, "gate": "root cause named"})}]}
+        server = FakeServer(script=[delegation, {"content": "root cause: X"}, {"content": "X."}])
+        state = parent_with_delegate(make_state, server)
+        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        child_req = server.calls[1][1]
+        assert child_req.messages[0]["content"].endswith("Context from the delegating agent:\n" + context + "\n\nSuccess criterion:\nroot cause named")
+        assert child_req.messages[1] == {"role": "user", "content": task}
+        recorded = final.history.turns[0].rounds[0].tool_calls[0]
+        assert json.loads(recorded.arguments) == {"task": task[:BRIEF_HEAD_CHARS] + "...", "folded": "context, gate and check omitted; see the result"}
+        assert final.history.turns[0].rounds[0].results[0].content == "root cause: X"
+        assert context not in json.dumps(final.history.turns[0].messages())        # nothing later carries the brief
 
     def test_child_keeps_its_own_session_file_beside_the_parents(self, make_state, always_yes, no_esc_watcher, tmp_path):
         parent_file = str(tmp_path / "run.json")

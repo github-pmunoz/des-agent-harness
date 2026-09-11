@@ -345,6 +345,62 @@ class TestIdentity:
 
 
 # ---------------------
+# Tool.fold: how a call is recorded once it ran
+# ---------------------
+
+def brief(task: str, context: str = "") -> str:
+    """A long-brief tool: the result supersedes the ask, so the recorded call keeps the head only."""
+    return f"done: {task[:10]}"
+
+
+def fold_head(args: dict) -> dict:
+    return {"task": args["task"][:8] + "...", "folded": "rest omitted"}
+
+
+class TestFold:
+    FOLDING = ToolRegistry().add(brief, confirm=False, fold=fold_head).add(now, confirm=False)
+    LONG = '{"task": "investigate the failing tests in tests/", "context": "the suite is under tests/"}'
+
+    def pending_after(self, make_state, registry, arguments, name="brief"):
+        tc = ToolCall(index=0, id="c0", type="function", name=name, arguments=arguments)
+        state = make_state(pending=PendingTurn("q").add_round(Round("", (tc,))), tools=registry)
+        new_state, _ = ExecuteToolCalls(index=0).execute(state)
+        return new_state.pending.rounds[-1]
+
+    def test_define_records_the_fold(self):
+        assert Tool.define(brief, fold=fold_head).fold is fold_head
+        assert Tool.define(brief).fold is None
+
+    def test_the_call_runs_on_the_full_arguments_and_is_recorded_folded(self, make_state):
+        round = self.pending_after(make_state, self.FOLDING, self.LONG)
+        assert round.results[0].content == "done: investigat"                 # the tool saw the whole task
+        assert round.tool_calls[0].arguments == '{"task": "investig...", "folded": "rest omitted"}'
+        assert round.tool_calls[0].id == "c0"                                   # only the arguments change
+        echoed = round.messages()[0]["tool_calls"][0]["function"]["arguments"]
+        assert "the suite is under tests/" not in echoed                        # what later requests carry
+
+    def test_a_tool_without_a_fold_is_recorded_verbatim(self, make_state):
+        round = self.pending_after(make_state, self.FOLDING, "{}", name="now")
+        assert round.tool_calls[0].arguments == "{}"
+
+    def test_arguments_that_are_not_an_object_are_recorded_as_they_came(self, make_state):
+        for arguments in ("{not json", "[1, 2]", ""):
+            round = self.pending_after(make_state, self.FOLDING, arguments)
+            assert round.tool_calls[0].arguments == arguments
+            assert "rejected" in round.results[0].content or "JSON" in round.results[0].content
+
+    def test_a_denied_call_keeps_its_brief(self, make_state, monkeypatch):
+        """The model may want to reissue a declined brief with changes: nothing ran, nothing folds."""
+        from desh_chat import gate
+        from desh_chat.gate import Answer
+        monkeypatch.setattr(gate, "ask", lambda tc: Answer("no"))
+        asking = ToolRegistry().add(brief, fold=fold_head)                     # confirm=True: goes through the gate
+        round = self.pending_after(make_state, asking, self.LONG)
+        assert round.tool_calls[0].arguments == self.LONG
+        assert "declined" in round.results[0].content
+
+
+# ---------------------
 # Wiring: NextRound offers the registry's schemas
 # ---------------------
 

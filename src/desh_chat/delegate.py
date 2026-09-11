@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 import uuid
+import json
 from dataclasses import dataclass, field, replace
 from typing import TextIO
 
@@ -49,11 +50,22 @@ Orient yourself before searching: if the project root has an INDEX.md, `grep -n 
 You are handling a subtask delegated by another agent. Complete it using your tools, then reply with your final answer only: what you found or did, concretely, without narrating the steps. Your reply is all the delegating agent will see. If the task cannot be completed as specified, stop and report why."""
 )
 
-
 CAP_CONTINUE_MSG = ("Checkpoint: the tool round cap was reached, and the tool calls you asked for last were not run. "
                     "If the task is not finished, continue from here and ask again for any call you still need. "
                     "If it is finished, reply with your final answer.")
 
+BRIEF_HEAD_CHARS = 400
+
+
+def fold_brief(args: dict) -> dict:
+    """The echoed form of an answered delegate call (Tool.fold): the head of the task and a note
+    that the rest was folded. The answer supersedes the brief, and the full brief is the child's
+    first user message in its session file. A brief that fits in the head is kept whole, and so
+    is one whose task is not a string — there is nothing sensible to keep of it."""
+    task = args.get("task")
+    if not isinstance(task, str) or len(json.dumps(args, ensure_ascii=False)) <= BRIEF_HEAD_CHARS:
+        return args
+    return {"task": task[:BRIEF_HEAD_CHARS] + "...", "folded": "context, gate and check omitted; see the result"}
 
 def child_settings(parent: Settings) -> Settings:
     """The subagent's settings: the parent's, as they are. Compaction stays on: the round cap is the

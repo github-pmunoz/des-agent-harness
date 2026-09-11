@@ -132,12 +132,16 @@ class Tool:
     # An argument the model is free to reword (Bash's reason) must not be one, or a loop that
     # changes only the wording is never seen as a loop.
     identity: tuple[str, ...] = ()
+    # how the call is echoed back to the model AFTER it ran: decoded arguments -> the arguments the
+    # round records instead. None -> verbatim. For a call whose result supersedes what it asked for
+    # (a delegate brief), so the request stops carrying the ask once it carries the answer.
+    fold: Optional[Callable[[dict], dict]] = field(default=None, repr=False, compare=False)
 
     @classmethod
     def define(cls, fn: Callable[..., Any], *, name: Optional[str] = None, description: Optional[str] = None,
                parameters: Optional[dict] = None, confirm: bool = True,
                preview: Optional[Callable[[dict], str]] = None, inject: tuple[str, ...] = (),
-               identity: tuple[str, ...] = ()) -> Tool:
+               identity: tuple[str, ...] = (), fold: Optional[Callable[[dict], dict]] = None) -> Tool:
         """Derive the schema from fn's signature, type hints and docstring. Each keyword is an override
         slot that replaces the derived part verbatim — `parameters` is the hand-written JSON Schema escape
         hatch for a signature the derivation cannot express. `confirm=False` declares the tool read-only;
@@ -154,7 +158,7 @@ class Tool:
                 "parameters": parameters if parameters is not None else parameters_schema(fn, inject),
             },
         }
-        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview, inject=inject, identity=identity)
+        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview, inject=inject, identity=identity, fold=fold)
 
     @property
     def description(self) -> str:
