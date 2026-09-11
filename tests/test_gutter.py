@@ -11,7 +11,7 @@ import pytest
 from desh.engine import Engine
 from desh.render import Gutter
 from desh_chat import gate
-from desh_chat.events import UserMessage
+from desh_chat.events import TurnStart
 from desh_chat.gate import Answer
 
 from conftest import FakeServer
@@ -104,7 +104,7 @@ class TestChildRunIsGuttered:
         from test_delegate import parent_with_delegate
         server = FakeServer(script=[self.DELEGATION, {"content": "There are 12 files."}, {"content": "Twelve."}])
         state = parent_with_delegate(make_state, server)
-        Engine[type(state)]().run(state, seed=[UserMessage("how many files?")])
+        Engine[type(state)]().run(state, seed=[TurnStart("how many files?")])
         lines = capsys.readouterr().out.splitlines()
         start = next(i for i, l in enumerate(lines) if "subagent starts" in l)
         end = next(i for i, l in enumerate(lines) if "back to the main agent" in l)

@@ -145,22 +145,25 @@ The repository structure is described in more detail in [INDEX.md](INDEX.md).
 A normal turn is an event loop, rather than a single blocking completion:
 
 ```text
-PromptUser
-  ├─ "/command" ─► Command ─► MaybeRegenerate
-  └─ text ──────► UserMessage ─► NextRound ─► StreamCompletion
-                                    ▲              ├─ final reply ─► TurnEnd
-                                    │              └─ tool calls ──► AppendRound ─► ExecuteToolCalls(i)
-                                    │                                                 ├─ yes: run, attach result ─► ExecuteToolCalls(i+1), or after the last call ─┐
-                                    │                                                 ├─ no:  denial result, later calls skipped ──────────────────────────────────┤
-                                    │                                                 └─ cancel ─► TurnEnd (cancelled)                                             │
-                                    └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+MaybeRegenerate ─ running ─► TurnStart (opens an empty pending turn)
+                               ├─ last turn capped, auto_prompt set ─► UserMessage(auto_prompt) ─┐
+                               ├─ operator ─► DisplayStats, PromptUser                            │
+                               │               ├─ "/command" ─► Command ─► MaybeRegenerate        │
+                               │               └─ text ──────► UserMessage ───────────────────────┤
+                               └─ neither ─► (queue drains, the run returns)                      │
+                                                                                                  ▼
+NextRound ─┬─ room ≥ min_gen ─► StreamCompletion ─┬─ final reply ─► TurnEnd
+    ▲      │                                       └─ tool calls ──► AppendRound ─► ExecuteToolCalls(i)
+    │      ├─ room short, first time ─► CompactHistory ─► NextRound(compacted)       ├─ yes: run, attach result ─► ExecuteToolCalls(i+1), or after the last call ─┐
+    │      └─ room short, retried ────► TurnEnd (cancelled, stop="overflow")         ├─ no:  denial result, later calls skipped ──────────────────────────────────┤
+    │                                                                                └─ cancel ─► TurnEnd (cancelled)                                             │
+    └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
-TurnEnd ─┬─► MaybeCompact ─┬─ window over threshold ─► CompactHistory ─► MaybeRegenerate
-         │                 └─ otherwise ──────────────────────────────► MaybeRegenerate ─► DisplayStats, PromptUser
-         └─► SaveSession (when a session file is configured)
+TurnEnd ─┬─► SaveSession (when a session file is configured)
+         └─► MaybeRegenerate
 ```
 
-`TurnEnd` is the sole point that commits a completed turn to history; until then the turn in progress lives on `state.pending`, so compaction and persistence never see a half-finished turn. Tool calls are answered one per step, and every result, including an operator denial, becomes an input to the next `NextRound`, so the model can inspect it and continue. `MaybeRegenerate` is the single point that returns to the prompt: commands and compaction resolve through it rather than scheduling `PromptUser` themselves.
+`TurnStart` is the sole creator of `state.pending`: the turn exists, empty, before its message is known, and the message source fills it. A command is a harness instruction rather than turn content, so it leaves the placeholder untouched and the loop head reuses it. `TurnEnd` is the sole point that commits a completed turn to history. Compaction is decided by `NextRound`, once per request, when the window leaves less room than `(1 - compaction_threshold) * context` for the completion: it is paid only when a request is about to go out and needs it, never after a turn that nothing follows. `CompactHistory` schedules no successor of its own, so the same event serves `NextRound` mid-turn and the `/compact` command between turns. What still does not fit after one compaction ends the turn as a recorded overflow, which is what lets an auto prompt that cannot fit stop instead of being issued again. Tool calls are answered one per step, and every result, including an operator denial, becomes an input to the next `NextRound`, so the model can inspect it and continue.
 
 ## Development
 

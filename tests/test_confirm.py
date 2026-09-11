@@ -18,7 +18,7 @@ from desh.llama.wire import ToolCall
 from desh.tools import Tool, ToolRegistry
 from desh_chat import gate
 from desh_chat.display import DisplayStats, Info, Warn
-from desh_chat.events import ExecuteToolCalls, NextRound, PromptUser, TurnEnd, UserMessage
+from desh_chat.events import ExecuteToolCalls, NextRound, PromptUser, TurnEnd, TurnStart, UserMessage
 from desh_chat.gate import DENIED_TEXT, SKIPPED_TEXT, Answer
 from dataclasses import replace
 
@@ -226,7 +226,7 @@ class TestFullLoop:
         ])
         state = make_state(inference=InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT),
                            tools=REGISTRY, running=False)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("clean up a")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("clean up a")])
         turn = final.history.turns[0]
         assert turn.cancelled is False
         assert [r.content for r in turn.rounds[0].results] == ["<a>", "read only today"]
@@ -239,7 +239,7 @@ class TestFullLoop:
         server = FakeServer(script=[{"tool_calls": [{"name": "delete_file", "arguments": '{"path": "a"}'}]}, {"content": "never"}])
         state = make_state(inference=InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT),
                            tools=REGISTRY, running=False)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("rm a")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("rm a")])
         assert final.pending is None
         assert final.history.turns[0].cancelled is True
         assert len(server.calls) == 1 and RAN == []

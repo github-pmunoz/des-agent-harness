@@ -39,7 +39,7 @@ from desh.llama.logger import Logger
 from desh.render import Gutter, Palette, c_out
 from desh.tools import ToolRegistry
 from desh_chat.state import ChatHistory, ChatState, InferenceEngine, Settings
-from desh_chat.events import UserMessage, Continue
+from desh_chat.events import TurnStart
 
 
 DELEGATE_SYSTEM_PROMPT = (
@@ -69,8 +69,8 @@ def fold_brief(args: dict) -> dict:
 
 def child_settings(parent: Settings) -> Settings:
     """The subagent's settings: the parent's, as they are. Compaction stays on: the round cap is the
-    child's checkpoint, and MaybeCompact is what turns the capped turn into a summary before
-    Continue asks the model to go on."""
+    child's checkpoint, and NextRound compacts the capped turn into a summary when the auto prompt
+    that continues it would not otherwise fit."""
     return parent
 
 
@@ -126,7 +126,8 @@ class Delegate:
             completions_log=self.completions_log,
             session_file=session_file,
             tools=self.tools,
-            on_idle=Continue(CAP_CONTINUE_MSG),   # checkpoint: a capped turn is compacted and continued, not returned
+            operator=False,                 # nobody to prompt: a finished turn returns the run
+            auto_prompt=CAP_CONTINUE_MSG,   # checkpoint: a capped turn is continued, not returned
         )
         print(c_out(Palette.CHROME, "╭─ delegate ─ subagent starts" + (f" ({session_file})" if session_file else "")))
         try:
@@ -135,7 +136,7 @@ class Delegate:
             # The prefix starts with a reset: it is drawn in whatever colour state the child left.
             with contextlib.redirect_stdout(Gutter(sys.stdout, c_out(Palette.RESET + Palette.CHROME, "│") + " ")):
                 final = Engine[ChatState](des_log=self.des_log, debug=self.debug).run(
-                    child, seed=[UserMessage(task)], log_header={"delegate": True, "session": session_file})
+                    child, seed=[TurnStart(task)], log_header={"delegate": True, "session": session_file})
         finally:
             print(c_out(Palette.CHROME, "╰─ delegate ─ back to the main agent"))
         last = final.history.last_non_summary()
@@ -175,8 +176,8 @@ def answer(state: ChatState) -> str:
     window even on round one; otherwise that turn's `stop` and `cancelled` say how it ended:
       stop == "overflow"   the window filled up mid-task (cancelled is True as well)
       cancelled            the operator pressed ESC or cancelled at a confirmation prompt
-      stop == "cap"        the round cap cut the turn short and Continue could not go on; the
-                           model's text so far is the answer
+      stop == "cap"        the round cap cut the turn short and the auto prompt could not go on;
+                           the model's text so far is the answer
       neither              the answer, verbatim ("(no answer)" when the model said nothing)
     Every case must come back as text the parent can act on — it cannot see the child's history.
     The texts the parent reads: "The subagent ran out of context window before finishing.",

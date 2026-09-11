@@ -35,51 +35,52 @@ _TTY = sys.stdout.isatty()
 
 @dataclass(frozen=True)
 class MaybeRegenerate(Event):
-    """What happens when the loop has nothing left to do: nothing once running is off (Exit), the
-    state's idle event when one is set (a subagent's Continue), else the operator is prompted."""
+    """The loop head: where every path that is not inside a turn comes back to. It owns one
+    question — is the run still going? — and nothing else: off (Exit) means the queue drains and
+    Engine.run returns; on means a turn begins, and how it begins is TurnStart's business."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not state.running:
             return state, []
-        if state.on_idle is not None:
-            return state, [state.on_idle]
-        return state, [DisplayStats(), PromptUser()]
+        return state, [TurnStart()]
 
 
 @dataclass(frozen=True)
-class Continue(Event):
-    """The idle event of a run with no operator: after a turn that hit the round cap, open another
-    turn with `msg` so the model goes on from the checkpoint (MaybeCompact has already summarised
-    the capped turn when it was large enough); after any other turn, drain.
+class TurnStart(Event):
+    """Opens the next turn. The only creator of state.pending: the turn exists, empty, before its
+    message is known, and the message source fills it (UserMessage). Which source is this event's
+    policy, read from the state: a capped turn is continued with `auto_prompt` when one is set;
+    otherwise an operator is prompted, or a run without one returns.
 
-    The turn read is the last non-summary one, so the summary appended by compaction does not
-    hide the reason the previous turn ended. A continuation that cannot fit the window must NOT be
-    issued: NextRound would reject it without recording anything, MaybeRegenerate would run again
-    with history unchanged, and this event would issue it again, forever. The guard mirrors the
-    room NextRound needs — the system prompt, the message and the window must leave space for a
-    completion — and drains instead, leaving the capped turn as the answer."""
-    msg: str
-    then: tuple[Event, ...] = ()
+    `message` is the seed form: a caller that already has the first message (a delegated task, a
+    queue-fed harness) opens the turn and delivers it in one step, skipping the policy.
+
+    A command is a harness instruction, not turn content: it never touches pending, and the loop
+    comes back here with the placeholder still empty. So this event opens a placeholder only when
+    there is none, applies the policy over an empty one, and must never see a filled one — nothing
+    reaches the loop head mid-turn. The drain branch opens nothing: a run that returns has no
+    turn open (Delegate.answer relies on it)."""
+    message: str | None = None
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        assert state.pending is None or state.pending.user is None, "TurnStart reached mid-turn"
+        opened = state if state.pending is not None else replace(state, pending=PendingTurn())
+        if self.message is not None:
+            return opened, [UserMessage(self.message)]
         last = state.history.last_non_summary()
-        if last is None or last.cancelled or last.stop != "cap":
-            return state, list(self.then)
-        # Mirror NextRound's fit check for this message: the system prompt, the message and the
-        # window since the last summary must leave room for a completion (gen_budget > 0), or
-        # NextRound would reject it and this event would issue it again forever.
-        pending_tokens = estimate_tokens(self.msg)
-        gen_budget = state.gen_budget(pending_tokens)
-        if gen_budget <= 0:
-            return state, []
-        return state, [Info("Checkpoint: round cap reached, continuing the task."), UserMessage(self.msg)]
+        if last is not None and not last.cancelled and last.stop == "cap" and state.auto_prompt is not None:
+            return opened, [Info("Checkpoint: round cap reached, continuing the task."), UserMessage(state.auto_prompt)]
+        if state.operator:
+            return opened, [DisplayStats(), PromptUser()]
+        return state, []
 
 @dataclass(frozen=True)
 class Exit(Event):
-    """Exit the simulation."""
+    """Exit the simulation. The turn open at that moment — the empty placeholder behind the prompt,
+    or a turn cut short by Ctrl+C — is dropped: a run that returns has no turn open."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         info_events: list[Event] = [Info("Goodbye!")]
         if state.session_file:
             info_events.append(Info(f"session saved to {state.session_file}", colour=Palette.DIM_CHROME))
-        return replace(state, running=False), info_events
+        return replace(state, running=False, pending=None), info_events
 
 
 @dataclass(frozen=True)
@@ -137,9 +138,13 @@ class LogCompletion(Event):
 
 # A turn is a loop, not one completion:
 #
-#   UserMessage(msg)         opens state.pending = PendingTurn(msg)          -> NextRound
+#   TurnStart                opens state.pending = PendingTurn() (empty)      -> UserMessage | PromptUser | drain
+#   UserMessage(msg)         fills pending.user                               -> NextRound
 #   NextRound                budgets + builds the request from history view
-#                            + pending.messages()                            -> StreamCompletion
+#                            + pending.messages(); compacts first when the
+#                            window leaves less than min_gen_tokens           -> StreamCompletion
+#                                                                             | CompactHistory + NextRound(compacted=True)
+#                                                                             | TurnEnd(cancelled, stop="overflow")
 #   StreamCompletion         streams one round; routes on finish_reason:
 #                              cancelled            -> TurnEnd(cancelled=True)
 #                              tool_calls           -> AppendRound
@@ -148,12 +153,12 @@ class LogCompletion(Event):
 #   ExecuteToolCalls(i)      ONE call per step, in order: asks the operator
 #                            if the tool wants confirmation, runs it or
 #                            records the denial, attaches the result       -> ExecuteToolCalls(i+1) | NextRound | TurnEnd(cancelled)
-#   TurnEnd                  freezes pending into a history Turn, clears it  -> MaybeCompact (+ SaveSession)
-#                            (NextRound out of room mid-loop -> TurnEnd(cancelled, stop="overflow"))
+#   TurnEnd                  freezes pending into a history Turn, clears it  -> SaveSession + MaybeRegenerate
 #
 # Today's plain chat is the one-round case: NextRound -> StreamCompletion -> TurnEnd.
-# Only TurnEnd touches history, so view(), compaction and persistence never see a turn in progress;
-# an interrupt mid-loop (Ctrl+C -> Exit) simply drops state.pending.
+# Only TurnEnd appends to history. Compaction rewrites history, never pending: it runs from
+# NextRound with the turn's rounds intact, or from /compact against an empty placeholder, which
+# is not a turn in progress. An interrupt mid-loop (Ctrl+C -> Exit) simply drops state.pending.
 #
 # Confirmation happens inside the round, per call, not as a verdict over the whole round: the
 # operator answers yes / no / no-with-guidance / cancel as each call comes up. A "no" short-circuits
@@ -321,19 +326,15 @@ class TurnEnd(Event):
         assert state.pending is not None
         turn = state.pending.finish(self.assistant, self.tokens, self.cancelled, self.stop)
         new_state = replace(state, history=state.history.append(turn), pending=None)
-        return new_state, [MaybeCompact()] + persist(state)
-
-
-@dataclass(frozen=True)
-class MaybeCompact(Event):
-    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        if state.history.window_tokens()  >= state.settings.compaction_threshold * state.settings.context:
-            return state, [Info("Compacting conversation history..."), CompactHistory()]
-        return state, [MaybeRegenerate()]
+        return new_state, persist(state) + [MaybeRegenerate()]
 
 
 @dataclass(frozen=True)
 class CompactHistory(Event):
+    """Replace the window since the last summary with a summary turn. Rewrites history only —
+    a pending turn, empty or mid-loop, is left as it is. Schedules no successor: the caller
+    sequences what follows (NextRound retries the request, /compact returns to the loop head),
+    which is what lets one event serve both."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         instruction = state.settings.compaction_prompt     # a setting, so a run can be built with another (see COMPACTION_PROMPT)
         transcript ="\n\n".join([t.transcript() for t in state.history.since_last_summary()])
@@ -358,38 +359,47 @@ class CompactHistory(Event):
             summary_tokens = completion.usage["completion_tokens"] + estimate_tokens(ChatHistory.SUMMARY_PREFIX + ChatHistory.SUMMARY_ACK)
         return replace(state, history=state.history.compact(completion.content, tokens=summary_tokens)), [
             Info(f"{completion.content}"),
-            LogCompletion(request=req, completion=completion, port=state.inference.port),
-            MaybeRegenerate()] + persist(state)
+            LogCompletion(request=req, completion=completion, port=state.inference.port)] + persist(state)
 
 
 @dataclass(frozen=True)
 class UserMessage(Event):
-    """Opens a turn: the user's message becomes state.pending, and the first round is requested."""
+    """The turn's message arrived: fill the placeholder TurnStart opened and request the first round."""
     message: str
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        return replace(state, pending=PendingTurn(self.message)), [NextRound()]
+        assert state.pending is not None, "UserMessage before TurnStart"
+        return replace(state, pending=state.pending.with_user(self.message)), [NextRound()]
 
 
 @dataclass(frozen=True)
 class NextRound(Event):
     """Budget and build the request for the next completion of the pending turn: system prompt, the
-    history view that fits, then the pending turn so far (user message + every tool round)."""
+    history view that fits, then the pending turn so far (user message + every tool round).
+
+    Compaction is decided here, once per request, because this is the only point that knows what
+    the request needs: when the window leaves less than min_gen_tokens for the completion, and
+    there is a window to summarise, the history is compacted and the request rebuilt from the
+    summary. Once is the limit — a turn that is itself too large for the context would otherwise
+    summarise the summary forever — and what still does not fit ends the turn as an overflow,
+    recorded as a cancelled turn so the loop head can see it (a dropped message would be issued
+    again by an auto prompt, forever)."""
+    compacted: bool = False     # True on the retry after a compaction: no second one
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        assert state.pending is not None
+        assert state.pending is not None and state.pending.user is not None
         pending = state.pending
         sys_prompt_tokens = estimate_tokens(state.system_prompt)
         # What the pending turn costs in the prompt: rounds already priced by usage frames, plus the
         # heuristic for the text no frame has priced yet (user message on round one, latest results after).
         pending_tokens = state.pending_tokens()
-        gen_budget = state.gen_budget(pending_tokens)
-        reserved = sys_prompt_tokens + pending_tokens + gen_budget
-        if gen_budget <= 0:
-            if not pending.rounds:      # nothing happened yet: reject the message, no turn recorded
-                return replace(state, pending=None), [Error("Request exceeds context window."), MaybeRegenerate()]
-            # mid-loop: the rounds so far are a real exchange; keep them as a cancelled turn, marked
-            # so a reader can tell an overflow from the operator's cancel
+        if state.gen_room(pending_tokens) < state.min_gen_tokens():
+            # Compaction can only help while the window holds something other than a summary.
+            summarisable = any(not t.summary for t in state.history.since_last_summary())
+            if not self.compacted and summarisable:
+                return state, [Info("Compacting conversation history..."), CompactHistory(), NextRound(compacted=True)]
             return state, [Error("Request exceeds context window; ending the turn."),
                            TurnEnd(assistant="", tokens=0, cancelled=True, stop="overflow")]
+        gen_budget = state.gen_budget(pending_tokens)
+        reserved = sys_prompt_tokens + pending_tokens + gen_budget
         view = state.history.view_turns(state.settings.context - reserved)
         return state, [StreamCompletion(
             request=Request(

@@ -2,7 +2,7 @@
 (state, events = Event(...).execute(state)), no chain-walking.
 
 Scope mirrors events.py's own section boundaries: everything that is not
-turn logic (UserMessage, StreamCompletion, AppendTurn, MaybeCompact,
+turn logic (TurnStart, UserMessage, StreamCompletion, AppendTurn, NextRound compaction,
 CompactHistory — test_chat_chain.py) and not Command's own dispatch
 (test_command_surface.py). That leaves the # Display section (Info, Warn,
 DisplayHistory, DisplayStats), Exit, MaybeRegenerate, LogCompletion, and
@@ -20,7 +20,7 @@ from desh.llama.logger import Logger
 from desh.llama.wire import Completion, Request
 from desh_chat.commands import Command
 from desh_chat.display import DisplayHistory, DisplayStats, Error, Info, Warn
-from desh_chat.events import Exit, LogCompletion, MaybeRegenerate, PromptUser, UserMessage
+from desh_chat.events import Exit, LogCompletion, MaybeRegenerate, PromptUser, TurnStart, UserMessage
 from desh_chat.state import ChatHistory, Turn
 
 
@@ -112,10 +112,14 @@ class TestExit:
 
 
 class TestMaybeRegenerate:
-    def test_running_fans_to_stats_then_prompt_in_order(self, make_state):
+    def test_running_goes_to_turn_start(self, make_state):
         state = make_state()
         assert state.running is True
         _, events = MaybeRegenerate().execute(state)
+        assert events == [TurnStart()]
+
+    def test_turn_start_fans_to_stats_then_prompt_in_order(self, make_state):
+        _, events = TurnStart().execute(make_state(operator=True))
         # order matters: DisplayStats must execute before the next PromptUser blocks
         assert [type(e) for e in events] == [DisplayStats, PromptUser]
 

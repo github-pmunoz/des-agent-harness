@@ -17,7 +17,7 @@ from desh_chat import gate
 from desh_chat.delegate import (BRIEF_HEAD_CHARS, CAP_CONTINUE_MSG, DELEGATE_SYSTEM_PROMPT, Delegate, answer,
                                 child_session_file, child_settings, fold_brief)
 from desh_chat.display import Info
-from desh_chat.events import Continue, MaybeRegenerate, PromptUser, UserMessage
+from desh_chat.events import MaybeRegenerate, TurnStart, UserMessage
 from desh_chat.gate import Answer
 from desh_chat.state import ChatHistory, InferenceEngine, Round, Settings, ToolResult, Turn
 from desh.llama.wire import ToolCall
@@ -195,15 +195,17 @@ class TestChildSetup:
         assert set(params["properties"]) == {"task", "context", "gate", "check"} and params["required"] == ["task"]
 
     def test_child_is_built_from_child_settings_of_the_fallback(self, make_state, monkeypatch, capsys):
-        """No settings injected: the Delegate's own (startup) settings. The child runs with Continue
-        as its idle event and running on, so MaybeRegenerate reaches it after every turn."""
+        """No settings injected: the Delegate's own (startup) settings. The child runs with no
+        operator and the checkpoint as its auto prompt, running on, so the loop head reaches
+        TurnStart after every turn and drains on the first one that is not capped."""
         monkeypatch.setattr("desh_chat.delegate.Engine", RecordingEngine)
         RecordingEngine.states.clear()
         inference, _ = with_server(make_state, FakeServer())
         Delegate(root=".", inference=inference, settings=SETTINGS).delegate("task")
         child, = RecordingEngine.states
         assert child.settings == child_settings(SETTINGS)
-        assert child.on_idle == Continue(CAP_CONTINUE_MSG) and child.running is True
+        assert child.operator is False and child.auto_prompt == CAP_CONTINUE_MSG and child.running is True
+        assert child.pending is None            # the seed opens the turn: TurnStart(task)
 
     def test_injected_settings_replace_the_startup_ones(self, make_state, monkeypatch, capsys):
         """The parent flipped auto mode and switched model after the registry was built: the child
@@ -250,7 +252,7 @@ class TestFoldBrief:
 
 
 # ---------------------
-# Continue: the child's idle event, and the checkpoint loop it drives
+# The child's loop head: TurnStart without an operator, and the checkpoint loop it drives
 # ---------------------
 
 def capped(assistant="so far", tokens=0) -> Turn:
@@ -258,15 +260,12 @@ def capped(assistant="so far", tokens=0) -> Turn:
     return replace(t, tokens=tokens) if tokens else t
 
 
-class TestContinue:
-    def test_maybe_regenerate_emits_the_idle_event_instead_of_prompting(self, make_state):
-        _, events = MaybeRegenerate().execute(make_state(running=True, on_idle=Continue("go")))
-        assert events == [Continue("go")]
-        _, events = MaybeRegenerate().execute(make_state(running=False, on_idle=Continue("go")))
-        assert events == []
-        _, events = MaybeRegenerate().execute(make_state(running=True))
-        assert isinstance(events[-1], PromptUser)
+def child_head(make_state, **overrides):
+    """A child state as Delegate builds it: no operator, the checkpoint as auto prompt."""
+    return make_state(**{"settings": SETTINGS, "running": True, "operator": False, "auto_prompt": "go", **overrides})
 
+
+class TestChildTurnStart:
     def test_last_non_summary_skips_the_summary_appended_by_compaction(self):
         history = ChatHistory().append(capped()).compact("s")
         assert history.last_non_summary() == capped()
@@ -275,7 +274,7 @@ class TestContinue:
 
     def test_a_capped_turn_is_continued(self, make_state):
         for history in (ChatHistory().append(capped()), ChatHistory().append(capped()).compact("s")):
-            _, events = Continue("go").execute(make_state(settings=SETTINGS, history=history))
+            _, events = TurnStart().execute(child_head(make_state, history=history))
             assert [type(e) for e in events] == [Info, UserMessage] and events[-1] == UserMessage("go")
 
     def test_any_other_ending_drains(self, make_state):
@@ -284,20 +283,38 @@ class TestContinue:
                         ChatHistory().append(turn("", cancelled=True)),
                         ChatHistory().append(turn("", cancelled=True, stop="overflow")),
                         ChatHistory().append(capped()).compact("s").append(Turn("go", "done"))):
-            _, events = Continue("go").execute(make_state(settings=SETTINGS, history=history))
-            assert events == [], history
+            new_state, events = TurnStart().execute(child_head(make_state, history=history))
+            assert events == [] and new_state.pending is None, history
 
-    def test_a_continuation_that_cannot_fit_drains_instead_of_looping(self, make_state):
-        """NextRound would reject the message without recording a turn, MaybeRegenerate would bring
-        Continue back with history unchanged, and the same message would go out again, forever.
-        The capped turn here fills the window: the child must drain and answer with it."""
-        settings = replace(SETTINGS, context=200, compaction_threshold=2.0)      # compaction never ran
-        full = ChatHistory().append(capped(tokens=190))
-        _, events = Continue("go").execute(make_state(settings=settings, history=full, system_prompt="x" * 40))
-        assert events == []
-        fits = ChatHistory().append(capped(tokens=100))
-        _, events = Continue("go").execute(make_state(settings=settings, history=fits, system_prompt="x" * 40))
-        assert events[-1] == UserMessage("go")
+    def test_a_continuation_that_cannot_fit_is_recorded_and_the_child_drains(self, make_state, no_esc_watcher):
+        """The loop that must not happen: TurnStart issues the auto prompt, NextRound cannot fit it,
+        the loop head sees history unchanged and issues it again, forever. NextRound compacts once
+        (the capped turn is the window), and what still does not fit is recorded as a cancelled
+        overflow turn — which is what TurnStart reads next, and drains on."""
+        settings = replace(SETTINGS, context=200)                       # floor: 70 tokens of room
+        server = FakeServer(script=[{"content": "s"}])                  # the one compaction
+        inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT)
+        state = child_head(make_state, settings=settings, inference=inference, system_prompt="x" * 40,
+                           history=ChatHistory().append(capped(tokens=150)), auto_prompt="go " * 300)
+        final = Engine[type(state)]().run(state, seed=[MaybeRegenerate()])
+        assert [k for k, _ in server.calls] == ["complete"]
+        assert [(t.stop, t.cancelled, t.summary) for t in final.history.turns] == [
+            ("cap", False, False), ("", False, True), ("overflow", True, False)]
+        assert final.pending is None
+        assert answer(final) == "The subagent ran out of context window before finishing."
+
+    def test_a_continuation_that_fits_after_compaction_goes_on(self, make_state, no_esc_watcher):
+        """Same window, an auto prompt that fits once the capped turn is a summary: one compaction,
+        then the continuation streams and the child drains on its answer."""
+        settings = replace(SETTINGS, context=200)
+        server = FakeServer(script=[{"content": "s"}, {"content": "done: 42"}])
+        inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT)
+        state = child_head(make_state, settings=settings, inference=inference, system_prompt="x" * 40,
+                           history=ChatHistory().append(capped(tokens=150)))
+        final = Engine[type(state)]().run(state, seed=[MaybeRegenerate()])
+        assert [k for k, _ in server.calls] == ["complete", "stream"]
+        assert [m["content"] for m in server.calls[1][1].messages] == ["x" * 40, ChatHistory.SUMMARY_PREFIX + "s", ChatHistory.SUMMARY_ACK, "go"]
+        assert answer(final) == "done: 42"
 
 
 # ---------------------
@@ -310,7 +327,7 @@ class TestFullLoop:
     def test_child_answer_is_the_parents_tool_result(self, make_state, always_yes, no_esc_watcher):
         server = FakeServer(script=[self.DELEGATION, {"content": "There are 12 files."}, {"content": "Twelve."}])
         state = parent_with_delegate(make_state, server)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("how many files?")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("how many files?")])
         assert len(final.history.turns) == 1 and final.pending is None
         parent_turn = final.history.turns[0]
         assert parent_turn.assistant == "Twelve."
@@ -324,7 +341,7 @@ class TestFullLoop:
         delegation = {"tool_calls": [{"name": "delegate", "arguments": json.dumps({"task": task, "context": context, "gate": "root cause named"})}]}
         server = FakeServer(script=[delegation, {"content": "root cause: X"}, {"content": "X."}])
         state = parent_with_delegate(make_state, server)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("go")])
         child_req = server.calls[1][1]
         assert child_req.messages[0]["content"].endswith("Context from the delegating agent:\n" + context + "\n\nSuccess criterion:\nroot cause named")
         assert child_req.messages[1] == {"role": "user", "content": task}
@@ -337,7 +354,7 @@ class TestFullLoop:
         parent_file = str(tmp_path / "run.json")
         server = FakeServer(script=[self.DELEGATION, {"content": "12"}, {"content": "12"}])
         state = parent_with_delegate(make_state, server, session_file=parent_file)
-        Engine[type(state)]().run(state, seed=[UserMessage("how many files?")])
+        Engine[type(state)]().run(state, seed=[TurnStart("how many files?")])
         files = {p.name for p in tmp_path.iterdir()}
         assert "run.json" in files and len(files) == 2
         child_file, = files - {"run.json"}
@@ -356,7 +373,7 @@ class TestFullLoop:
                 return super().stream(req, renderer, cancelled)
         server = Broken(script=[self.DELEGATION, {"content": "ok, no child"}])
         state = parent_with_delegate(make_state, server)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("go")])
         result = final.history.turns[0].rounds[0].results[0].content
         assert result.startswith("Tool 'delegate' raised RuntimeError") and "boom" in result
 
@@ -371,7 +388,7 @@ class TestFullLoop:
         inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT)
         registry = with_delegate(child_tools, inference=inference, settings=SETTINGS)      # startup: auto off
         state = make_state(inference=inference, settings=replace(SETTINGS, auto=True), running=False, tools=registry)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("go")])
         assert asked == []
         assert final.history.turns[0].rounds[0].results[0].content == "12"
         child_req = server.calls[2][1]
@@ -388,30 +405,34 @@ class TestFullLoop:
     CHILD_ROUND = {"tool_calls": [{"name": "Read"}]}     # "not available" on an empty registry, still a round
 
     def test_a_capped_child_continues_and_the_parent_reads_the_final_answer(self, make_state, always_yes, no_esc_watcher):
-        """Round 1 runs, round 2 hits the cap (max_tool_rounds=1), Continue opens a second turn,
-        the model answers it, Continue drains. The capped turn is small, so no compaction."""
+        """Round 1 runs, round 2 hits the cap (max_tool_rounds=1), TurnStart opens a second turn
+        with the auto prompt, the model answers it, TurnStart drains. The capped turn is small, so
+        the continuation needs no compaction."""
         server = FakeServer(script=[self.DELEGATION, self.CHILD_ROUND, self.CHILD_ROUND, {"content": "done: 12"}, {"content": "12"}])
         state = self.checkpointing_parent(make_state, server)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("go")])
         assert final.history.turns[0].rounds[0].results[0].content == "done: 12"
         continuation = server.calls[3][1]
         assert continuation.messages[-1] == {"role": "user", "content": CAP_CONTINUE_MSG}
         assert [m["role"] for m in continuation.messages[:2]] == ["system", "user"]     # the capped turn is still in view
 
     def test_the_checkpoint_chain_compacts_the_capped_turn_before_continuing(self, make_state, always_yes, no_esc_watcher):
-        """TurnEnd -> MaybeCompact -> CompactHistory -> MaybeRegenerate -> Continue -> UserMessage:
-        with the threshold at zero every turn compacts, so the continuation sees the summary of the
-        capped turn, not the turn itself, and the parent still reads the final answer."""
-        server = FakeServer(script=[self.DELEGATION, self.CHILD_ROUND, self.CHILD_ROUND,
+        """TurnEnd(cap) -> MaybeRegenerate -> TurnStart -> UserMessage(auto prompt) -> NextRound
+        -> CompactHistory -> NextRound(compacted): the capped completion's long text lands on the
+        turn (it was never in a request), so the continuation is the first request that does not
+        fit and the one that compacts. It then sees the summary of the capped turn, not the turn
+        itself. The final turn is NOT compacted afterwards — nothing follows it — which the script
+        proves: no second complete() entry exists to consume, and the parent reads "12"."""
+        capped_round = {"content": "reasoning so far. " * 250, **self.CHILD_ROUND}     # ~1100 tokens on the turn
+        server = FakeServer(script=[self.DELEGATION, self.CHILD_ROUND, capped_round,
                                     {"content": "summary of round one"},        # complete(): the capped turn
                                     {"content": "done: 12"},
-                                    {"content": "summary of the answer"},       # complete(): the final turn, unused
                                     {"content": "12"}])
-        state = self.checkpointing_parent(make_state, server, compaction_threshold=0.0)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        state = self.checkpointing_parent(make_state, server, context=2000)      # floor 700; the continuation leaves ~500
+        final = Engine[type(state)]().run(state, seed=[TurnStart("go")])
         assert final.history.turns[0].rounds[0].results[0].content == "done: 12"
-        kinds = [k for k, _ in server.calls]
-        assert kinds[:6] == ["stream", "stream", "stream", "complete", "stream", "complete"]
+        assert final.history.turns[0].assistant == "12"
+        assert [k for k, _ in server.calls] == ["stream", "stream", "stream", "complete", "stream", "stream"]
         continuation = server.calls[4][1]
         assert [m["role"] for m in continuation.messages] == ["system", "user", "assistant", "user"]
         assert continuation.messages[1]["content"] == ChatHistory.SUMMARY_PREFIX + "summary of round one"
@@ -425,7 +446,7 @@ class TestFullLoop:
                 return super().stream(req, renderer, cancelled)
         state = parent_with_delegate(make_state, Interrupted(script=[self.DELEGATION]))
         with pytest.raises(KeyboardInterrupt):
-            Engine[type(state)]().run(state, seed=[UserMessage("go")])
+            Engine[type(state)]().run(state, seed=[TurnStart("go")])
 
 
 # ---------------------
@@ -448,7 +469,7 @@ class TestGateAndCheck:
                                   "arguments": '{"task": "count the files", "context": "src only", "gate": "report a number"}'}]}
         server = FakeServer(script=[script, {"content": "12"}, {"content": "12"}])
         state = parent_with_delegate(make_state, server)
-        Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        Engine[type(state)]().run(state, seed=[TurnStart("go")])
         child_req = server.calls[1][1]
         system = child_req.messages[0]["content"]
         assert "Context from the delegating agent:\nsrc only" in system
@@ -459,7 +480,7 @@ class TestGateAndCheck:
                                   "arguments": '{"task": "count the files", "check": "printf \'ok line1\\\\nok line2\\\\n\'"}'}]}
         server = FakeServer(script=[script, {"content": "12"}, {"content": "12"}])
         state = parent_with_delegate(make_state, server)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("go")])
         result = final.history.turns[0].rounds[0].results[0].content
         assert result.endswith(
             "[check `printf 'ok line1\\nok line2\\n'`: exit 0]\n"
@@ -471,7 +492,7 @@ class TestGateAndCheck:
         script = {"tool_calls": [{"name": "delegate", "arguments": '{"task": "count the files", "check": "exit 3"}'}]}
         server = FakeServer(script=[script, {"content": "12"}, {"content": "12"}])
         state = parent_with_delegate(make_state, server)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("go")])
         result = final.history.turns[0].rounds[0].results[0].content
         assert "raised" not in result
         assert result.endswith("[check `exit 3`: exit 3]")
@@ -480,7 +501,7 @@ class TestGateAndCheck:
         script = {"tool_calls": [{"name": "delegate", "arguments": '{"task": "count the files", "check": "echo ran"}'}]}
         server = FakeServer(script=[script, {"content": "partial...", "finish_reason": "cancelled"}, {"content": "done"}])
         state = parent_with_delegate(make_state, server)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("go")])
         result = final.history.turns[0].rounds[0].results[0].content
         assert "cancelled" in result and "[check" not in result
 
@@ -494,7 +515,7 @@ class TestGateAndCheck:
                                   "arguments": '{"task": "count the files", "check": "pwd && test -f marker.txt && echo found"}'}]}
         server = FakeServer(script=[script, {"content": "12"}, {"content": "12"}])
         state = parent_with_delegate(make_state, server, delegate_root=str(root))
-        final = Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("go")])
         result = final.history.turns[0].rounds[0].results[0].content
         assert result.endswith(f"[check `pwd && test -f marker.txt && echo found`: exit 0]\n{root}\nfound")
 
@@ -503,7 +524,7 @@ class TestGateAndCheck:
                                   "arguments": '{"task": "count the files", "context": "src only", "gate": "report a number", "check": "echo secret-check"}'}]}
         server = FakeServer(script=[script, {"content": "12"}, {"content": "12"}])
         state = parent_with_delegate(make_state, server)
-        Engine[type(state)]().run(state, seed=[UserMessage("go")])
+        Engine[type(state)]().run(state, seed=[TurnStart("go")])
         child_req = server.calls[1][1]
         blob = child_req.messages[0]["content"] + "".join(m["content"] for m in child_req.messages[1:])
         assert "secret-check" not in blob

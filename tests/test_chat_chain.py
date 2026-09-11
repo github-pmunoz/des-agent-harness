@@ -1,17 +1,17 @@
 """Unit tests for the ported desh_chat turn chain (the one-round case; multi-round
 tool loops are covered in test_turn_loop.py):
 
-  UserMessage -> NextRound -> StreamCompletion -> [TurnEnd, LogCompletion] -> TurnEnd
-    -> MaybeCompact -> (CompactHistory -> [Info, LogCompletion] ->) MaybeRegenerate
-    -> [DisplayStats, PromptUser]
+  MaybeRegenerate -> TurnStart -> [DisplayStats, PromptUser] -> UserMessage -> NextRound
+    -> (CompactHistory -> [Info, LogCompletion], NextRound(compacted=True) ->)
+    -> StreamCompletion -> [TurnEnd, LogCompletion] -> TurnEnd -> MaybeRegenerate
 
-UserMessage only opens state.pending; NextRound is where the budget and the request
-are built, so tests that inspect the request drive both via open_turn().
+TurnStart opens state.pending empty and UserMessage fills it; NextRound is where the
+budget, the compaction decision and the request are built, so tests that inspect the
+request drive all three via open_turn().
 
-MaybeRegenerate is a 2-fan, not a chain link: it schedules DisplayStats and
-PromptUser directly, as siblings. DisplayStats/DisplayHistory/Info/Warn are
-pure sinks (execute() returns [] — no further events); MaybeRegenerate is
-the only thing that reschedules PromptUser.
+MaybeRegenerate owns the running check only. TurnStart is the 2-fan: with an operator
+it schedules DisplayStats and PromptUser as siblings. DisplayStats/DisplayHistory/Info/
+Warn are pure sinks (execute() returns [] — no further events).
 
 Each event is driven directly (state, events = Event(...).execute(state)),
 same style as test_command_surface.py's Command tests, plus one full
@@ -26,10 +26,10 @@ from desh.engine import Engine
 from desh.llama.logger import Logger
 from desh.llama.wire import Request
 from desh.llama.tokens import estimate_tokens
-from desh_chat.display import Error, Info
+from desh_chat.display import DisplayStats, Error, Info
 from desh_chat.events import (
-    CompactHistory, Exit, LogCompletion, MaybeCompact, MaybeRegenerate,
-    NextRound, PromptUser, StreamCompletion, TurnEnd, UserMessage,
+    CompactHistory, Exit, LogCompletion, MaybeRegenerate,
+    NextRound, PromptUser, StreamCompletion, TurnEnd, TurnStart, UserMessage,
 )
 from desh_chat.handlers import on_interrupt
 from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Settings, Turn
@@ -41,10 +41,81 @@ def with_server(make_state, server, **overrides):
 
 
 def open_turn(state, message: str):
-    """UserMessage -> NextRound, returning NextRound's (state, events): the request-building step."""
-    state, events = UserMessage(message).execute(state)
+    """TurnStart(message) -> UserMessage -> NextRound, returning NextRound's (state, events): the
+    request-building step."""
+    state, events = TurnStart(message).execute(state)
+    assert [type(e) for e in events] == [UserMessage]
+    state, events = events[0].execute(state)
     assert [type(e) for e in events] == [NextRound]
     return events[0].execute(state)
+
+
+# ---------------------
+# TurnStart
+# ---------------------
+
+class TestTurnStart:
+    """The only creator of state.pending, and the policy over where a turn's message comes from."""
+
+    def test_with_an_operator_opens_an_empty_turn_and_prompts(self, make_state):
+        new_state, events = TurnStart().execute(make_state(operator=True))
+        assert new_state.pending == PendingTurn() and new_state.pending.user is None
+        assert [type(e) for e in events] == [DisplayStats, PromptUser]
+
+    def test_a_seed_message_opens_the_turn_and_delivers_it_in_one_step(self, make_state):
+        new_state, events = TurnStart("the task").execute(make_state(operator=False))
+        assert new_state.pending == PendingTurn()
+        assert events == [UserMessage("the task")]
+
+    def test_a_command_leaves_the_placeholder_and_the_loop_head_reuses_it(self, make_state):
+        """PromptUser -> Command -> MaybeRegenerate -> TurnStart: the placeholder opened before the
+        command is the one the next message fills, not a second one."""
+        opened, _ = TurnStart().execute(make_state(operator=True))
+        again, events = TurnStart().execute(opened)
+        assert again.pending is opened.pending
+        assert [type(e) for e in events] == [DisplayStats, PromptUser]
+
+    def test_without_an_operator_a_finished_turn_drains_and_opens_nothing(self, make_state):
+        for history in (ChatHistory(),
+                        ChatHistory().append(Turn("q", "done")),
+                        ChatHistory().append(Turn("q", "", cancelled=True))):
+            new_state, events = TurnStart().execute(make_state(operator=False, history=history))
+            assert events == [] and new_state.pending is None, history
+
+    def test_a_capped_turn_is_continued_with_the_auto_prompt(self, make_state):
+        capped = Turn("q", "so far", stop="cap")
+        for history in (ChatHistory().append(capped), ChatHistory().append(capped).compact("s")):
+            new_state, events = TurnStart().execute(make_state(operator=False, auto_prompt="go", history=history))
+            assert new_state.pending == PendingTurn()
+            assert [type(e) for e in events] == [Info, UserMessage] and events[-1] == UserMessage("go")
+
+    def test_the_auto_prompt_beats_the_operator_and_needs_a_capped_turn(self, make_state):
+        capped = ChatHistory().append(Turn("q", "so far", stop="cap"))
+        _, events = TurnStart().execute(make_state(operator=True, auto_prompt="go", history=capped))
+        assert events[-1] == UserMessage("go")
+        done = ChatHistory().append(Turn("q", "done"))
+        _, events = TurnStart().execute(make_state(operator=True, auto_prompt="go", history=done))
+        assert [type(e) for e in events] == [DisplayStats, PromptUser]
+        _, events = TurnStart().execute(make_state(operator=True, auto_prompt=None, history=capped))
+        assert [type(e) for e in events] == [DisplayStats, PromptUser]
+
+    def test_a_cancelled_capped_turn_is_not_continued(self, make_state):
+        """An overflow recorded by NextRound is a cancelled turn: the loop head must see it and stop,
+        or the same auto prompt would go out again forever."""
+        history = ChatHistory().append(Turn("go", "", cancelled=True, stop="overflow"))
+        new_state, events = TurnStart().execute(make_state(operator=False, auto_prompt="go", history=history))
+        assert events == [] and new_state.pending is None
+
+    def test_reaching_the_loop_head_mid_turn_is_a_harness_bug(self, make_state):
+        import pytest
+        with pytest.raises(AssertionError):
+            TurnStart().execute(make_state(pending=PendingTurn("q")))
+
+    def test_maybe_regenerate_only_checks_running(self, make_state):
+        _, events = MaybeRegenerate().execute(make_state(running=True))
+        assert events == [TurnStart()]
+        _, events = MaybeRegenerate().execute(make_state(running=False))
+        assert events == []
 
 
 # ---------------------
@@ -80,16 +151,18 @@ class TestUserMessageBudget:
         assert events[0].request.max_tokens == expected
         assert expected < 45  # confirms this is genuinely the tightest of the three ceilings
 
-    def test_gen_budget_leq_zero_is_rejected_before_any_request_is_built(self, make_state, capsys):
+    def test_a_message_that_cannot_fit_ends_as_an_overflow_turn_without_a_request(self, make_state, capsys):
+        """No window to compact (history is empty), so there is nothing to try: the turn is recorded
+        cancelled with stop="overflow" — a record, not a dropped message, so an auto prompt that
+        cannot fit is not issued again."""
         settings = Settings(model=MODELS[0], temperature=0.3, think=False,
                              context=1, max_turn_tokens=100, turn_token_cap=1.0)
         state = make_state(settings=settings)
         new_state, events = open_turn(state, "a message long enough to blow a context of 1 token")
-        assert len(events) == 2
-        assert isinstance(events[0], Error)
-        assert isinstance(events[1], MaybeRegenerate)
+        assert [type(e) for e in events] == [Error, TurnEnd]
         assert "exceeds context window" in events[0].text
-        assert new_state.pending is None    # the rejected message leaves no turn in progress
+        assert events[1].cancelled is True and events[1].stop == "overflow"
+        assert new_state.pending is not None    # TurnEnd, not NextRound, clears it
 
 
 class TestUserMessageHistoryView:
@@ -223,14 +296,15 @@ class TestStreamCompletion:
 # ---------------------
 
 class TestTurnEnd:
-    def test_appends_the_pending_turn_and_always_emits_maybe_compact(self, make_state):
+    def test_appends_the_pending_turn_and_returns_to_the_loop_head(self, make_state):
+        """No compaction on this path: whether the next request needs one is NextRound's call."""
         state = make_state(pending=PendingTurn("q"))
         new_state, events = TurnEnd(assistant="a", cancelled=False).execute(state)
         assert len(new_state.history) == 1
         assert new_state.history.turns[0].user == "q"
         assert new_state.history.turns[0].assistant == "a"
         assert new_state.pending is None
-        assert len(events) == 1 and isinstance(events[0], MaybeCompact)
+        assert events == [MaybeRegenerate()]
 
     def test_original_state_is_untouched_immutability(self, make_state):
         state = make_state(pending=PendingTurn("q"))
@@ -262,59 +336,85 @@ class TestTurnEnd:
 
 
 # ---------------------
-# MaybeCompact
+# NextRound: when a request compacts first
 # ---------------------
 
-class TestMaybeCompact:
-    def test_below_threshold_regenerates(self, make_state):
-        settings = Settings(model=MODELS[0], temperature=0.3, think=False,
-                             context=1000, max_turn_tokens=100, compaction_threshold=0.5)
-        history = ChatHistory().append(Turn("short", "reply", tokens=100))  # well under 500
-        state = make_state(settings=settings, history=history)
-        _, events = MaybeCompact().execute(state)
-        assert len(events) == 1 and isinstance(events[0], MaybeRegenerate)
+class TestNextRoundCompaction:
+    """Compaction is paid only when a request is about to go out and the window leaves less room
+    than min_gen_tokens() = (1 - compaction_threshold) * context. With context=1000 and a 0.5
+    threshold the floor is 500; the system prompt is 7 tokens and "hi" one, so a window of W
+    leaves 992 - W."""
+    SETTINGS = Settings(model=MODELS[0], temperature=0.3, think=False,
+                        context=1000, max_turn_tokens=100, compaction_threshold=0.5)
 
-    def test_at_or_above_threshold_compacts(self, make_state):
-        settings = Settings(model=MODELS[0], temperature=0.3, think=False,
-                             context=1000, max_turn_tokens=100, compaction_threshold=0.5)
-        history = ChatHistory().append(Turn("long", "reply", tokens=500))  # exactly at threshold
-        state = make_state(settings=settings, history=history)
-        _, events = MaybeCompact().execute(state)
-        assert len(events) == 2 and isinstance(events[0], Info) and isinstance(events[1], CompactHistory)
+    def test_the_floor_is_derived_from_the_threshold(self, make_state):
+        assert make_state(settings=self.SETTINGS).min_gen_tokens() == 500
 
-    def test_does_not_double_count_the_just_appended_turn(self, make_state):
-        """Regression: MaybeCompact used to receive `last_turn` and check
-        window_tokens() + last_turn.tokens — but by the time MaybeCompact
-        runs, AppendTurn has already appended that turn, so window_tokens()
-        already includes it. The old check double-counted it and could fire
-        before the real window actually reached compaction_threshold.
+    def test_enough_room_streams_without_compacting(self, make_state):
+        history = ChatHistory().append(Turn("short", "reply", tokens=100))    # leaves 892
+        _, events = open_turn(make_state(settings=self.SETTINGS, history=history), "hi")
+        assert [type(e) for e in events] == [StreamCompletion]
 
-        Built so the true window (450) sits just under a 500 threshold, but
-        old_window + last_turn.tokens (450 + 100 = 550) would have wrongly
-        cleared it.
-        """
-        settings = Settings(model=MODELS[0], temperature=0.3, think=False,
-                             context=1000, max_turn_tokens=100, compaction_threshold=0.5)
+    def test_too_little_room_compacts_then_retries_the_same_round(self, make_state):
+        history = ChatHistory().append(Turn("long", "reply", tokens=500))     # leaves 492
+        new_state, events = open_turn(make_state(settings=self.SETTINGS, history=history), "hi")
+        assert [type(e) for e in events] == [Info, CompactHistory, NextRound]
+        assert events[2] == NextRound(compacted=True)
+        assert new_state.pending is not None and new_state.pending.rounds == ()    # the turn is untouched
+
+    def test_the_retry_is_built_from_the_compacted_history(self, make_state):
+        """CompactHistory rewrites history and schedules nothing; NextRound(compacted=True) reads the
+        state as it is by then, so the request carries the summary and not the turns behind it."""
+        server = FakeServer(script=[{"content": "a tidy summary"}, {"content": "unused"}])
+        history = ChatHistory().append(Turn("long question", "long reply", tokens=500))
+        state = with_server(make_state, server, settings=self.SETTINGS, history=history)
+        state, events = open_turn(state, "hi")
+        state, _ = events[1].execute(state)                  # CompactHistory
+        _, events = events[2].execute(state)                 # NextRound(compacted=True)
+        assert [type(e) for e in events] == [StreamCompletion]
+        contents = [m["content"] for m in events[0].request.messages]
+        assert ChatHistory.SUMMARY_PREFIX + "a tidy summary" in contents
+        assert "long question" not in contents
+
+    def test_still_short_after_compacting_ends_the_turn_as_an_overflow(self, make_state):
+        history = ChatHistory().append(Turn("long", "reply", tokens=500))
+        state, _ = open_turn(make_state(settings=self.SETTINGS, history=history), "hi")
+        _, events = NextRound(compacted=True).execute(state)
+        assert [type(e) for e in events] == [Error, TurnEnd]
+        assert events[1].cancelled is True and events[1].stop == "overflow"
+
+    def test_a_window_that_is_only_a_summary_is_not_compacted_again(self, make_state):
+        """Summarising the summary cannot free room: a message too large for what is left goes
+        straight to the overflow record without paying for a compaction."""
+        history = ChatHistory().compact("s", tokens=500)
+        _, events = open_turn(make_state(settings=self.SETTINGS, history=history), "hi")
+        assert [type(e) for e in events] == [Error, TurnEnd]
+
+    def test_the_window_is_measured_as_it_is(self, make_state):
+        """Regression from the post-turn design: the just-finished turn is already in the window,
+        so nothing may add it a second time. A 450 window leaves 542, above the 500 floor."""
         history = (ChatHistory()
                    .append(Turn("earlier", "reply", tokens=350))
-                   .append(Turn("latest", "reply", tokens=100)))  # window = 450, under 500
-        state = make_state(settings=settings, history=history)
+                   .append(Turn("latest", "reply", tokens=100)))
+        state = make_state(settings=self.SETTINGS, history=history)
         assert state.history.window_tokens() == 450
-        _, events = MaybeCompact().execute(state)
-        assert isinstance(events[0], MaybeRegenerate), "compaction fired early — the just-appended turn was double-counted"
+        _, events = open_turn(state, "hi")
+        assert [type(e) for e in events] == [StreamCompletion], "compaction fired early — the last turn was double-counted"
 
-    def test_cancelled_status_of_the_last_turn_no_longer_needs_special_casing(self, make_state):
-        """window_tokens() already excludes cancelled turns at the source
-        (since_last_summary()'s own filter) — a cancelled turn simply cannot
-        move this check either way, with no cancelled-specific logic needed
-        in MaybeCompact itself.
-        """
-        settings = Settings(model=MODELS[0], temperature=0.3, think=False,
-                             context=1000, max_turn_tokens=100, compaction_threshold=0.5)
+    def test_cancelled_turns_do_not_count(self, make_state):
+        """window_tokens() excludes cancelled turns at the source (since_last_summary()'s own
+        filter), so a cancelled turn cannot move this check either way."""
         history = ChatHistory().append(Turn("cancelled", "partial", tokens=900, cancelled=True))
-        state = make_state(settings=settings, history=history)
-        _, events = MaybeCompact().execute(state)
-        assert isinstance(events[0], MaybeRegenerate)
+        _, events = open_turn(make_state(settings=self.SETTINGS, history=history), "hi")
+        assert [type(e) for e in events] == [StreamCompletion]
+
+    def test_the_floor_is_on_the_room_not_on_the_capped_budget(self, make_state):
+        """max_turn_tokens (100 here) is below the 500 floor: gen_budget can never reach the floor,
+        but the window leaves plenty, so no compaction. Comparing the budget instead of the room
+        would compact on every request and overflow on every retry."""
+        _, events = open_turn(make_state(settings=self.SETTINGS), "hi")
+        assert [type(e) for e in events] == [StreamCompletion]
+        assert events[0].request.max_tokens == 100
 
 
 # ---------------------
@@ -335,10 +435,8 @@ class TestCompactHistory:
         assert new_state.history.turns[-1].summary is True
         assert "a tidy summary" in new_state.history.turns[-1].user
 
-        assert len(events) == 3
-        assert isinstance(events[0], Info)
-        assert isinstance(events[1], LogCompletion)
-        assert isinstance(events[2], MaybeRegenerate)
+        # no successor: the caller (NextRound, /compact) sequences what follows the compaction
+        assert [type(e) for e in events] == [Info, LogCompletion]
 
         events[0].execute(new_state)  # the summary is now surfaced to the user, not just logged
         assert "a tidy summary" in capsys.readouterr().out
@@ -403,12 +501,11 @@ class TestCompactHistory:
 
 class TestFullEngineRun:
     def test_prompt_completion_and_eof_terminate_cleanly_no_livelock(self, make_state, no_esc_watcher, monkeypatch):
-        """End-to-end regression: PromptUser -> UserMessage -> StreamCompletion
-        -> AppendTurn -> MaybeCompact -> MaybeRegenerate -> [DisplayStats,
-        PromptUser] -> (EOF) -> Exit -> running=False -> [Info] -> [] ->
-        queue drains. Exit never touches MaybeRegenerate — it settles
-        directly through its own Info sink. Engine.run() must return, not
-        hang.
+        """End-to-end regression: MaybeRegenerate -> TurnStart -> [DisplayStats, PromptUser]
+        -> UserMessage -> NextRound -> StreamCompletion -> TurnEnd -> MaybeRegenerate
+        -> TurnStart -> PromptUser -> (EOF) -> Exit -> running=False -> [Info] -> []
+        -> queue drains. Exit never touches MaybeRegenerate — it settles directly
+        through its own Info sink. Engine.run() must return, not hang.
         """
         inputs = iter(["hello there"])
 
@@ -422,7 +519,7 @@ class TestFullEngineRun:
         server = FakeServer(script=[{"content": "hi yourself"}])
         state = with_server(make_state, server)
 
-        final_state = Engine[type(state)]().run(state, seed=[PromptUser()])
+        final_state = Engine[type(state)]().run(state, seed=[MaybeRegenerate()])
 
         assert final_state.running is False
         assert len(final_state.history.turns) == 1
@@ -443,7 +540,7 @@ class TestFullEngineRun:
         monkeypatch.setattr("builtins.input", raise_keyboard_interrupt)
         state = make_state()
 
-        final_state = Engine[type(state)](on_interrupt=on_interrupt).run(state, seed=[PromptUser()])
+        final_state = Engine[type(state)](on_interrupt=on_interrupt).run(state, seed=[MaybeRegenerate()])
 
         assert final_state.running is False
         assert "Goodbye!" in capsys.readouterr().out

@@ -436,14 +436,14 @@ class TestExecuteToolCallsWithRegistry:
     def test_full_turn_with_a_real_tool(self, make_state, no_esc_watcher):
         from conftest import FakeServer
         from desh.engine import Engine
-        from desh_chat.events import UserMessage
+        from desh_chat.events import TurnStart
         server = FakeServer(script=[
             {"tool_calls": [{"name": "get_weather", "arguments": '{"city": "Santiago"}'}]},
             {"content": "Sunny in Santiago."},
         ])
         state = make_state(inference=InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=server, port=PORT),
                            tools=REGISTRY, running=False)
-        final = Engine[type(state)]().run(state, seed=[UserMessage("weather?")])
+        final = Engine[type(state)]().run(state, seed=[TurnStart("weather?")])
         turn = final.history.turns[0]
         assert turn.rounds[0].results[0].content == "Santiago: sunny"
         assert turn.assistant == "Sunny in Santiago."

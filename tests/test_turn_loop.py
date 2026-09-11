@@ -1,10 +1,11 @@
 """
 The turn loop: a turn is (user message, tool rounds*, final answer), driven by the chain
 
-  UserMessage -> NextRound -> StreamCompletion -> AppendRound -> ExecuteToolCalls(i)* -> NextRound -> ...
-                                               -> TurnEnd -> MaybeCompact
+  TurnStart -> UserMessage -> NextRound -> StreamCompletion -> AppendRound -> ExecuteToolCalls(i)* -> NextRound -> ...
+                                                            -> TurnEnd -> MaybeRegenerate
 
-State between rounds lives on ChatState.pending (a PendingTurn); only TurnEnd writes history.
+State between rounds lives on ChatState.pending (a PendingTurn, opened empty by TurnStart and
+filled by UserMessage); only TurnEnd writes history.
 FakeServer's script drives the model: an entry with tool_calls makes a round, one without ends the turn.
 These tests run with an EMPTY registry, so ExecuteToolCalls answers every call "not available" — a
 legitimate tool message the model can recover from; the loop shape is independent of any real tool.
@@ -18,9 +19,11 @@ from desh.engine import Engine
 from desh.llama.wire import Request, ToolCall
 from desh.llama.tokens import estimate_tokens
 from desh_chat.display import DisplayStats, Error, Info, Warn
+import pytest
+
 from desh_chat.events import (
-    AppendRound, ExecuteToolCalls, MaybeCompact, NextRound, PromptUser,
-    StreamCompletion, TurnEnd, UserMessage,
+    AppendRound, ExecuteToolCalls, MaybeRegenerate, NextRound,
+    StreamCompletion, TurnEnd,
 )
 from desh_chat.session import LoadSession, SaveSession
 from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn
@@ -49,6 +52,21 @@ ROUND = Round(assistant="Let me check.", tool_calls=(WEATHER, TIME), results=(re
 # ---------------------
 
 class TestPendingTurn:
+    def test_opens_empty_and_is_filled_once(self):
+        """The turn exists before its message: TurnStart opens it, the message source fills it."""
+        placeholder = PendingTurn()
+        assert placeholder.user is None and placeholder.rounds == ()
+        filled = placeholder.with_user("q")
+        assert filled == PendingTurn("q") and placeholder.user is None
+        with pytest.raises(AssertionError):
+            filled.with_user("again")
+
+    def test_a_placeholder_cannot_be_sent_or_finished(self):
+        with pytest.raises(AssertionError):
+            PendingTurn().messages()
+        with pytest.raises(AssertionError):
+            PendingTurn().finish("a", tokens=0, cancelled=False)
+
     def test_add_round_and_with_results_are_immutable(self):
         p0 = PendingTurn("q")
         p1 = p0.add_round(Round("", (WEATHER,)))
@@ -319,7 +337,7 @@ class TestNextRoundWithRounds:
 # ---------------------
 
 def run_chat(make_state, script, inputs, **overrides):
-    """Drive PromptUser through a scripted FakeServer with the given user inputs, then EOF."""
+    """Drive the loop head through a scripted FakeServer with the given user inputs, then EOF."""
     it = iter(inputs)
 
     def fake_input(prompt=""):
@@ -334,7 +352,7 @@ def run_chat(make_state, script, inputs, **overrides):
     try:
         server = FakeServer(script=script)
         state = with_server(make_state, server, **overrides)
-        return Engine[type(state)]().run(state, seed=[PromptUser()]), server
+        return Engine[type(state)]().run(state, seed=[MaybeRegenerate()]), server
     finally:
         builtins.input = original
 

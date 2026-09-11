@@ -3,7 +3,7 @@ walk, and the cancelled/summary semantics that view()/since_last_summary()/
 get_total_tokens() all depend on.
 
 Deliberately decoupled from the Event/Engine layer — these are pure data
-structure tests. Chain-level tests (UserMessage, AppendTurn, MaybeCompact,
+structure tests. Chain-level tests (TurnStart, UserMessage, AppendTurn, NextRound compaction,
 ...) live in test_chat_chain.py and exercise these same functions indirectly
 through real turn-token math instead of hand-picked numbers.
 """

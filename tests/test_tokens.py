@@ -13,7 +13,7 @@ from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 
 from desh.llama.wire import Request
 from desh.llama.tokens import estimate_tokens, turn_tokens
-from desh_chat.events import CompactHistory, NextRound, StreamCompletion, TurnEnd, UserMessage
+from desh_chat.events import CompactHistory, NextRound, StreamCompletion, TurnEnd, TurnStart, UserMessage
 from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Turn
 
 
@@ -23,8 +23,10 @@ def with_server(make_state, server, **overrides):
 
 
 def open_turn(state, message: str):
-    """UserMessage -> NextRound, returning NextRound's (state, events)."""
-    state, events = UserMessage(message).execute(state)
+    """TurnStart(message) -> UserMessage -> NextRound, returning NextRound's (state, events)."""
+    state, events = TurnStart(message).execute(state)
+    assert [type(e) for e in events] == [UserMessage]
+    state, events = events[0].execute(state)
     assert [type(e) for e in events] == [NextRound]
     return events[0].execute(state)
 

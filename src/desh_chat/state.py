@@ -3,7 +3,7 @@ from desh.llama.logger import Logger
 from desh.llama.server import LlamaServer
 from desh.llama.wire import ToolCall
 from desh.llama.tokens import estimate_tokens
-from desh.engine import State, Event
+from desh.engine import State
 from desh.tools import ToolRegistry
 from typing import Any
 
@@ -53,9 +53,13 @@ class ChatState(State):
     completions_log: Logger | None = field(repr=False)
     inference: InferenceEngine = field(repr=False)
     session_file: str | None = None     # where LoadSession reads / SaveSession writes; None -> no persistence
-    pending: PendingTurn | None = None  # the turn in progress between UserMessage and TurnEnd; never persisted
+    pending: PendingTurn | None = None  # the turn between TurnStart and TurnEnd; never persisted
     tools: ToolRegistry = field(default_factory=ToolRegistry, repr=False)  # what the model may call; empty -> no tools offered
-    on_idle: Event | None = None        # a callback for MaybeRegenerate when the queue is drained is idle
+    # How a turn begins when the queue runs dry (TurnStart's policy): with an operator, the prompt
+    # is shown; without one, the run returns. auto_prompt is the message a capped turn is continued
+    # with before either — None means a capped turn is never continued automatically.
+    operator: bool = True
+    auto_prompt: str | None = None
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))
@@ -69,10 +73,21 @@ class ChatState(State):
         """What the next request costs before generation: system prompt, window since the last summary, pending."""
         return estimate_tokens(self.system_prompt) + self.history.window_tokens() + pending_tokens
 
+    def gen_room(self, pending_tokens: int) -> int:
+        """What the window leaves for the next completion, before any cap: context minus the prompt."""
+        return self.settings.context - self.prompt_tokens(pending_tokens)
+
     def gen_budget(self, pending_tokens: int) -> int:
         """Room for the next completion: the turn cap, the fraction cap, and what the window leaves."""
         s = self.settings
-        return int(min(s.max_turn_tokens, s.context - self.prompt_tokens(pending_tokens), s.turn_token_cap * s.context))
+        return int(min(s.max_turn_tokens, self.gen_room(pending_tokens), s.turn_token_cap * s.context))
+
+    def min_gen_tokens(self) -> int:
+        """The room the window must leave for a completion before a request goes out; less than
+        this and the history is compacted first. Derived from the compaction threshold: a window
+        past the threshold is one that leaves less than (1 - threshold) of the context."""
+        s = self.settings
+        return int((1 - s.compaction_threshold) * s.context)
 
     def session_tokens(self, pending_tokens: int) -> int:
         """Whole priced tokens of the session so far."""
@@ -149,12 +164,22 @@ class Round:
 
 @dataclass(frozen=True)
 class PendingTurn:
-    """A turn between UserMessage and TurnEnd: the user message plus every completed tool round so
-    far. Lives on ChatState.pending only; never in ChatHistory, never in the session file."""
-    user: str
+    """A turn between TurnStart and TurnEnd: the user message plus every completed tool round so
+    far. Lives on ChatState.pending only; never in ChatHistory, never in the session file.
+
+    The turn exists before its message: TurnStart opens it with user=None and the message source
+    (the operator's prompt, an auto prompt, a seed) fills it through with_user(). An empty
+    placeholder is not a turn in progress — commands run against it, and Exit drops it."""
+    user: str | None = None
     rounds: tuple[Round, ...] = ()
 
+    def with_user(self, message: str) -> PendingTurn:
+        """The message arrived: the placeholder becomes a turn. Filling twice is a loop bug."""
+        assert self.user is None, "pending turn already has its message"
+        return replace(self, user=message)
+
     def messages(self) -> list[dict]:
+        assert self.user is not None, "pending turn has no message yet"
         return [{"role": "user", "content": self.user}] + [m for r in self.rounds for m in r.messages()]
 
     def priced_tokens(self) -> int:
@@ -165,7 +190,7 @@ class PendingTurn:
         """The prompt text the NEXT completion's usage frame will price: the user message on round one,
         the latest tool results afterwards."""
         if not self.rounds:
-            return self.user
+            return self.user or ""
         return "\n".join(r.content for r in self.rounds[-1].results)
 
     def add_round(self, round: Round) -> PendingTurn:
@@ -190,6 +215,7 @@ class PendingTurn:
     def finish(self, assistant: str, tokens: int, cancelled: bool, stop: str = "") -> Turn:
         """The final answer arrived (or the turn was cut short): freeze into a history Turn.
         tokens prices only the final completion; the rounds carry their own."""
+        assert self.user is not None, "pending turn has no message yet"
         return Turn(self.user, assistant, tokens=tokens + self.priced_tokens() if tokens else 0,
                     cancelled=cancelled, rounds=self.rounds, stop=stop)
 

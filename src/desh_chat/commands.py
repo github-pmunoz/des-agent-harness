@@ -58,7 +58,8 @@ class Command(Event):
 
     def _cmd_compact(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         self._no_args()
-        return state, [Info(f"compacting conversation history..."), CompactHistory()]
+        # CompactHistory schedules nothing after itself; the return to the loop head is ours
+        return state, [Info(f"compacting conversation history..."), CompactHistory(), MaybeRegenerate()]
 
     def _cmd_context(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not self.args:
