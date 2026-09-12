@@ -5,6 +5,7 @@ from desh.llama.wire import ToolCall
 from desh.llama.tokens import estimate_tokens
 from desh.engine import State
 from desh.tools import ToolRegistry
+from desh_chat.scratchpad import Scratchpad
 from typing import Any
 
 # -----------------------
@@ -29,6 +30,7 @@ class Settings:
     context: int
     max_turn_tokens: int
     max_tool_rounds: int = 10       # tool-call rounds allowed inside one turn before it is forced to end
+    tool_expiration: int = 6        # rounds after which tool results expire from context
     compaction_threshold: float = 0.65
     compaction_target: float = 0.25
     turn_token_cap: float = 0.40
@@ -60,18 +62,44 @@ class ChatState(State):
     # with before either — None means a capped turn is never continued automatically.
     operator: bool = True
     auto_prompt: str | None = None
+    # The model's working memory, as a value: None when the tool is not offered. Every write goes
+    # through ExecuteToolCalls, which commits the new value here; the scratchpad tools themselves
+    # only see a dict built from it for the one call. Rendered last in every request, and snapshotted
+    # onto each finished Turn so a session restores it.
+    scratchpad: Scratchpad | None = None
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))
 
+    def expire_after(self) -> int | None:
+        """The round distance at which tool results leave the context; None when expiration is off."""
+        k = self.settings.tool_expiration
+        return k if k > 0 else None
+
     def pending_tokens(self) -> int:
         """What the pending turn costs in the prompt: priced rounds plus the heuristic for the text no usage frame has priced."""
         p = self.pending
-        return 0 if p is None else p.priced_tokens() + estimate_tokens(p.unpriced_text())
+        return 0 if p is None else p.priced_tokens(self.expire_after()) + estimate_tokens(p.unpriced_text())
+
+    def scratchpad_block(self) -> dict | None:
+        """The scratchpad as the last message of the next request, with the line announcing the
+        rounds whose results expire after it; None when the tool is not offered. The one place the
+        block is built, so what is priced is what is sent."""
+        if self.scratchpad is None:
+            return None
+        expiring = self.pending.expiring(self.expire_after()) if self.pending is not None else ()
+        # the round the next completion is: one past the completed ones, against the turn's cap
+        round = (len(self.pending.rounds) + 1, self.settings.max_tool_rounds) if self.pending is not None else None
+        return self.scratchpad.to_context(self.settings.tool_expiration, expiring=expiring, round=round)
+
+    def scratchpad_tokens(self) -> int:
+        """What the scratchpad block costs in the prompt: heuristic, it is re-sent whole every request."""
+        block = self.scratchpad_block()
+        return estimate_tokens(block["content"]) if block is not None else 0
 
     def prompt_tokens(self, pending_tokens: int) -> int:
-        """What the next request costs before generation: system prompt, window since the last summary, pending."""
-        return estimate_tokens(self.system_prompt) + self.history.window_tokens() + pending_tokens
+        """What the next request costs before generation: system prompt, window since the last summary, pending, scratchpad."""
+        return estimate_tokens(self.system_prompt) + self.history.window_tokens() + pending_tokens + self.scratchpad_tokens()
 
     def gen_room(self, pending_tokens: int) -> int:
         """What the window leaves for the next completion, before any cap: context minus the prompt."""
@@ -116,16 +144,27 @@ class ToolResult:
         return cls(tool_call_id=d["tool_call_id"], name=d["name"], content=d["content"])
 
 
+# What a tool message says once its result has expired from the context. Constant on purpose: the
+# stubbed prefix of a request must not change from one round to the next, or the server re-prefills it.
+EXPIRED_RESULT = "[expired: this result is no longer in context]"
+
+
 @dataclass(frozen=True)
 class Round:
     """One intermediate model round inside a turn: the assistant asked for tools (with whatever text
-    it said alongside), and the tools answered. A turn's final answer is NOT a Round — it is Turn.assistant."""
+    it said alongside), and the tools answered. A turn's final answer is NOT a Round — it is Turn.assistant.
+
+    The record is always complete: results are never dropped from the Round (the session file, the
+    repeat detector and the compaction transcript read them). Expiration is a RENDERING: messages()
+    and text() take `stubbed` and put EXPIRED_RESULT in place of every result. The calls stay as
+    they are — the template wants one tool message per call, and the model must still see what it
+    asked for."""
     assistant: str
     tool_calls: tuple[ToolCall, ...]
     results: tuple[ToolResult, ...] = ()
     tokens: int = 0     # priced from the usage frame of the completion that produced the calls
 
-    def messages(self) -> list[dict]:
+    def messages(self, stubbed: bool = False) -> list[dict]:
         """The wire form of this round, as it is echoed back in every later request of the conversation."""
         messages: list[dict] = [{ #stripping away the tc index
             "role": "assistant",
@@ -140,13 +179,18 @@ class Round:
             } for tc in self.tool_calls]
         }]
         for result in self.results:
-            messages.append(result.message())
+            messages.append(replace(result, content=EXPIRED_RESULT).message() if stubbed else result.message())
         return messages
 
-    def text(self) -> str:
-        """All text of the round, for heuristic pricing when no usage frame priced it."""
+    def text(self, stubbed: bool = False) -> str:
+        """All text of the round as rendered, for heuristic pricing when no usage frame priced it."""
         calls = "".join(tc.name + tc.arguments for tc in self.tool_calls)
-        return self.assistant + calls + "".join(r.content for r in self.results)
+        results = "".join(EXPIRED_RESULT if stubbed else r.content for r in self.results)
+        return self.assistant + calls + results
+
+    def names(self) -> str:
+        """The calls of the round by tool name, for the expiring line of the scratchpad block."""
+        return ", ".join(tc.name for tc in self.tool_calls)
 
     def to_dict(self) -> dict:
         return {"assistant": self.assistant, "tokens": self.tokens,
@@ -178,13 +222,37 @@ class PendingTurn:
         assert self.user is None, "pending turn already has its message"
         return replace(self, user=message)
 
-    def messages(self) -> list[dict]:
-        assert self.user is not None, "pending turn has no message yet"
-        return [{"role": "user", "content": self.user}] + [m for r in self.rounds for m in r.messages()]
+    # Tool results age by ROUND, counted back from the latest completed round (distance 0, the
+    # results the next completion is about to read). With expire_after = k the request shows three
+    # bands: distance < k-1 active, distance == k-1 expiring (shown whole, announced in the
+    # scratchpad block), distance >= k stubbed (EXPIRED_RESULT in place of the result). None (or
+    # k <= 0) turns expiration off. Pure functions of (rounds, k): nothing is recorded, so the
+    # session file and the repeat detector always see the full results, and a changed k re-renders.
 
-    def priced_tokens(self) -> int:
-        """Tokens already priced by usage frames: every completed round."""
-        return sum(r.tokens for r in self.rounds)
+    def stubbed(self, index: int, expire_after: int | None) -> bool:
+        """Whether round `index` renders stubbed in the next request."""
+        return expire_after is not None and expire_after > 0 and len(self.rounds) - 1 - index >= expire_after
+
+    def expiring(self, expire_after: int | None) -> tuple[str, ...]:
+        """One line per round whose results are shown for the last time in the next request:
+        'round N: Read, Bash' — names only, the model decides what to persist before they go."""
+        if expire_after is None or expire_after <= 0:
+            return ()
+        index = len(self.rounds) - expire_after      # distance == expire_after - 1
+        return (f"round {index + 1}: {self.rounds[index].names()}",) if index >= 0 else ()
+
+    def messages(self, expire_after: int | None = None) -> list[dict]:
+        assert self.user is not None, "pending turn has no message yet"
+        return ([{"role": "user", "content": self.user}]
+                + [m for i, r in enumerate(self.rounds) for m in r.messages(stubbed=self.stubbed(i, expire_after))])
+
+    def priced_tokens(self, expire_after: int | None = None) -> int:
+        """What the completed rounds cost in the next request. A round's `tokens` is what its usage
+        frame priced, with the results whole; a stubbed round no longer costs that."""
+        if expire_after is not None:
+            return sum(r.tokens if i < expire_after else estimate_tokens(r.text(stubbed=True)) for i, r in enumerate(reversed(self.rounds)))
+        else:
+            return sum(r.tokens for r in self.rounds)
 
     def unpriced_text(self) -> str:
         """The prompt text the NEXT completion's usage frame will price: the user message on round one,
@@ -212,12 +280,16 @@ class PendingTurn:
         """Append results to the latest round, in call order: the round is answered one call per step."""
         return self.with_results(self.rounds[-1].results + results)
 
-    def finish(self, assistant: str, tokens: int, cancelled: bool, stop: str = "") -> Turn:
+    def finish(self, assistant: str, tokens: int, cancelled: bool, stop: str = "", scratchpad: Scratchpad | None = None) -> Turn:
         """The final answer arrived (or the turn was cut short): freeze into a history Turn.
-        tokens prices only the final completion; the rounds carry their own."""
+        tokens prices only the final completion. A history turn renders its rounds stubbed from
+        now on (Turn.messages), so the rounds are priced on that rendering here, once, and not on
+        the usage frames that priced them whole. scratchpad is the working memory as it stands
+        when the turn ends, recorded on the Turn for the session file."""
         assert self.user is not None, "pending turn has no message yet"
-        return Turn(self.user, assistant, tokens=tokens + self.priced_tokens() if tokens else 0,
-                    cancelled=cancelled, rounds=self.rounds, stop=stop)
+        stubbed_rounds = sum(estimate_tokens(r.text(stubbed=True)) for r in self.rounds)
+        return Turn(self.user, assistant, tokens=tokens + stubbed_rounds if tokens else 0,
+                    cancelled=cancelled, rounds=self.rounds, stop=stop, scratchpad=scratchpad)
 
 
 # -----------------------
@@ -236,15 +308,22 @@ class Turn:
     # so far is the answer) or "overflow" (no room left for a completion; cancelled as well, so the
     # turn stays out of the view). Read by whoever must tell the cases apart, the delegate's answer().
     stop: str = ""
+    # the scratchpad as it stood when the turn ended; None for a turn made without one (a run
+    # without the tool, a summary turn, a file older than format 3). LoadSession restores the
+    # newest one. Not part of the turn's tokens: the block is priced live, as the current value.
+    scratchpad: Scratchpad | None = None
 
     def __post_init__(self):
         if self.tokens == 0:
-            rounds = sum(r.tokens or estimate_tokens(r.text()) for r in self.rounds)
+            # the rounds of a history turn render stubbed (messages), so that is what they cost
+            rounds = sum(estimate_tokens(r.text(stubbed=True)) for r in self.rounds)
             object.__setattr__(self, 'tokens', estimate_tokens(self.user) + estimate_tokens(self.assistant) + rounds)
 
     def messages(self):
+        """The wire form of a finished turn. Its rounds are always stubbed: the final answer is what
+        the results led to, and a turn's prefix never changes again once it is in history."""
         return ([{"role": "user", "content": self.user}]
-                + [m for r in self.rounds for m in r.messages()]
+                + [m for r in self.rounds for m in r.messages(stubbed=True)]
                 + [{"role": "assistant", "content": self.assistant}])
 
     def transcript(self) -> str:
@@ -265,6 +344,8 @@ class Turn:
             d["rounds"] = [r.to_dict() for r in self.rounds]
         if self.stop:       # likewise: the key exists only when there is a reason to record
             d["stop"] = self.stop
+        if self.scratchpad is not None:     # likewise: only a turn made with the tool carries one
+            d["scratchpad"] = self.scratchpad.to_dict()
         return d
 
     @classmethod
@@ -272,15 +353,24 @@ class Turn:
         return cls(user=d["user"], assistant=d["assistant"], tokens=d.get("tokens", 0),
                    cancelled=d.get("cancelled", False), summary=d.get("summary", False),
                    rounds=tuple(Round.from_dict(r) for r in d.get("rounds", [])),
-                   stop=d.get("stop", ""))
+                   stop=d.get("stop", ""),
+                   scratchpad=Scratchpad.from_dict(d["scratchpad"]) if "scratchpad" in d else None)
 
 
 @dataclass(frozen=True)
 class ChatHistory:
     turns: tuple[Turn, ...] = ()
 
-    SESSION_FORMAT = 2              # written
-    SESSION_FORMATS = (1, 2)        # readable: 1 = plain turns only; 2 = turns may carry tool rounds
+    SESSION_FORMAT = 3              # written
+    SESSION_FORMATS = (1, 2, 3)     # readable: 1 = plain turns only; 2 = turns may carry tool rounds; 3 = turns may carry a scratchpad
+
+    def last_scratchpad(self) -> Scratchpad | None:
+        """The working memory as it stood at the end of the newest turn that recorded one; None
+        when no turn did. Summary turns record none, so compaction never hides it."""
+        for turn in reversed(self.turns):
+            if turn.scratchpad is not None:
+                return turn.scratchpad
+        return None
 
     def to_dict(self) -> dict:
         """Serializable form; the session file is this dict plus whatever metadata the saver adds."""

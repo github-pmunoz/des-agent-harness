@@ -40,6 +40,7 @@ from desh.render import Gutter, Palette, c_out
 from desh.tools import ToolRegistry
 from desh_chat.state import ChatHistory, ChatState, InferenceEngine, Settings
 from desh_chat.events import TurnStart
+from desh_chat.scratchpad import SCRATCHPAD_SYSTEM_PROMPT, Scratchpad
 
 
 DELEGATE_SYSTEM_PROMPT = (
@@ -113,12 +114,22 @@ class Delegate:
         """
         # `settings` is not in the Args block on purpose: the registry injects it (Tool.inject) and
         # the schema leaves it out, so the model cannot pass it. Register with inject=("settings",).
-        system_prompt = DELEGATE_SYSTEM_PROMPT + ("\n\nContext from the delegating agent:\n" + context if context else "")
+        child_config = child_settings(settings if settings is not None else self.settings)
+        # A subagent has a working memory when its registry offers the scratchpad tools — the same
+        # declaration ExecuteToolCalls commits on — and starts with an empty one: it has none of
+        # the parent's conversation, so it has none of the parent's memory either.
+        scratchpad = Scratchpad() if self.offers_scratchpad() else None
+        system_prompt = DELEGATE_SYSTEM_PROMPT
+        if scratchpad is not None:
+            system_prompt += "\n\n" + SCRATCHPAD_SYSTEM_PROMPT.format(tool_expiration=child_config.tool_expiration,
+                                                                     max_tool_rounds=child_config.max_tool_rounds)
+        if context:
+            system_prompt += "\n\nContext from the delegating agent:\n" + context
         if gate:
             system_prompt += "\n\nSuccess criterion:\n" + gate
         session_file = child_session_file(self.session_file)
         child = ChatState(
-            settings=child_settings(settings if settings is not None else self.settings),
+            settings=child_config,
             inference=self.inference,
             history=ChatHistory(),
             running=True,
@@ -128,6 +139,7 @@ class Delegate:
             tools=self.tools,
             operator=False,                 # nobody to prompt: a finished turn returns the run
             auto_prompt=CAP_CONTINUE_MSG,   # checkpoint: a capped turn is continued, not returned
+            scratchpad=scratchpad,
         )
         print(c_out(Palette.CHROME, "╭─ delegate ─ subagent starts" + (f" ({session_file})" if session_file else "")))
         try:
@@ -143,6 +155,10 @@ class Delegate:
         has_answer = last is not None and not last.cancelled and last.assistant != ""
         text = answer(final)
         return self._checked(text, check) if has_answer else text
+
+    def offers_scratchpad(self) -> bool:
+        """Whether the subagent's registry holds a tool that works on the scratchpad (Tool.inject)."""
+        return any("scratchpad" in t.inject for t in self.tools.tools)
 
     def _checked(self, text: str, check: str) -> str:
         """Append the check block to a real answer. Canned strings are not checked by this 

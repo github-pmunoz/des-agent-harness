@@ -41,7 +41,17 @@ class LoadSession(Event):
             bad = path + ".bad"
             os.replace(path, bad)
             return state, [Warn(f"Session file {path} is unreadable ({e}); moved to {bad}, starting fresh.")]
-        return replace(state, history=history), [Info(c_out(Palette.DIM_CHROME, f"Restored {len(history)} turns from {path}")), DisplayStats()]
+        # The working memory the file carries is the newest snapshot on a turn (history.last_scratchpad());
+        # what the run starts with is state.scratchpad: an empty value when the tool is offered, None
+        # when it is not.
+        # When the tool is offered, the scratchpad is the one from the last turn that recorded it if any, otherwise stays empty.
+        # When the tool is not offered, the scratchpad is not loaded even if the session file carried one.
+        scratchpad = state.scratchpad
+        if scratchpad is not None: # tool was offered
+            loaded_scratchpad = history.last_scratchpad()
+            if loaded_scratchpad is not None:
+                scratchpad = loaded_scratchpad
+        return replace(state, history=history, scratchpad=scratchpad), [Info(c_out(Palette.DIM_CHROME, f"Restored {len(history)} turns from {path}")), DisplayStats()]
 
 
 @dataclass(frozen=True)

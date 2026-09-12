@@ -23,6 +23,8 @@ from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
 from desh_chat.coding import Workspace, edit_preview
 from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG, fold_brief
+from desh_chat import scratchpad
+from desh_chat.scratchpad import Scratchpad, SCRATCHPAD_SYSTEM_PROMPT
 
 
 def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: Settings, *,
@@ -48,11 +50,19 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         delegate_tools = (delegate_tools.add(ws.read, name="Read", confirm=False)
                           .add(ws.write, name="Write")
                           .add(ws.edit, name="Edit", preview=edit_preview)
-                          .add(ws.bash, name="Bash", identity=("command",)))
+                          .add(ws.bash, name="Bash", identity=("command",))
+                          .add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False)
+                          .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False)
+                          .add(scratchpad.clear, name="scratchpad_clear", inject=("scratchpad",), confirm=False))
         delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
         # the parent's CURRENT settings travel with every call; the child derives its own from them
         tools = tools.add(delegate.delegate, name="delegate", inject=("settings",), fold=fold_brief)
+    if args.scratchpad:
+        # the working memory itself lives on ChatState; the tools only get a dict for the call
+        tools = (tools.add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False)
+                      .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False)
+                      .add(scratchpad.clear, name="scratchpad_clear", inject=("scratchpad",), confirm=False))
     return tools
 
 
@@ -90,7 +100,8 @@ def main():
     ap.add_argument("-t",   "--temperature",    type=float, default=0.3)
     ap.add_argument("-c",   "--context",        type=int, default=16384, help="context window size")
     ap.add_argument("-mt",  "--max-turn-tokens",type=int, default=8192, help="max tokens per turn")
-    ap.add_argument("-mtr",  "--max-tool-rounds",type=int, default=10, help="max tool rounds per turn")
+    ap.add_argument("-mtr", "--max-tool-rounds",type=int, default=10, help="max tool rounds per turn")
+    ap.add_argument("-te",  "--tool-expiration",type=int, default=6, help="rounds after which tool results expire from context")
     ap.add_argument("-sp",  "--system-prompt",  default="You are a helpful assistant. Reply concisely.", help="default: a plain assistant prompt, or the coding-agent prompt with --coding")
     ap.add_argument("-th",  "--think",          action="store_true", help="enable thinking")
     ap.add_argument("-cl",  "--completions-log", default="", help="JSONL telemetry file")
@@ -105,16 +116,16 @@ def main():
     ap.add_argument("--write",     action="store_true", help="offer the Write tool")
     ap.add_argument("--edit",      action="store_true", help="offer the Edit tool")
     ap.add_argument("--bash",      action="store_true", help="offer the Bash tool")
-    ap.add_argument("--delegate", action="store_true", help="offer delegate: subagents with the same tools and settings")
+    ap.add_argument("--delegate",  action="store_true", help="offer delegate: subagents with the same tools and settings")
+    ap.add_argument("--scratchpad", action="store_true", help="offer the scratchpad tool")
     ap.add_argument("--current_time", action="store_true", help="offer the current time")
     args = ap.parse_args()
 
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
     session_file = resolve_session_file(args.session, args.sessions_folder, run_id)
     system_prompt = args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely."
-
-
-
+    if args.scratchpad:
+        system_prompt += "\n\n" + SCRATCHPAD_SYSTEM_PROMPT.format(tool_expiration=args.tool_expiration, max_tool_rounds=args.max_tool_rounds)
     # Setup logging
     if args.des_log:
         if(d := os.path.dirname(args.des_log)):
@@ -134,6 +145,7 @@ def main():
         context=args.context,
         max_turn_tokens=args.max_turn_tokens,
         max_tool_rounds=args.max_tool_rounds,
+        tool_expiration=args.tool_expiration,
         auto=args.auto,
     )
     inference = InferenceEngine(
@@ -155,6 +167,7 @@ def main():
         tools=tools,
         operator=True,
         auto_prompt=CAP_CONTINUE_MSG if args.cont else None,
+        scratchpad=Scratchpad() if args.scratchpad else None,   # empty here; LoadSession restores a saved one
     )
     log_header = {
         "model": args.model,

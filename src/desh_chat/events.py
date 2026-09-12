@@ -21,6 +21,7 @@ from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_tokens, turn_tokens
 from desh.tools import Tool
 from desh_chat.state import ChatState, ChatHistory, PendingTurn, Round, ToolResult
+from desh_chat.scratchpad import Scratchpad
 from desh_chat.display import DisplayStats, Error, Info, Warn
 from desh_chat.session import persist
 from desh_chat import gate
@@ -172,7 +173,11 @@ class LogCompletion(Event):
 @dataclass(frozen=True)
 class StreamCompletion(Event):
     request: Request
-    prior_tokens: int = 0   # tokens already accounted for in request.messages (system prompt estimate + history view + priced rounds)
+    prior_tokens: int = 0   # tokens already accounted for in request.messages (system prompt estimate + history view + priced rounds + scratchpad block)
+    # the text this round's usage frame prices as "new prompt": the user message on round one, the
+    # tool results afterwards. Only the heuristic fallback reads it. None -> the request's last
+    # message, which is right when nothing follows the pending turn in the request.
+    unpriced: str | None = None
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         watcher = ESCWatcher()
         term = Terminal(out=sys.stdout, colour=_TTY)
@@ -186,9 +191,7 @@ class StreamCompletion(Event):
                 new_events.append(Info("Response cancelled by user."))
         finally:
             watcher.stop()
-        # The last message is what this round's usage frame prices as "new prompt": the user message on
-        # round one, the tool results afterwards. Only used as the heuristic fallback.
-        last_input = self.request.messages[-1]["content"]
+        last_input = self.unpriced if self.unpriced is not None else self.request.messages[-1]["content"]
         tokens = turn_tokens(completion.usage, last_input, completion.content, completion.reasoning, self.prior_tokens)
         if cancelled:
             new_events.append(TurnEnd(assistant=completion.content, tokens=tokens, cancelled=True))
@@ -282,11 +285,23 @@ class ExecuteToolCalls(Event):
                 shown.append(Warn(f"  {len(skipped)} later call(s) not run: {', '.join(r.name for r in skipped)}"))
             return replace(state, pending=state.pending.add_results(denied, *skipped)), shown + [DisplayStats(colour=Palette.TOOL_STATS), NextRound()]
 
-        # the settings go along for tools that declared them (delegate): a subagent inherits the
-        # parent's CURRENT settings, not the ones captured when the registry was built
-        result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments, settings=state.settings))
+        # What the harness supplies to tools that declared it (Tool.inject): 
+        # - the settings, so a subagent inherits the parent's CURRENT settings, not the ones captured when the registry
+        # was built
+        # - the scratchpad as a dict built from the state value for this one call.
+        provided: dict[str, Any] = {"settings": state.settings}
+        if state.scratchpad is not None:
+            provided["scratchpad"] = state.scratchpad.to_dict()
+        result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments, **provided))
         last = self.index + 1 == len(round.tool_calls)
         pending = state.pending.add_results(result)
+
+        # A tool that asked for the scratchpad may have changed it: the dict it wrote to is read
+        # back into a value here, the only place a call becomes a state transition. Nothing mutable
+        # survives the step, so a step the engine rolls back leaves the working memory untouched.
+        scratchpad = state.scratchpad
+        if tool is not None and "scratchpad" in tool.inject and scratchpad is not None:
+            scratchpad = Scratchpad.from_dict(provided["scratchpad"])
 
         # The call ran with its full arguments; what the round echoes back from now on is the tool's
         # folded form of them (a delegate brief shrinks to its head once the answer supersedes it).
@@ -295,7 +310,7 @@ class ExecuteToolCalls(Event):
             pending = pending.fold_call(self.index, folded_arguments(tool, tc.arguments))
 
         # the echo is for the operator's eye, so it is short; the model gets the full result
-        return (replace(state, pending=pending),
+        return (replace(state, pending=pending, scratchpad=scratchpad),
                 [Info(shorten(result.content), colour=Palette.TOOL_RESULT),
                  DisplayStats(colour=Palette.TOOL_STATS),
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])
@@ -324,7 +339,7 @@ class TurnEnd(Event):
     stop: str = ""      # recorded on the Turn: "cap" | "overflow" | "" (see Turn.stop)
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         assert state.pending is not None
-        turn = state.pending.finish(self.assistant, self.tokens, self.cancelled, self.stop)
+        turn = state.pending.finish(self.assistant, self.tokens, self.cancelled, self.stop, scratchpad=state.scratchpad)
         new_state = replace(state, history=state.history.append(turn), pending=None)
         return new_state, persist(state) + [MaybeRegenerate()]
 
@@ -399,11 +414,27 @@ class NextRound(Event):
             return state, [Error("Request exceeds context window; ending the turn."),
                            TurnEnd(assistant="", tokens=0, cancelled=True, stop="overflow")]
         gen_budget = state.gen_budget(pending_tokens)
-        reserved = sys_prompt_tokens + pending_tokens + gen_budget
+        # The scratchpad block goes LAST: it changes whenever the model writes, and everything before
+        # it is a stable prefix the server can keep cached. It is not part of the turn — pending
+        # and history never hold it — so it is priced here as the current value and counted as
+        # prior, the way the system prompt is, and never as the round's own text. It also carries
+        # the expiring line: the block is re-sent every request anyway, so announcing there which
+        # rounds lose their results next costs no cache, where a note inside the round would.
+        #
+        # Tool results expire by round distance (PendingTurn.stubbed): the pending turn renders its
+        # bands for this request, history turns are always stubbed (Turn.messages). The pending
+        # turn is never left out of the request, however many rounds it holds — only its results age.
+        k = state.expire_after()
+        block = state.scratchpad_block()
+        scratchpad_tokens = state.scratchpad_tokens()
+        reserved = sys_prompt_tokens + pending_tokens + scratchpad_tokens + gen_budget
         view = state.history.view_turns(state.settings.context - reserved)
         return state, [StreamCompletion(
             request=Request(
-                messages=[{"role": "system", "content": state.system_prompt}] + [m for t in view for m in t.messages()] + pending.messages(),
+                messages=([{"role": "system", "content": state.system_prompt}]
+                          + [m for t in view for m in t.messages()]
+                          + pending.messages(expire_after=k)
+                          + ([block] if block is not None else [])),
                 model=state.settings.model,
                 temperature=state.settings.temperature,
                 max_tokens=gen_budget,
@@ -411,5 +442,6 @@ class NextRound(Event):
                 stream=True,
                 tools=state.tools.schemas(),
                 ),
-            prior_tokens=sys_prompt_tokens + sum(t.tokens for t in view) + pending.priced_tokens(),
+            prior_tokens=sys_prompt_tokens + sum(t.tokens for t in view) + pending.priced_tokens(k) + scratchpad_tokens,
+            unpriced=pending.unpriced_text(),
         )]

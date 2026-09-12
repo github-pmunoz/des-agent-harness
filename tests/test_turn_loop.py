@@ -26,7 +26,7 @@ from desh_chat.events import (
     StreamCompletion, TurnEnd,
 )
 from desh_chat.session import LoadSession, SaveSession
-from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn
+from desh_chat.state import EXPIRED_RESULT, ChatHistory, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn
 
 
 def with_server(make_state, server, **overrides):
@@ -85,21 +85,26 @@ class TestPendingTurn:
         p = p.add_round(Round("", (WEATHER, TIME))).with_results((result(WEATHER, "sunny"), result(TIME, "10:00")))
         assert p.unpriced_text() == "sunny\n10:00"
 
-    def test_finish_prices_final_completion_plus_rounds(self):
-        p = PendingTurn("q").add_round(Round("", (WEATHER,), (result(WEATHER),), tokens=30))
+    def test_finish_prices_final_completion_plus_rounds_as_they_will_render(self):
+        """A history turn renders its rounds stubbed (Turn.messages), so finish() prices them on the
+        stubbed text, not on the usage frame that priced the results whole — the frame's count
+        would reserve room the request no longer spends."""
+        round = Round("", (WEATHER,), (result(WEATHER, "a long result " * 40),), tokens=300)
+        p = PendingTurn("q").add_round(round)
         turn = p.finish("the answer", tokens=12, cancelled=False)
-        assert turn == Turn("q", "the answer", tokens=42, rounds=p.rounds)
-        assert turn.tokens == 42
+        assert turn == Turn("q", "the answer", tokens=12 + estimate_tokens(round.text(stubbed=True)), rounds=p.rounds)
+        assert turn.tokens < 12 + 300
 
-    def test_finish_without_usage_keeps_priced_rounds_and_estimates_the_rest(self):
-        p = PendingTurn("hello there").add_round(Round("", (WEATHER,), (result(WEATHER),), tokens=30))
+    def test_finish_without_usage_estimates_everything_on_the_stubbed_rendering(self):
+        round = Round("", (WEATHER,), (result(WEATHER),), tokens=30)
+        p = PendingTurn("hello there").add_round(round)
         turn = p.finish("general kenobi", tokens=0, cancelled=False)
-        assert turn.tokens == estimate_tokens("hello there") + estimate_tokens("general kenobi") + 30
+        assert turn.tokens == estimate_tokens("hello there") + estimate_tokens("general kenobi") + estimate_tokens(round.text(stubbed=True))
 
-    def test_unpriced_round_is_estimated_from_its_text(self):
+    def test_unpriced_round_is_estimated_from_its_stubbed_text(self):
         unpriced = Round("Let me check.", (WEATHER,), (result(WEATHER),), tokens=0)
         turn = Turn("q", "a", rounds=(unpriced,))
-        assert turn.tokens == estimate_tokens("q") + estimate_tokens("a") + estimate_tokens(unpriced.text())
+        assert turn.tokens == estimate_tokens("q") + estimate_tokens("a") + estimate_tokens(unpriced.text(stubbed=True))
 
 
 class TestRoundMessages:
@@ -120,6 +125,15 @@ class TestRoundMessages:
         assert roles == ["user", "assistant", "tool", "tool", "assistant"]
         assert turn.messages()[-1] == {"role": "assistant", "content": "the answer"}
 
+    def test_a_history_turn_keeps_its_calls_and_stubs_every_result(self):
+        """The final answer is what the results led to; once the turn is in history the results
+        are gone from the request and the calls stay, one tool message each, for the template."""
+        msgs = Turn("q", "the answer", rounds=(ROUND,)).messages()
+        assert msgs[1]["tool_calls"] == ROUND.messages()[0]["tool_calls"]
+        assert [m["content"] for m in msgs[2:4]] == [EXPIRED_RESULT, EXPIRED_RESULT]
+        assert [m["tool_call_id"] for m in msgs[2:4]] == ["call_0", "call_1"]
+        assert ROUND.results[0].content == "sunny"     # the record is intact
+
     def test_plain_turn_messages_are_unchanged(self):
         assert Turn("q", "a").messages() == [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
 
@@ -134,10 +148,12 @@ class TestTurnSerialization:
         assert back == turn
         assert isinstance(back.rounds, tuple) and isinstance(back.rounds[0].tool_calls, tuple)
 
-    def test_history_writes_format_2_and_still_reads_format_1(self):
-        assert ChatHistory().to_dict()["version"] == 2
+    def test_history_writes_format_3_and_still_reads_formats_1_and_2(self):
+        assert ChatHistory().to_dict()["version"] == 3
         v1 = {"version": 1, "turns": [{"user": "q", "assistant": "a", "tokens": 5}]}
         assert ChatHistory.from_dict(v1).turns == (Turn("q", "a", tokens=5),)
+        v2 = {"version": 2, "turns": [{"user": "q", "assistant": "a", "tokens": 5, "rounds": [ROUND.to_dict()]}]}
+        assert ChatHistory.from_dict(v2).turns == (Turn("q", "a", tokens=5, rounds=(ROUND,)),)
 
     def test_transcript_renders_calls_and_results_between_user_and_answer(self):
         text = Turn("q", "the answer", rounds=(ROUND,)).transcript()
