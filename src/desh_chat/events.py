@@ -336,7 +336,7 @@ class TurnEnd(Event):
     assistant: str
     tokens: int = 0     # prices the final completion only; 0 -> the Turn falls back to the character heuristic
     cancelled: bool = False
-    stop: str = ""      # recorded on the Turn: "cap" | "overflow" | "" (see Turn.stop)
+    stop: str = ""      # recorded on the Turn: "cap" | "overflow" | "interrupt" | "error" | "" (see Turn.stop)
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         assert state.pending is not None
         turn = state.pending.finish(self.assistant, self.tokens, self.cancelled, self.stop, scratchpad=state.scratchpad)

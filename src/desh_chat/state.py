@@ -305,8 +305,9 @@ class Turn:
     summary: bool = False
     rounds: tuple[Round, ...] = ()   # tool exchanges between user and assistant; () for a plain turn
     # why the turn ended early, "" when the model answered: "cap" (round cap hit; the model's text
-    # so far is the answer) or "overflow" (no room left for a completion; cancelled as well, so the
-    # turn stays out of the view). Read by whoever must tell the cases apart, the delegate's answer().
+    # so far is the answer), "overflow" (no room left for a completion; cancelled as well, so the
+    # turn stays out of the view), "interrupt" (Ctrl+C in auto mode; cancelled) or "error" (a
+    # mid-turn exception; cancelled). Read by whoever must tell the cases apart, the delegate's answer().
     stop: str = ""
     # the scratchpad as it stood when the turn ended; None for a turn made without one (a run
     # without the tool, a summary turn, a file older than format 3). LoadSession restores the
