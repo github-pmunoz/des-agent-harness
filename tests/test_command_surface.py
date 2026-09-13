@@ -4,7 +4,7 @@ isolation test — see test_chat_unit.py.
 """
 import pytest
 
-from desh_chat.commands import Command
+from desh_chat.commands import COMMANDS, Command
 from desh_chat.display import DisplayHistory, Info, Warn
 from desh_chat.events import Exit, MaybeRegenerate
 from desh_chat.state import InferenceEngine
@@ -282,3 +282,34 @@ class TestUnknownAndEdgeCases:
         # deliberate choice (2026-09-02): /MoDeL must not be accepted
         run_command(make_state, "Model", "")
         assert "Unknown command" in capsys.readouterr().out
+
+
+class TestToolExpiration:
+    def test_tool_expiration_no_arg_reports_current(self, make_state, capsys):
+        final, first, _ = run_command(make_state, "tool_expiration", "")
+        assert isinstance(first, Info)
+        assert str(final.settings.tool_expiration) in capsys.readouterr().out
+
+    def test_tool_expiration_sets_setting(self, make_state, capsys):
+        final, first, _ = run_command(make_state, "tool_expiration", "3")
+        assert final.settings.tool_expiration == 3
+        assert isinstance(first, Info)
+        assert "3" in capsys.readouterr().out
+
+    def test_tool_expiration_rejects_zero(self, make_state):
+        final, first, _ = run_command(make_state, "tool_expiration", "0")
+        assert final.settings.tool_expiration != 0  # unchanged
+        assert isinstance(first, Warn)
+
+    def test_tool_expiration_rejects_above_max_tool_rounds(self, make_state):
+        final, first, _ = run_command(make_state, "tool_expiration", "11")  # max_tool_rounds defaults to 10
+        assert final.settings.tool_expiration != 11  # unchanged
+        assert isinstance(first, Warn)
+
+    def test_tool_expiration_rejects_non_integer(self, make_state):
+        final, first, _ = run_command(make_state, "tool_expiration", "abc")
+        assert final.settings.tool_expiration == 6  # unchanged
+        assert isinstance(first, Warn)
+
+    def test_tool_expiration_in_commands_registry(self):
+        assert "tool_expiration" in COMMANDS

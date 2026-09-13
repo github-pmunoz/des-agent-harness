@@ -127,6 +127,7 @@ Type these at the `You:` prompt. Tab completes canonical command names.
 | `/models` | List models reported by the server. |
 | `/model [name]` | Show or select a reported model. |
 | `/temperature [0.0–2.0]` | Show or set sampling temperature. |
+| `/tool_expiration [rounds]` | Show or set how many rounds a tool result stays in context before expiring. |
 | `/auto` | Enable auto mode: confirmed tools run without asking. |
 | `/noauto` | Disable auto mode. |
 | `/think` | Enable thinking. |
