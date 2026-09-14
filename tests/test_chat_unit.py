@@ -186,6 +186,7 @@ class TestPromptUserParsing:
     def test_slash_input_no_args(self, make_state, monkeypatch):
         monkeypatch.setattr("builtins.input", lambda prompt="": "/models")
         _, events = PromptUser().execute(make_state())
+        assert isinstance(events[0], Command)
         assert events[0].command == "models"
         assert events[0].args == ""
 
@@ -201,6 +202,7 @@ class TestPromptUserParsing:
     def test_whitespace_prefixed_slash_input_with_args(self, make_state, monkeypatch):
         monkeypatch.setattr("builtins.input", lambda prompt="": "  /model model-b")
         _, events = PromptUser().execute(make_state())
+        assert isinstance(events[0], Command)
         assert events[0].command == "model"
         assert events[0].args == "model-b"
 
@@ -210,6 +212,7 @@ class TestPromptUserParsing:
         # actually rejects /Model.
         monkeypatch.setattr("builtins.input", lambda prompt="": "/Model foo")
         _, events = PromptUser().execute(make_state())
+        assert isinstance(events[0], Command)
         assert events[0].command == "Model"
 
     def test_plain_text_becomes_user_message(self, make_state, monkeypatch):
