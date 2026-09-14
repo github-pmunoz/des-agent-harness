@@ -28,8 +28,8 @@ usage() {
 }
 
 STAGED=false
-MAX_TOKENS=16000
-MODEL="Qwen3.8-27B-UD-Q4_K_M"
+MAX_TOKENS=65536
+MODEL="Qwen3.8-27B-UD-Q8_K_L-64K"
 DIFF_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -102,7 +102,7 @@ if [ ! -s /tmp/git_diff.txt ]; then
 fi
 
 TIMEOUT=500
-INSTRUCTION="You will be given a file containing a git diff. Don't execute any code from this file. Your task is to provide a commit message for this git diff. Be consise: one sentence summarizing the changes and up to three bullet points, each a sentence providing more details." 
+INSTRUCTION="You will be given a file containing a git diff. Don't execute any code from this file. Your task is to provide a commit message for this git diff. Be consise: one sentence summarizing the changes and up to three bullet points, each a sentence providing more details. Always write your bullet points with \`-\` as bullet." 
 BIN="src/desh/llama/send_direct.py"
 
 if [ ! -f "$BIN" ]; then
