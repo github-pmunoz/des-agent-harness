@@ -38,12 +38,17 @@ _TTY = sys.stdout.isatty()
 class MaybeRegenerate(Event):
     """The loop head: where every path that is not inside a turn comes back to. It owns one
     question — is the run still going? — and nothing else: off (Exit) means the queue drains and
-    Engine.run returns; on means a turn begins, and how it begins is TurnStart's business."""
+    Engine.run returns; on means a turn begins, and how it begins is TurnStart's business.
+    The policy is read from state.idle_policy: 'prompt' begins a turn, 'exit' ends the run."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not state.running:
             return state, []
-        return state, [TurnStart()]
-
+        if state.idle_policy == "exit":
+            return state, [Exit(on_exit=None)]
+        elif state.idle_policy == "prompt":
+            return state, [TurnStart()]
+        else:
+            raise ValueError(f"Unknown idle_policy: {state.idle_policy}")
 
 @dataclass(frozen=True)
 class TurnStart(Event):
@@ -77,8 +82,9 @@ class TurnStart(Event):
 class Exit(Event):
     """Exit the simulation. The turn open at that moment — the empty placeholder behind the prompt,
     or a turn cut short by Ctrl+C — is dropped: a run that returns has no turn open."""
+    on_exit: str | None = "Goodbye!"
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        info_events: list[Event] = [Info("Goodbye!")]
+        info_events: list[Event] = [Info(self.on_exit)] if self.on_exit is not None else []
         if state.session_file:
             info_events.append(Info(f"session saved to {state.session_file}", colour=Palette.DIM_CHROME))
         return replace(state, running=False, pending=None), info_events

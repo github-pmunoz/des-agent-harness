@@ -111,11 +111,16 @@ class TestTurnStart:
         with pytest.raises(AssertionError):
             TurnStart().execute(make_state(pending=PendingTurn("q")))
 
-    def test_maybe_regenerate_only_checks_running(self, make_state):
+    def test_maybe_regenerate_checks_running_and_idle_policy(self, make_state):
+        # default idle_policy is "prompt": a running state goes to TurnStart
         _, events = MaybeRegenerate().execute(make_state(running=True))
         assert events == [TurnStart()]
         _, events = MaybeRegenerate().execute(make_state(running=False))
         assert events == []
+
+    def test_maybe_regenerate_exit_policy_ends_the_session(self, make_state):
+        _, events = MaybeRegenerate().execute(make_state(running=True, idle_policy="exit"))
+        assert events == [Exit(on_exit=None)]
 
 
 # ---------------------

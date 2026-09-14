@@ -88,6 +88,7 @@ class DisplayBanner(DisplayEvent):
     des_log: str
     timeout: int
     workspace: str
+    completions_log: str
 
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         print(c_out(Palette.CHROME, f"{"═"*50}"))
@@ -100,7 +101,7 @@ class DisplayBanner(DisplayEvent):
             context=state.settings.context,
             max_turn_tokens=state.settings.max_turn_tokens,
             max_tool_rounds=state.settings.max_tool_rounds,
-            completions_log=state.completions_log,
+            completions_log=self.completions_log,
             des_log=self.des_log,
             debug="enabled" if self.debug else "disabled",
             timeout=self.timeout,

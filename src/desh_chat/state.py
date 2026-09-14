@@ -107,6 +107,9 @@ class ChatState(State):
     # only see a dict built from it for the one call. Rendered last in every request, and snapshotted
     # onto each finished Turn so a session restores it.
     scratchpad: Scratchpad | None = None
+    # What MaybeRegenerate does when the queue runs dry: 'prompt' opens the next turn (the
+    # interactive loop); 'exit' ends the run (a one-shot --task run).
+    idle_policy: str = "prompt"
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))

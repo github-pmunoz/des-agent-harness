@@ -129,6 +129,21 @@ class TestMaybeRegenerate:
         assert events == []
         assert new_state is state
 
+    def test_exit_policy_ends_the_session(self, make_state):
+        state = make_state(running=True, idle_policy="exit")
+        _, events = MaybeRegenerate().execute(state)
+        assert events == [Exit(on_exit=None)]
+
+    def test_exit_without_on_exit_emits_no_info(self, make_state):
+        new_state, events = Exit(on_exit=None).execute(make_state())
+        assert new_state.running is False
+        assert events == []
+
+    def test_exit_with_default_on_exit_emits_goodbye(self, make_state):
+        new_state, events = Exit().execute(make_state())
+        assert new_state.running is False
+        assert events == [Info("Goodbye!")]
+
 
 class TestLogCompletion:
     def test_records_when_a_logger_is_configured(self, make_state, tmp_path):

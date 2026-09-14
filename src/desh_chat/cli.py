@@ -8,13 +8,13 @@ import sys
 import time
 import os
 import uuid
-from typing import TextIO, cast
+from typing import TextIO
+from dataclasses import replace
 
 from desh_chat.state import ChatState
 from desh.llama.logger import Logger
 from desh.llama.server import LlamaServer
-from desh.render import Palette, c_out
-from desh.engine import Engine
+from desh.engine import Engine, Event
 from desh.tools import ToolRegistry
 from desh_chat.events import TurnStart
 from desh_chat.session import LoadSession
@@ -112,6 +112,7 @@ def main():
     ap.add_argument("-sf",  "--sessions-folder", default="", help="folder where a new session file is created per run")
     ap.add_argument("-d",   "--debug",          action="store_true", help="Enable debug output")
     ap.add_argument("-w",   "--workspace",      default=".", help="project root for the coding toolset")
+    ap.add_argument("-ta",  "--task",           default="", help="task to run")
     # toolsets are additive flags: any combination, none means the model is offered no tools
     ap.add_argument("--read",      action="store_true", help="offer the Read tool")
     ap.add_argument("--write",     action="store_true", help="offer the Write tool")
@@ -179,20 +180,19 @@ def main():
         "argv" : sys.argv[1:]
     }
 
+    runtime_seed: list[Event] = [LoadSession()]
+    runtime_seed += [DisplayBanner(args.des_log, args.debug, args.timeout, args.workspace, args.completions_log)] if args.des_log else []
+    runtime_seed += [TurnStart(args.task)] if args.task else [TurnStart()]
+
+    if args.task:
+        state = replace(state, idle_policy="exit")
+
     Engine[ChatState](
         des_log=des_log,
         debug=args.debug,
         on_error=on_error,
-        on_interrupt=on_interrupt,
-    ).run(state, seed=[
-          LoadSession(), 
-          DisplayBanner(
-              des_log=args.des_log, 
-              debug=args.debug,
-              timeout=args.timeout, 
-              workspace=args.workspace), 
-          TurnStart()
-          ], run_id=run_id, log_header=log_header)
+        on_interrupt=on_interrupt
+    ).run(state, seed=runtime_seed, run_id=run_id, log_header=log_header)
 
 
 if __name__ == "__main__":
