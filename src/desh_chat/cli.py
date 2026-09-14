@@ -181,7 +181,7 @@ def main():
     }
 
     runtime_seed: list[Event] = [LoadSession()]
-    runtime_seed += [DisplayBanner(args.des_log, args.debug, args.timeout, args.workspace, args.completions_log)] if args.des_log else []
+    runtime_seed += [DisplayBanner(args.des_log, args.debug, args.timeout, args.workspace, args.completions_log)] if not args.task else []
     runtime_seed += [TurnStart(args.task)] if args.task else [TurnStart()]
 
     if args.task:
