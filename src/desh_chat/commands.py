@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from desh.engine import Event
-from desh_chat.state import ChatState, Turn
+from desh_chat.state import ChatState
 from desh_chat.display import DisplayHistory, Info, Warn
 from desh_chat.events import CompactHistory, Exit, MaybeRegenerate
 from desh_chat.session import persist

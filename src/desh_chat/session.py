@@ -31,8 +31,8 @@ class LoadSession(Event):
             return state, []
         try:
             with open(path, "r", encoding="utf-8") as f:
-                doc = json.load(f)
-            history = ChatHistory.from_dict(doc)
+                session_file_content = json.load(f)
+            history = ChatHistory.from_dict(session_file_content)
             for turn in history.turns:
                 if not turn.summary:
                     readline.add_history(turn.user)
@@ -52,10 +52,10 @@ class LoadSession(Event):
             loaded_scratchpad = history.last_scratchpad()
             if loaded_scratchpad is not None:
                 scratchpad = loaded_scratchpad
-        # format 4: the document's settings seed the restored settings (v1-3 files carry no
+        # format 4: the session_file_contentument's settings seed the restored settings (v1-3 files carry no
         # "settings" key and load unchanged); settings turns then replay in order on top, so
         # the last change wins.
-        settings = Settings.from_dict(doc["settings"]) if "settings" in doc else state.settings
+        settings = Settings.from_dict(session_file_content["settings"]) if "settings" in session_file_content else state.settings
         for turn in history.turns:
             if turn.type == "settings" and turn.delta is not None:
                 for setting, value in turn.delta.items():
@@ -73,7 +73,7 @@ class SaveSession(Event):
         path = state.session_file
         if path is None:
             return state, []
-        # format 4: the document's "settings" key is the INITIAL seed — the settings in force
+        # format 4: the session_file_contentument's "settings" key is the INITIAL seed — the settings in force
         # when the file was first created. A later save must not overwrite it: LoadSession
         # starts from the seed and replays the settings turns on top (last change wins).
         seed = state.settings.to_dict()
@@ -84,7 +84,7 @@ class SaveSession(Event):
                 seed = existing["settings"]
         except (OSError, ValueError, TypeError):
             pass   # no file yet, or unreadable/corrupt: fall back to the current settings
-        doc = {
+        session_file_content = {
             **state.history.to_dict(),
             "settings": seed,
             # informational only — LoadSession restores turns and settings
@@ -98,7 +98,7 @@ class SaveSession(Event):
         tmp = path + ".tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(doc, f, ensure_ascii=False, indent=2)
+                json.dump(session_file_content, f, ensure_ascii=False, indent=2)
             os.replace(tmp, path)
         except OSError as e:
             return state, [Error(f"Could not save session to {path}: {e}")]
