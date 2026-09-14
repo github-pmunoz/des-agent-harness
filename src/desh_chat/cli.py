@@ -8,7 +8,7 @@ import sys
 import time
 import os
 import uuid
-from typing import TextIO
+from typing import TextIO, cast
 
 from desh_chat.state import ChatState
 from desh.llama.logger import Logger
@@ -18,6 +18,7 @@ from desh.engine import Engine
 from desh.tools import ToolRegistry
 from desh_chat.events import TurnStart
 from desh_chat.session import LoadSession
+from desh_chat.display import DisplayBanner
 from desh_chat.state import ChatHistory, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
@@ -178,33 +179,20 @@ def main():
         "argv" : sys.argv[1:]
     }
 
-    print(c_out(Palette.CHROME, f"\n{"═"*50}"))
-    print(c_out(Palette.CHROME, f""" DES Chat v0.1
-    Server:       http://127.0.0.1:{args.port}
-    Model:        {args.model}
-    Temperature:  {args.temperature}
-    Think mode:   {"enabled" if args.think else "disabled"}
-    Auto mode:    {"on" if settings.auto else "off"}
-    Context:      {args.context}
-    Turn tokens:  {args.max_turn_tokens}
-    Tool rounds:  {args.max_tool_rounds}
-    Compl log:    {args.completions_log}
-    DES log:      {args.des_log}
-    Debug:        {"enabled" if args.debug else "disabled"}
-    Timeout:      {args.timeout}s
-    Session:      {session_file or "-"}
-    Tools:        {", ".join(t.name + (" (asks)" if t.confirm else "") for t in tools.tools) or "none"}
-    Workspace:    {os.path.realpath(args.workspace)}
-    System prompt:{args.system_prompt[0:40] if args.system_prompt else "none"}{"..." if len(args.system_prompt) > 40 else ""}
-"""))
-    print(c_out(Palette.CHROME, f"\n{"═"*50}"))
-    
     Engine[ChatState](
         des_log=des_log,
         debug=args.debug,
         on_error=on_error,
         on_interrupt=on_interrupt,
-    ).run(state, seed=[LoadSession(), TurnStart()], run_id=run_id, log_header=log_header)
+    ).run(state, seed=[
+          LoadSession(), 
+          DisplayBanner(
+              des_log=args.des_log, 
+              debug=args.debug,
+              timeout=args.timeout, 
+              workspace=args.workspace), 
+          TurnStart()
+          ], run_id=run_id, log_header=log_header)
 
 
 if __name__ == "__main__":
