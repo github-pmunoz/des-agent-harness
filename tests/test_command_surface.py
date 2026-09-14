@@ -2,12 +2,16 @@
 dispatch. PromptUser's own slash-command parsing is a single-event
 isolation test — see test_chat_unit.py.
 """
+import json
+from pathlib import Path
+
 import pytest
 
 from desh_chat.commands import COMMANDS, Command
 from desh_chat.display import DisplayHistory, Info, Warn
 from desh_chat.events import Exit, MaybeRegenerate
-from desh_chat.state import InferenceEngine
+from desh_chat.session import SaveSession
+from desh_chat.state import InferenceEngine, Turn
 from conftest import FakeServer
 
 
@@ -313,3 +317,41 @@ class TestToolExpiration:
 
     def test_tool_expiration_in_commands_registry(self):
         assert "tool_expiration" in COMMANDS
+
+
+class TestSettingsPersistence:
+    def _run_and_persist(self, make_state, command, args, path):
+        """run_command's shape check predates the settings commands persisting: they emit
+        [display, MaybeRegenerate, SaveSession], so drive the command here and execute the
+        SaveSession the handler appended — that is the persistence the command path relies on."""
+        state = make_state(session_file=path)
+        state, events = Command(command=command, args=args).execute(state)
+        assert len(events) == 3, f"/{command} {args!r} emitted {len(events)} events: {events}"
+        display, regen, save = events
+        assert isinstance(display, (Info, Warn, DisplayHistory))
+        assert isinstance(regen, MaybeRegenerate)
+        assert isinstance(save, SaveSession)
+        state, save_events = save.execute(state)
+        assert save_events == []
+        return state, display
+
+    def test_settings_command_rewrites_the_session_file_with_a_settings_turn(self, make_state, tmp_path):
+        path = str(tmp_path / "s.json")
+        final, first = self._run_and_persist(make_state, "temperature", "0.7", path)
+        assert isinstance(first, Info)
+        doc = json.loads(Path(path).read_text())
+        turn = Turn.from_dict(doc["turns"][-1])
+        assert turn.type == "settings"
+        assert turn.delta == {"temperature": 0.7}
+        assert turn.to_dict() == doc["turns"][-1]         # survives a Turn round-trip
+        assert final.settings.temperature == 0.7
+
+    def test_settings_turn_records_the_new_value_not_the_old_one(self, make_state, tmp_path):
+        path = str(tmp_path / "s.json")
+        final, first = self._run_and_persist(make_state, "model", "model-b", path)
+        assert isinstance(first, Info)
+        doc = json.loads(Path(path).read_text())
+        turn = Turn.from_dict(doc["turns"][-1])
+        assert turn.type == "settings"
+        assert turn.delta == {"model": "model-b"}         # the new value, not the previous model-a
+        assert final.settings.model == "model-b"

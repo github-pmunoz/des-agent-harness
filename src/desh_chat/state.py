@@ -38,6 +38,46 @@ class Settings:
     auto: bool = False           # auto mode: confirmed tools run without asking; Ctrl+C turns it off
     compaction_prompt: str = field(default=COMPACTION_PROMPT, repr=False)    # system prompt of the compaction request
 
+    def to_dict(self) -> dict:
+        """Plain-JSON form of every field, for the session document (format 4)."""
+        return {
+            "model": self.model,
+            "temperature": self.temperature,
+            "think": self.think,
+            "context": self.context,
+            "max_turn_tokens": self.max_turn_tokens,
+            "max_tool_rounds": self.max_tool_rounds,
+            "tool_expiration": self.tool_expiration,
+            "compaction_threshold": self.compaction_threshold,
+            "compaction_target": self.compaction_target,
+            "turn_token_cap": self.turn_token_cap,
+            "min_compaction_tokens": self.min_compaction_tokens,
+            "auto": self.auto,
+            "compaction_prompt": self.compaction_prompt,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Any) -> Settings:
+        """Inverse of to_dict. Missing keys fall back to the dataclass defaults; the required
+        fields (no default) must be present. Raises ValueError on non-dict input."""
+        if not isinstance(d, dict):
+            raise ValueError(f"settings document must be an object, got {type(d).__name__}")
+        return cls(
+            model=d["model"],
+            temperature=d["temperature"],
+            think=d["think"],
+            context=d["context"],
+            max_turn_tokens=d["max_turn_tokens"],
+            max_tool_rounds=d.get("max_tool_rounds", 10),
+            tool_expiration=d.get("tool_expiration", 6),
+            compaction_threshold=d.get("compaction_threshold", 0.65),
+            compaction_target=d.get("compaction_target", 0.25),
+            turn_token_cap=d.get("turn_token_cap", 0.40),
+            min_compaction_tokens=d.get("min_compaction_tokens", 64),
+            auto=d.get("auto", False),
+            compaction_prompt=d.get("compaction_prompt", COMPACTION_PROMPT),
+        )
+
 @dataclass(frozen=True)
 class InferenceEngine:
     models: list[str]
@@ -70,6 +110,16 @@ class ChatState(State):
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))
+
+    def record_setting_change(self, setting: str, value: Any) -> ChatState:
+        """change_setting plus the settings turn that records it in the history: a "settings"
+        turn whose delta is {setting: new_value}. LoadSession replays settings turns in order,
+        so the last change wins. tokens=1 keeps the turn out of the token accounting (it is not
+        part of the conversation) and stops __post_init__ from re-pricing the empty text."""
+        turn = Turn(user="", assistant="", tokens=1, type="settings", delta={setting: value})
+        return replace(self,
+                       settings=replace(self.settings, **{setting: value}),
+                       history=self.history.append(turn))
 
     def expire_after(self) -> int | None:
         """The round distance at which tool results leave the context; None when expiration is off."""
@@ -313,6 +363,11 @@ class Turn:
     # without the tool, a summary turn, a file older than format 3). LoadSession restores the
     # newest one. Not part of the turn's tokens: the block is priced live, as the current value.
     scratchpad: Scratchpad | None = None
+    # what kind of turn this is: "chat" (the default, serialized without the key) or "settings"
+    # (a settings change made by a /command; delta carries {setting: new_value}). LoadSession
+    # replays settings turns in order to restore the settings.
+    type: str = "chat"
+    delta: dict | None = None
 
     def __post_init__(self):
         if self.tokens == 0:
@@ -347,6 +402,10 @@ class Turn:
             d["stop"] = self.stop
         if self.scratchpad is not None:     # likewise: only a turn made with the tool carries one
             d["scratchpad"] = self.scratchpad.to_dict()
+        if self.type != "chat":     # likewise: a chat turn serializes exactly as before
+            d["type"] = self.type
+        if self.delta is not None:
+            d["delta"] = self.delta
         return d
 
     @classmethod
@@ -355,15 +414,17 @@ class Turn:
                    cancelled=d.get("cancelled", False), summary=d.get("summary", False),
                    rounds=tuple(Round.from_dict(r) for r in d.get("rounds", [])),
                    stop=d.get("stop", ""),
-                   scratchpad=Scratchpad.from_dict(d["scratchpad"]) if "scratchpad" in d else None)
+                   scratchpad=Scratchpad.from_dict(d["scratchpad"]) if "scratchpad" in d else None,
+                   type=d.get("type", "chat"),
+                   delta=d.get("delta"))
 
 
 @dataclass(frozen=True)
 class ChatHistory:
     turns: tuple[Turn, ...] = ()
 
-    SESSION_FORMAT = 3              # written
-    SESSION_FORMATS = (1, 2, 3)     # readable: 1 = plain turns only; 2 = turns may carry tool rounds; 3 = turns may carry a scratchpad
+    SESSION_FORMAT = 4              # written
+    SESSION_FORMATS = (1, 2, 3, 4)  # readable: 1 = plain turns only; 2 = turns may carry tool rounds; 3 = turns may carry a scratchpad; 4 = the document carries the settings, and turns may be settings turns
 
     def last_scratchpad(self) -> Scratchpad | None:
         """The working memory as it stood at the end of the newest turn that recorded one; None

@@ -11,9 +11,10 @@ from dataclasses import dataclass
 from typing import Callable
 
 from desh.engine import Event
-from desh_chat.state import ChatState
+from desh_chat.state import ChatState, Turn
 from desh_chat.display import DisplayHistory, Info, Warn
 from desh_chat.events import CompactHistory, Exit, MaybeRegenerate
+from desh_chat.session import persist
 
 
 class CommandError(Exception):
@@ -65,7 +66,7 @@ class Command(Event):
         if not self.args:
             return state, [Info(f"context: {state.settings.context}"), MaybeRegenerate()]
         value = self._int(0, state.inference.max_context.get(state.settings.model))
-        return state.change_setting("context", value), [Info(f"↪ context set to: {value}"), MaybeRegenerate()]
+        return state.record_setting_change("context", value), [Info(f"↪ context set to: {value}"), MaybeRegenerate()] + persist(state)
 
     def _cmd_exit(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         self._no_args()
@@ -79,19 +80,19 @@ class Command(Event):
         if not self.args:
             return state, [Info(f"max_turn_tokens: {state.settings.max_turn_tokens}"), MaybeRegenerate()]
         value = self._int(0, state.settings.context)
-        return state.change_setting("max_turn_tokens", value), [Info(f"↪ max_turn_tokens set to: {value}"), MaybeRegenerate()]
+        return state.record_setting_change("max_turn_tokens", value), [Info(f"↪ max_turn_tokens set to: {value}"), MaybeRegenerate()] + persist(state)
 
     def _cmd_max_tool_rounds(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not self.args:
             return state, [Info(f"max_tool_rounds: {state.settings.max_tool_rounds}"), MaybeRegenerate()]
         value = self._int(lo=1)
-        return state.change_setting("max_tool_rounds", value), [Info(f"↪ max_tool_rounds set to: {value}"), MaybeRegenerate()]
+        return state.record_setting_change("max_tool_rounds", value), [Info(f"↪ max_tool_rounds set to: {value}"), MaybeRegenerate()] + persist(state)
 
     def _cmd_tool_expiration(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not self.args:
             return state, [Info(f"tool_expiration: {state.settings.tool_expiration}"), MaybeRegenerate()]
         value = self._int(lo=1, hi=state.settings.max_tool_rounds)
-        return state.change_setting("tool_expiration", value), [Info(f"↪ tool_expiration set to: {value}"), MaybeRegenerate()]
+        return state.record_setting_change("tool_expiration", value), [Info(f"↪ tool_expiration set to: {value}"), MaybeRegenerate()] + persist(state)
 
     def _cmd_models(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         self._no_args()
@@ -103,29 +104,29 @@ class Command(Event):
         name = self._single_arg()
         if name not in state.inference.models:
             raise CommandError(f"Model {name} not found.")
-        return state.change_setting("model", name), [Info(f"↪ model set to: {name}"), MaybeRegenerate()]
+        return state.record_setting_change("model", name), [Info(f"↪ model set to: {name}"), MaybeRegenerate()] + persist(state)
 
     def _cmd_temperature(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         if not self.args:
             return state, [Info(f"temperature: {state.settings.temperature}"), MaybeRegenerate()]
         value = self._float(lo=0.0, hi=2.0)
-        return state.change_setting("temperature", value), [Info(f"↪ temperature set to: {value}"), MaybeRegenerate()]
+        return state.record_setting_change("temperature", value), [Info(f"↪ temperature set to: {value}"), MaybeRegenerate()] + persist(state)
 
     def _cmd_auto(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         self._no_args()
-        return state.change_setting("auto", True), [Info(f"↪ auto mode enabled"), MaybeRegenerate()]
+        return state.record_setting_change("auto", True), [Info(f"↪ auto mode enabled"), MaybeRegenerate()] + persist(state)
 
     def _cmd_noauto(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         self._no_args()
-        return state.change_setting("auto", False), [Info(f"↪ auto mode disabled"), MaybeRegenerate()]
+        return state.record_setting_change("auto", False), [Info(f"↪ auto mode disabled"), MaybeRegenerate()] + persist(state)
 
     def _cmd_think(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         self._no_args()
-        return state.change_setting("think", True), [Info(f"↪ thinking mode enabled"), MaybeRegenerate()]
+        return state.record_setting_change("think", True), [Info(f"↪ thinking mode enabled"), MaybeRegenerate()] + persist(state)
 
     def _cmd_nothink(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         self._no_args()
-        return state.change_setting("think", False), [Info(f"↪ thinking mode disabled"), MaybeRegenerate()]
+        return state.record_setting_change("think", False), [Info(f"↪ thinking mode disabled"), MaybeRegenerate()] + persist(state)
 
     # --- argument parsing ---
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 
 from desh.engine import Event, Priority
 from desh.render import Palette, c_out
-from desh_chat.state import ChatState, ChatHistory
+from desh_chat.state import ChatState, ChatHistory, Settings
 from desh_chat.display import DisplayStats, Error, Info, Warn
 
 
@@ -31,12 +31,13 @@ class LoadSession(Event):
             return state, []
         try:
             with open(path, "r", encoding="utf-8") as f:
-                history = ChatHistory.from_dict(json.load(f))
+                doc = json.load(f)
+            history = ChatHistory.from_dict(doc)
             for turn in history.turns:
                 if not turn.summary:
                     readline.add_history(turn.user)
         except FileNotFoundError:
-            return state, [Info(c_out(Palette.DIM_CHROME, f"New session: {path}"))]
+            return state, [Info(c_out(Palette.DIM_CHROME, f"New session: {path}")), SaveSession()]
         except (ValueError, KeyError, TypeError) as e:     # ValueError covers json.JSONDecodeError
             bad = path + ".bad"
             os.replace(path, bad)
@@ -51,7 +52,15 @@ class LoadSession(Event):
             loaded_scratchpad = history.last_scratchpad()
             if loaded_scratchpad is not None:
                 scratchpad = loaded_scratchpad
-        return replace(state, history=history, scratchpad=scratchpad), [Info(c_out(Palette.DIM_CHROME, f"Restored {len(history)} turns from {path}")), DisplayStats()]
+        # format 4: the document's settings seed the restored settings (v1-3 files carry no
+        # "settings" key and load unchanged); settings turns then replay in order on top, so
+        # the last change wins.
+        settings = Settings.from_dict(doc["settings"]) if "settings" in doc else state.settings
+        for turn in history.turns:
+            if turn.type == "settings" and turn.delta is not None:
+                for setting, value in turn.delta.items():
+                    settings = replace(settings, **{setting: value})
+        return replace(state, history=history, scratchpad=scratchpad, settings=settings), [Info(c_out(Palette.DIM_CHROME, f"Restored {len(history)} turns from {path}")), DisplayStats()]
 
 
 @dataclass(frozen=True)
@@ -64,9 +73,21 @@ class SaveSession(Event):
         path = state.session_file
         if path is None:
             return state, []
+        # format 4: the document's "settings" key is the INITIAL seed — the settings in force
+        # when the file was first created. A later save must not overwrite it: LoadSession
+        # starts from the seed and replays the settings turns on top (last change wins).
+        seed = state.settings.to_dict()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            if isinstance(existing, dict) and "settings" in existing:
+                seed = existing["settings"]
+        except (OSError, ValueError, TypeError):
+            pass   # no file yet, or unreadable/corrupt: fall back to the current settings
         doc = {
             **state.history.to_dict(),
-            # informational only — LoadSession restores turns; settings stay with the CLI flags
+            "settings": seed,
+            # informational only — LoadSession restores turns and settings
             "meta": {
                 "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "model": state.settings.model,

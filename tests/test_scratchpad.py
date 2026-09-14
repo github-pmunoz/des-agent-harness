@@ -122,7 +122,7 @@ class TestTools:
 # ---------------------
 
 class TestCommit:
-    def run_call(self, make_state, tc: ToolCall, scratchpad=Scratchpad(), tools=TOOLS):
+    def run_call(self, make_state, tc: ToolCall, scratchpad: Scratchpad | None = Scratchpad(), tools=TOOLS):
         state = make_state(pending=PendingTurn("q").add_round(Round("", (tc,))), tools=tools, scratchpad=scratchpad)
         new_state, events = ExecuteToolCalls(index=0).execute(state)
         return state, new_state, events
@@ -131,6 +131,7 @@ class TestCommit:
         state, new_state, _ = self.run_call(make_state, call("scratchpad_write", key="path", value="src/x.py"))
         assert new_state.scratchpad == Scratchpad().with_entry("path", "src/x.py")
         assert state.scratchpad == Scratchpad()
+        assert new_state.pending is not None
         assert new_state.pending.rounds[-1].results[0].content == "created 'path'"
 
     def test_delete_and_clear_commit_too(self, make_state):
@@ -147,6 +148,7 @@ class TestCommit:
         start = Scratchpad().with_entry("a", "1")
         _, new_state, _ = self.run_call(make_state, call("now"), scratchpad=start, tools=TOOLS.add(now, name="now", confirm=False))
         assert new_state.scratchpad is start
+        assert new_state.pending is not None
         assert new_state.pending.rounds[-1].results[0].content == "10:00"
 
     def test_a_rejected_call_commits_the_old_value(self, make_state):
@@ -155,6 +157,7 @@ class TestCommit:
         start = Scratchpad().with_entry("a", "1")
         _, new_state, _ = self.run_call(make_state, call("scratchpad_write", key="b"), scratchpad=start)
         assert new_state.scratchpad == start
+        assert new_state.pending is not None
         assert "value" in new_state.pending.rounds[-1].results[0].content
 
     def test_without_a_scratchpad_on_the_state_the_tool_is_answered_with_an_error(self, make_state):
@@ -162,6 +165,7 @@ class TestCommit:
         missing, which invoke reports as text, and the state stays without one."""
         _, new_state, _ = self.run_call(make_state, call("scratchpad_write", key="a", value="1"), scratchpad=None)
         assert new_state.scratchpad is None
+        assert new_state.pending is not None
         assert "scratchpad" in new_state.pending.rounds[-1].results[0].content
 
 
@@ -258,6 +262,7 @@ class TestSnapshot:
         pad = Scratchpad().with_entry("b", "2").with_entry("a", "1")
         turn = Turn("u", "a", tokens=7, scratchpad=pad)
         back = Turn.from_dict(json.loads(json.dumps(turn.to_dict())))
+        assert back.scratchpad is not None
         assert back == turn and back.scratchpad.memory == (("b", "2"), ("a", "1"))
         empty = Turn("u", "a", tokens=7, scratchpad=Scratchpad())
         assert Turn.from_dict(json.loads(json.dumps(empty.to_dict()))).scratchpad == Scratchpad()
@@ -282,7 +287,7 @@ class TestSnapshot:
         SaveSession().execute(state)
         with open(path) as f:
             doc = json.load(f)
-        assert doc["version"] == 3 and doc["turns"][-1]["scratchpad"] == {"k": "v"}
+        assert doc["version"] == 4 and doc["turns"][-1]["scratchpad"] == {"k": "v"}
 
 
 # ---------------------

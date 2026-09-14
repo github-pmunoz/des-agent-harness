@@ -12,7 +12,7 @@ from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 from desh_chat.display import Error, Info, Warn
 from desh_chat.events import CompactHistory, TurnEnd
 from desh_chat.session import LoadSession, SaveSession
-from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Turn
+from desh_chat.state import COMPACTION_PROMPT, ChatHistory, InferenceEngine, PendingTurn, Settings, Turn
 
 
 def with_server(make_state, server, **overrides):
@@ -64,7 +64,8 @@ class TestSerialization:
         assert ChatHistory.from_dict(json.loads(json.dumps(h.to_dict()))) == h
 
     def test_to_dict_carries_the_format_version(self):
-        assert ChatHistory().to_dict()["version"] == ChatHistory.SESSION_FORMAT
+        assert ChatHistory.SESSION_FORMAT >= 4
+        assert ChatHistory().to_dict()["version"] >= 4
 
     def test_from_dict_rejects_unknown_version(self):
         with pytest.raises(ValueError):
@@ -77,6 +78,34 @@ class TestSerialization:
     def test_from_dict_ignores_extra_keys_such_as_meta(self):
         doc = {**sample_history().to_dict(), "meta": {"model": "x"}}
         assert ChatHistory.from_dict(doc) == sample_history()
+
+
+# ---------------------
+# Settings serialization (pure)
+# ---------------------
+
+class TestSettingsSerialization:
+    def test_to_dict_is_plain_json_and_round_trips_all_fields(self):
+        s = Settings(model="model-b", temperature=0.9, think=True, context=8192, max_turn_tokens=4096,
+                     max_tool_rounds=7, tool_expiration=3, compaction_threshold=0.5,
+                     compaction_target=0.2, turn_token_cap=0.3, min_compaction_tokens=128,
+                     auto=True, compaction_prompt="summarise it")
+        assert Settings.from_dict(s.to_dict()) == s
+        json.dumps(s.to_dict())     # every value is plain JSON
+
+    def test_round_trip_keeps_the_default_compaction_prompt(self):
+        s = Settings(model="model-a", temperature=0.3, think=False, context=16384, max_turn_tokens=8192)
+        assert s.compaction_prompt == COMPACTION_PROMPT
+        assert Settings.from_dict(s.to_dict()) == s
+
+    def test_from_dict_fills_defaults_for_a_partial_dict(self):
+        d = {"model": "model-a", "temperature": 0.3, "think": False, "context": 16384, "max_turn_tokens": 8192}
+        assert Settings.from_dict(d) == Settings(**d)
+
+    @pytest.mark.parametrize("bad", [None, ["settings"], 42, "bad"])
+    def test_from_dict_rejects_non_dict_input(self, bad):
+        with pytest.raises(ValueError):
+            Settings.from_dict(bad)
 
 
 # ---------------------
@@ -95,9 +124,10 @@ class TestLoadSession:
         state = make_state(session_file=path)
         new_state, events = LoadSession().execute(state)
         assert new_state.history == ChatHistory()
-        assert len(events) == 1 and isinstance(events[0], Info)
+        assert len(events) == 2 and isinstance(events[0], Info) and isinstance(events[1], SaveSession)
         assert "New session" in events[0].text
-        assert not os.path.exists(path)     # nothing written until a turn happens
+        events[1].execute(new_state)    # the session file is written seeding it with the current settings
+        assert os.path.exists(path)     
 
     def test_existing_file_restores_history(self, make_state, tmp_path):
         path = tmp_path / "s.json"
@@ -133,6 +163,64 @@ class TestLoadSession:
         assert (tmp_path / "s.json.bad").read_text() == content
         assert len(events) == 1 and isinstance(events[0], Warn)
 
+    def test_v3_file_still_loads(self, make_state, tmp_path):
+        # a format-3 document: turns only, no "settings" key — loads unchanged
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({"version": 3, "turns": sample_history().to_dict()["turns"]}))
+        state = make_state(session_file=str(path))
+        new_state, _ = LoadSession().execute(state)
+        assert new_state.history == sample_history()
+        assert new_state.settings == state.settings
+
+    def test_load_restores_settings_from_a_v4_document(self, make_state, tmp_path):
+        doc_settings = Settings(model="model-b", temperature=0.9, think=True, context=8192,
+                                max_turn_tokens=4096, max_tool_rounds=7, tool_expiration=3,
+                                compaction_threshold=0.5, compaction_target=0.2,
+                                turn_token_cap=0.3, min_compaction_tokens=128, auto=True,
+                                compaction_prompt="summarise it")
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({**sample_history().to_dict(), "settings": doc_settings.to_dict()}))
+        state = make_state(session_file=str(path))
+        new_state, _ = LoadSession().execute(state)
+        assert new_state.settings == doc_settings
+
+    def test_load_replays_settings_turns(self, make_state, tmp_path):
+        doc_settings = Settings(model="model-a", temperature=0.3, think=False, context=16384,
+                                max_turn_tokens=8192, max_tool_rounds=7, tool_expiration=3)
+        turns = [
+            {"user": "", "assistant": "", "tokens": 1, "type": "settings", "delta": {"model": "model-a", "max_tool_rounds": 5}},
+            {"user": "", "assistant": "", "tokens": 1, "type": "settings", "delta": {"model": "model-b"}},
+        ]
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({"version": 4, "turns": turns, "settings": doc_settings.to_dict()}))
+        new_state, _ = LoadSession().execute(make_state(session_file=str(path)))
+        assert new_state.settings.model == "model-b"       # the last settings turn wins
+        assert new_state.settings.max_tool_rounds == 5     # an earlier delta still applies
+        assert new_state.settings.tool_expiration == 3     # untouched by any turn: the doc-seed value
+        assert new_state.settings.temperature == 0.3       # likewise the doc-seed value
+
+    def test_load_replays_settings_turns_on_top_of_the_seed(self, make_state, tmp_path):
+        # end-to-end: the seed holds the settings in force when the file was created; the settings
+        # turns replay in order on top of it (last change wins), and every field no turn touched
+        # comes from the seed — not from the CLI settings
+        seed = Settings(model="model-a", temperature=0.5, think=True, context=8192, max_turn_tokens=4096,
+                        max_tool_rounds=7, tool_expiration=3)
+        cli = Settings(model="model-cli", temperature=0.1, think=False, context=32768, max_turn_tokens=16384)
+        turns = [
+            {"user": "", "assistant": "", "tokens": 1, "type": "settings", "delta": {"model": "model-b"}},
+            {"user": "", "assistant": "", "tokens": 1, "type": "settings", "delta": {"temperature": 0.9}},
+        ]
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({"version": 4, "turns": turns, "settings": seed.to_dict()}))
+        new_state, _ = LoadSession().execute(make_state(session_file=str(path), settings=cli))
+        assert new_state.settings.model == "model-b"       # the first settings turn
+        assert new_state.settings.temperature == 0.9       # the last settings turn wins
+        assert new_state.settings.think is True            # untouched by any turn: the seed value
+        assert new_state.settings.context == 8192          # likewise the seed value
+        assert new_state.settings.max_turn_tokens == 4096  # likewise the seed value
+        assert new_state.settings.max_tool_rounds == 7     # likewise the seed value
+        assert new_state.settings.tool_expiration == 3     # likewise the seed value
+
     def test_load_does_not_touch_settings(self, make_state, tmp_path):
         path = tmp_path / "s.json"
         path.write_text(json.dumps({**sample_history().to_dict(), "meta": {"model": "other", "context": 1}}))
@@ -163,6 +251,39 @@ class TestSaveSession:
         assert doc["meta"]["context"] == state.settings.context
         assert doc["meta"]["system_prompt"] == state.system_prompt
         assert "saved_at" in doc["meta"]
+
+    def test_first_save_writes_the_current_settings_as_the_seed(self, make_state, tmp_path):
+        # no pre-existing file: the first save writes the current settings as the initial seed
+        path = tmp_path / "s.json"
+        assert not path.exists()
+        state = make_state(session_file=str(path), history=sample_history())
+        SaveSession().execute(state)
+        doc = json.loads(path.read_text())
+        assert doc["settings"] == state.settings.to_dict()
+
+    def test_second_save_preserves_the_original_seed(self, make_state, tmp_path):
+        # the top-level "settings" key holds the settings in force when the file was first
+        # created; a later save must not drift it to the latest settings
+        seed = Settings(model="model-a", temperature=0.5, think=False, context=16384, max_turn_tokens=8192)
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({**sample_history().to_dict(), "settings": seed.to_dict()}))
+        latest = Settings(model="model-b", temperature=0.5, think=False, context=16384, max_turn_tokens=8192)
+        history = (sample_history()
+                   .append(Turn("", "", tokens=1, type="settings", delta={"model": "model-b"})))
+        state = make_state(session_file=str(path), history=history, settings=latest)
+        SaveSession().execute(state)
+        doc = json.loads(path.read_text())
+        assert doc["settings"] == seed.to_dict()          # the seed is untouched
+        assert any(t.get("type", "chat") == "settings" and t["delta"] == {"model": "model-b"} for t in doc["turns"])
+
+    def test_save_on_an_existing_file_without_a_settings_key_writes_the_current_settings_as_the_seed(self, make_state, tmp_path):
+        # a v3 file has no "settings" key: the first v4-format save of it writes the current settings as the seed
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({"version": 3, "turns": sample_history().to_dict()["turns"]}))
+        state = make_state(session_file=str(path), history=sample_history())
+        SaveSession().execute(state)
+        doc = json.loads(path.read_text())
+        assert doc["settings"] == state.settings.to_dict()
 
     def test_write_is_atomic_and_leaves_no_temp_file(self, make_state, tmp_path):
         path = tmp_path / "s.json"
@@ -238,6 +359,7 @@ class TestResolveSessionFile:
         from desh_chat.cli import resolve_session_file
         folder = tmp_path / "sessions"
         got = resolve_session_file("", str(folder), "run1")
+        assert got is not None
         assert got == str(folder / "run1.json")
         assert folder.is_dir()                     # created
         assert not os.path.exists(got)             # file itself is left to SaveSession
