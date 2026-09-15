@@ -284,17 +284,6 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
     }
 
 
-# --- verdict ----------------------------------------------------------------------
-
-def verdict(result: dict) -> str:
-    """Collapse the checks into one word for the aggregate: 'pass', 'fail' or 'invalid'.
-
-    'invalid' is for runs that must not count either way: a contamination hit, or nothing to
-    grade. Everything else is pass or fail on the merits.
-    """
-    # TODO(human)
-    return "unknown"
-
 
 # --- main --------------------------------------------------------------------------
 
@@ -320,7 +309,6 @@ def grade(run_dir: str) -> dict:
         "holdout_refs": check_holdout_refs(workspace, completions),
         "stats": stats_of(completions, des_log, manifest) | session_stats(session),
     }
-    result["verdict"] = verdict(result)
     with open(os.path.join(run_dir, "result.json"), "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
         f.write("\n")
@@ -330,7 +318,7 @@ def grade(run_dir: str) -> dict:
 def summary(r: dict) -> str:
     s, h, p = r["stats"], r["held_out"], r["pytest"]
     lines = [
-        f"{r['run_id']}  verdict={r['verdict']}  model={s['model']}",
+        f"{r['run_id']}  model={s['model']}",
         f"  held-out {h['passed']}/{h['total']}   pytest {p.get('passed', 0)} passed {p.get('failed', 0)} failed"
         f"   stdlib_only={r['stdlib_only']['ok']}   holdout_refs_ok={r['holdout_refs']['ok']}",
         f"  cli: {r['cli_contract']}",
