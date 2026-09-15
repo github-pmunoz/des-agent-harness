@@ -1,0 +1,19 @@
+{
+  "model": "Qwen3.8-27B-UD-Q4_K_M-64K",
+  "temperature": 0.3,
+  "context": 16384,
+  "max_turn_tokens": 16384,
+  "max_tool_rounds": 30,
+  "tool_expiration": 10,
+  "system_prompt": "You are a coding agent.",
+  "timeout": 600,
+  "task": "Read task.txt and execute the instructions there.",
+  "auto": true,
+  "cont": true,
+  "debug": false,
+  "think": false,
+  "read": true, "write": true, "edit": true, "bash": true,
+  "scratchpad": true, "current_time": false, "delegate": false,
+  "port": 8012,
+  "task_timeout": 600
+}
