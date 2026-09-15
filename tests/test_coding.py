@@ -147,6 +147,14 @@ class TestBash:
         # the model must not be able to run a command without saying what it is for
         assert "rejected the arguments" in coding_registry(str(tmp_path)).invoke("Bash", '{"command": "ls"}')
 
+    def test_a_mention_of_a_call_shows_the_path_or_the_command(self, tmp_path):
+        """What the expiring line of the scratchpad block says a call was about (Tool.target)."""
+        registry = coding_registry(str(tmp_path))
+        assert registry.target("Read", '{"file_path": "src/a.py", "offset": 10}') == "src/a.py"
+        assert registry.target("Edit", '{"file_path": "src/a.py", "old_string": "x", "new_string": "y"}') == "src/a.py"
+        assert registry.target("Write", '{"file_path": "src/a.py", "content": "..."}') == "src/a.py"
+        assert registry.target("Bash", '{"reason": "look", "command": "ls -la"}') == "ls -la"
+
 
 # ---------------------
 # Registry wiring and result bound

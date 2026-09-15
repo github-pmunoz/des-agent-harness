@@ -17,13 +17,29 @@ from conftest import MODELS
 
 from desh.llama.tokens import estimate_tokens
 from desh.llama.wire import ToolCall
+from desh.tools import ToolRegistry
 from desh_chat.events import NextRound, StreamCompletion
 from desh_chat.scratchpad import Scratchpad
-from desh_chat.state import EXPIRED_RESULT, ChatHistory, PendingTurn, Round, Settings, ToolResult, Turn
+from desh_chat.state import EXPIRED_RESULT, MENTION_CHARS, ChatHistory, PendingTurn, Round, Settings, ToolResult, Turn
 
 
 def call(name: str, index: int = 0, **arguments) -> ToolCall:
     return ToolCall(index=index, id=f"call_{index}", type="function", name=name, arguments=json.dumps(arguments))
+
+
+def bash(reason: str, command: str) -> str:
+    """A Bash-shaped tool: the command is what the call was about."""
+    return command
+
+
+def read(file_path: str, offset: int = 1) -> str:
+    """A Read-shaped tool: the path is what the call was about."""
+    return file_path
+
+
+# Read and Bash as the coding toolset declares them (coding_registry): a Read is about its path, a
+# Bash about its command.
+REGISTRY = ToolRegistry().add(read, name="Read", target="file_path").add(bash, name="Bash", identity=("command",), target="command")
 
 
 def round_(n: int, *names: str) -> Round:
@@ -97,6 +113,45 @@ class TestBands:
         assert "call_0" not in line and "result" not in line and "{" not in line
 
 
+class TestExpiringMentions:
+    """The expiring line says what each call was ABOUT, not just which tool ran: 'Read
+    tests/conftest.py' lets the model decide what to persist without remembering what round 3 read.
+    The target comes from the registry (ToolRegistry.target) through `describe`; the line is still
+    names only when no describe is given, when the registry does not know the tool, or when the
+    call has no target. A target is folded onto one line and cut at MENTION_CHARS: a mention, never
+    a dump."""
+
+    def turn(self, *rounds: Round) -> PendingTurn:
+        p = PendingTurn("q")
+        for r in rounds:
+            p = p.add_round(r)
+        return p
+
+    def test_a_call_is_mentioned_with_its_target(self):
+        first = Round("", (call("Read", 0, file_path="tests/conftest.py"),
+                           call("Bash", 1, reason="find the answer", command='grep -n "def answer" src/x.py')))
+        p = self.turn(first, round_(2))
+        assert p.expiring(2, describe=REGISTRY.target) == ('round 1: Read tests/conftest.py, Bash grep -n "def answer" src/x.py',)
+
+    def test_without_describe_the_line_is_names_only(self):
+        first = Round("", (call("Read", 0, file_path="tests/conftest.py"), call("Bash", 1, reason="r", command="ls")))
+        assert self.turn(first, round_(2)).expiring(2) == ("round 1: Read, Bash",)
+
+    def test_a_call_without_a_target_keeps_its_name(self):
+        first = Round("", (call("nope", 0, anything="at all"), call("Read", 1)))     # unknown tool; Read with no path
+        assert self.turn(first, round_(2)).expiring(2, describe=REGISTRY.target) == ("round 1: nope, Read",)
+
+    def test_a_long_target_is_cut_at_mention_chars(self):
+        command = "x" * (MENTION_CHARS + 40)
+        (line,) = self.turn(Round("", (call("Bash", 0, reason="r", command=command),)), round_(2)).expiring(2, describe=REGISTRY.target)
+        assert line == f"round 1: Bash {'x' * MENTION_CHARS}..."
+
+    def test_a_multiline_target_is_folded_onto_one_line(self):
+        command = "ls   src/\n\tgrep -c def\n"
+        (line,) = self.turn(Round("", (call("Bash", 0, reason="r", command=command),)), round_(2)).expiring(2, describe=REGISTRY.target)
+        assert line == "round 1: Bash ls src/ grep -c def"
+
+
 # ---------------------
 # NextRound: what the request looks like
 # ---------------------
@@ -118,6 +173,14 @@ class TestRequest:
         block = ev.request.messages[-1]["content"]
         assert block.startswith("<scratchpad>") and "Expiring next round" in block and "round 3: Read" in block
         assert not any("Expiring" in m["content"] for m in ev.request.messages[:-1])
+
+    def test_the_expiring_line_mentions_the_targets_the_registry_knows(self, make_state):
+        first = Round("", (call("Read", 0, file_path="tests/conftest.py"), call("Bash", 1, reason="r", command="ls")),
+                      (ToolResult("call_0", "Read", "r"), ToolResult("call_1", "Bash", "r")), tokens=10)
+        p = PendingTurn("q").add_round(first).add_round(round_(2))
+        state = make_state(pending=p, settings=settings(2), scratchpad=Scratchpad(), tools=REGISTRY)
+        _, (ev,) = NextRound().execute(state)
+        assert "Expiring next round, persist what you still need from: round 1: Read tests/conftest.py, Bash ls" in ev.request.messages[-1]["content"]
 
     def test_no_scratchpad_means_no_warning_anywhere(self, make_state):
         ev = self.stream_event(make_state, pending(4), k=2)

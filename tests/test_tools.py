@@ -345,6 +345,45 @@ class TestIdentity:
 
 
 # ---------------------
+# ToolRegistry.target: the one argument that says what a call was about
+# ---------------------
+
+class TestTarget:
+    """A one-line mention of a call (the expiring line of the scratchpad block) needs the argument
+    the call was about: the command of a Bash, the path of a Read. The app declares which one at
+    registration (Tool.target); the registry only looks it up, and answers "" whenever there is
+    nothing to show. It knows no tool by name."""
+    REGISTRY = ToolRegistry().add(run, identity=("command",), target="command").add(get_weather)
+
+    def test_the_declared_argument_whatever_the_key_order(self):
+        assert self.REGISTRY.target("run", '{"reason": "look around", "command": "ls -la"}') == "ls -la"
+        assert self.REGISTRY.target("run", '{"command": "ls -la", "reason": "look around"}') == "ls -la"
+
+    def test_a_non_string_value_is_shown_as_text(self):
+        registry = ToolRegistry().add(get_weather, target="days")
+        assert registry.target("get_weather", '{"city": "Lima", "days": 3}') == "3"
+
+    def test_nothing_for_a_tool_that_declares_no_target(self):
+        assert self.REGISTRY.target("get_weather", '{"city": "Lima"}') == ""
+
+    def test_nothing_for_an_unknown_tool(self):
+        assert self.REGISTRY.target("nope", '{"command": "ls"}') == ""
+
+    def test_define_records_the_target(self):
+        assert Tool.define(run, target="command").target == "command"
+        assert Tool.define(run).target == ""
+
+    def test_nothing_for_unparseable_or_non_object_arguments(self):
+        assert self.REGISTRY.target("run", "{not json") == ""
+        assert self.REGISTRY.target("run", "[1]") == ""
+        assert self.REGISTRY.target("run", "") == ""
+
+    def test_nothing_when_the_argument_is_missing(self):
+        assert self.REGISTRY.target("run", '{"reason": "no command given"}') == ""
+        assert self.REGISTRY.target("run", "{}") == ""
+
+
+# ---------------------
 # Tool.fold: how a call is recorded once it ran
 # ---------------------
 

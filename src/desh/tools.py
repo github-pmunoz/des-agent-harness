@@ -136,18 +136,24 @@ class Tool:
     # round records instead. None -> verbatim. For a call whose result supersedes what it asked for
     # (a delegate brief), so the request stops carrying the ask once it carries the answer.
     fold: Optional[Callable[[dict], dict]] = field(default=None, repr=False, compare=False)
+    # the argument that says what a call was ABOUT, for a one-line mention of the call (the expiring
+    # line of the scratchpad block): a command, a path, a key. "" means the call is mentioned by
+    # tool name alone. Declared by the app at registration; the engine knows no tool by name.
+    target: str = ""
 
     @classmethod
     def define(cls, fn: Callable[..., Any], *, name: Optional[str] = None, description: Optional[str] = None,
                parameters: Optional[dict] = None, confirm: bool = True,
                preview: Optional[Callable[[dict], str]] = None, inject: tuple[str, ...] = (),
-               identity: tuple[str, ...] = (), fold: Optional[Callable[[dict], dict]] = None) -> Tool:
+               identity: tuple[str, ...] = (), fold: Optional[Callable[[dict], dict]] = None,
+               target: str = "") -> Tool:
         """Derive the schema from fn's signature, type hints and docstring. Each keyword is an override
         slot that replaces the derived part verbatim — `parameters` is the hand-written JSON Schema escape
         hatch for a signature the derivation cannot express. `confirm=False` declares the tool read-only;
         `preview` renders the call for the operator (an Edit as a diff) instead of the generic listing;
         `inject` names the parameters the harness fills in, which the derived schema leaves out;
-        `identity` names the arguments that identify a call for the repetition guard."""
+        `identity` names the arguments that identify a call for the repetition guard; `target` names
+        the one argument a mention of the call shows."""
         summary, _ = parse_docstring(fn.__doc__)
         name = name or fn.__name__
         schema = {
@@ -158,7 +164,7 @@ class Tool:
                 "parameters": parameters if parameters is not None else parameters_schema(fn, inject),
             },
         }
-        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview, inject=inject, identity=identity, fold=fold)
+        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview, inject=inject, identity=identity, fold=fold, target=target)
 
     @property
     def description(self) -> str:
@@ -207,6 +213,19 @@ class ToolRegistry:
         if tool is None or not tool.identity or not isinstance(decoded, dict):
             return name, arguments
         return name, json.dumps({k: decoded[k] for k in tool.identity if k in decoded}, sort_keys=True, ensure_ascii=False)
+
+    def target(self, name: str, arguments: str) -> str:
+        """The value of the call's `target` argument (Tool.target), as text, for a one-line mention
+        of the call. "" when there is nothing to show: an unknown tool, a tool that declares no
+        target, arguments that are not a JSON object, or the argument absent from the call."""
+        tool = self.get(name)
+        try:
+            decoded = json.loads(arguments) if arguments.strip() else {}
+        except ValueError:
+            decoded = None
+        if tool is None or not tool.target or not isinstance(decoded, dict) or tool.target not in decoded:
+            return ""
+        return str(decoded[tool.target])
 
     def invoke(self, name: str, arguments: str, **provided: Any) -> str:
         """Run the tool the model asked for and return the content of its role:tool message.

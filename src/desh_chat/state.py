@@ -7,7 +7,7 @@ from desh.llama.tokens import estimate_tokens
 from desh.engine import State
 from desh.tools import ToolRegistry
 from desh_chat.scratchpad import Scratchpad
-from typing import Any
+from typing import Any, Callable
 
 # -----------------------
 # Chat DES State
@@ -161,7 +161,9 @@ class ChatState(State):
         block is built, so what is priced is what is sent."""
         if self.scratchpad is None:
             return None
-        expiring = self.pending.expiring(self.expire_after()) if self.pending is not None else ()
+        # each expiring call is mentioned with what it was about (the registry knows which argument
+        # that is), so the model can decide what to persist without recalling what round N read
+        expiring = self.pending.expiring(self.expire_after(), describe=self.tools.target) if self.pending is not None else ()
         # the round the next completion is: one past the completed ones, against the turn's cap
         round = (len(self.pending.rounds) + 1, self.settings.max_tool_rounds) if self.pending is not None else None
         return self.scratchpad.to_context(self.settings.tool_expiration, expiring=expiring, round=round)
@@ -222,6 +224,10 @@ class ToolResult:
 # stubbed prefix of a request must not change from one round to the next, or the server re-prefills it.
 EXPIRED_RESULT = "[expired: this result is no longer in context]"
 
+# How much of a call's target the expiring line shows: enough to recognise a path or a command,
+# never a dump — the line is re-sent with every request while the round is expiring.
+MENTION_CHARS = 60
+
 
 @dataclass(frozen=True)
 class Round:
@@ -262,9 +268,17 @@ class Round:
         results = "".join(EXPIRED_RESULT if stubbed else r.content for r in self.results)
         return self.assistant + calls + results
 
-    def names(self) -> str:
-        """The calls of the round by tool name, for the expiring line of the scratchpad block."""
-        return ", ".join(tc.name for tc in self.tool_calls)
+    def mentions(self, describe: Callable[[str, str], str] | None = None) -> str:
+        """The calls of the round, one mention each, for the expiring line of the scratchpad block:
+        the tool name, followed by what the call was about when `describe` (name, arguments) -> str
+        knows it — 'Read tests/conftest.py', 'Bash grep -n "def answer"'. A target is folded onto
+        one line and cut at MENTION_CHARS; a call without one is mentioned by name alone."""
+        def mention(tc: ToolCall) -> str:
+            target = " ".join(describe(tc.name, tc.arguments).split()) if describe is not None else ""
+            if len(target) > MENTION_CHARS:
+                target = target[:MENTION_CHARS] + "..."
+            return f"{tc.name} {target}" if target else tc.name
+        return ", ".join(mention(tc) for tc in self.tool_calls)
 
     def to_dict(self) -> dict:
         return {"assistant": self.assistant, "tokens": self.tokens,
@@ -307,13 +321,14 @@ class PendingTurn:
         """Whether round `index` renders stubbed in the next request."""
         return expire_after is not None and expire_after > 0 and len(self.rounds) - 1 - index >= expire_after
 
-    def expiring(self, expire_after: int | None) -> tuple[str, ...]:
+    def expiring(self, expire_after: int | None, describe: Callable[[str, str], str] | None = None) -> tuple[str, ...]:
         """One line per round whose results are shown for the last time in the next request:
-        'round N: Read, Bash' — names only, the model decides what to persist before they go."""
+        'round N: Read tests/conftest.py, Bash ls' — the calls with what they were about (Round.mentions),
+        never their results: the model reads those where they still are and decides what to persist."""
         if expire_after is None or expire_after <= 0:
             return ()
         index = len(self.rounds) - expire_after      # distance == expire_after - 1
-        return (f"round {index + 1}: {self.rounds[index].names()}",) if index >= 0 else ()
+        return (f"round {index + 1}: {self.rounds[index].mentions(describe)}",) if index >= 0 else ()
 
     def messages(self, expire_after: int | None = None) -> list[dict]:
         assert self.user is not None, "pending turn has no message yet"

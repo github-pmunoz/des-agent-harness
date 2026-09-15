@@ -157,10 +157,10 @@ def edit_preview(args: dict) -> str:
 
 
 def coding_registry(root: str = ".") -> ToolRegistry:
-    """Read runs unprompted; Write, Edit and Bash ask."""
+    """Read runs unprompted; Write, Edit and Bash ask. A mention of a call names its path, or its command."""
     ws = Workspace(root)
     return (ToolRegistry()
-            .add(ws.read, name="Read", confirm=False)
-            .add(ws.write, name="Write")
-            .add(ws.edit, name="Edit", preview=edit_preview)
-            .add(ws.bash, name="Bash", identity=("command",)))
+            .add(ws.read, name="Read", confirm=False, target="file_path")
+            .add(ws.write, name="Write", target="file_path")
+            .add(ws.edit, name="Edit", preview=edit_preview, target="file_path")
+            .add(ws.bash, name="Bash", identity=("command",), target="command"))

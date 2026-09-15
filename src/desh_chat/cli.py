@@ -36,33 +36,36 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     never from the raw flags: a subagent writes to the same log objects the parent's engine does."""
     ws = Workspace(args.workspace)
     tools = ToolRegistry(debug=args.debug)
+    # `target` is the argument a one-line mention of the call shows (the expiring line of the
+    # scratchpad block): a file tool is about its path, Bash about its command, a delegate about
+    # its task, a scratchpad tool about its key.
     if args.read:
-        tools = tools.add(ws.read, name="Read", confirm=False)
+        tools = tools.add(ws.read, name="Read", confirm=False, target="file_path")
     if args.write:
-        tools = tools.add(ws.write, name="Write")
+        tools = tools.add(ws.write, name="Write", target="file_path")
     if args.edit:
-        tools = tools.add(ws.edit, name="Edit", preview=edit_preview)
+        tools = tools.add(ws.edit, name="Edit", preview=edit_preview, target="file_path")
     if args.bash:
-        tools = tools.add(ws.bash, name="Bash", identity=("command",))
+        tools = tools.add(ws.bash, name="Bash", identity=("command",), target="command")
     if args.current_time:
         tools = tools.add(current_time, name="Current time")
     if args.delegate:
         delegate_tools = ToolRegistry(debug=args.debug)
-        delegate_tools = (delegate_tools.add(ws.read, name="Read", confirm=False)
-                          .add(ws.write, name="Write")
-                          .add(ws.edit, name="Edit", preview=edit_preview)
-                          .add(ws.bash, name="Bash", identity=("command",))
-                          .add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False)
-                          .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False)
+        delegate_tools = (delegate_tools.add(ws.read, name="Read", confirm=False, target="file_path")
+                          .add(ws.write, name="Write", target="file_path")
+                          .add(ws.edit, name="Edit", preview=edit_preview, target="file_path")
+                          .add(ws.bash, name="Bash", identity=("command",), target="command")
+                          .add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, target="key")
+                          .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False, target="key")
                           .add(scratchpad.clear, name="scratchpad_clear", inject=("scratchpad",), confirm=False))
         delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
         # the parent's CURRENT settings travel with every call; the child derives its own from them
-        tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief)
+        tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief, target="task")
     if args.scratchpad:
         # the working memory itself lives on ChatState; the tools only get a dict for the call
-        tools = (tools.add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False)
-                      .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False)
+        tools = (tools.add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, target="key")
+                      .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False, target="key")
                       .add(scratchpad.clear, name="scratchpad_clear", inject=("scratchpad",), confirm=False))
     return tools
 
