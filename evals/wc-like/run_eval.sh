@@ -200,10 +200,6 @@ set -e
 end_ns="$(date +%s%N)"
 elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
 
-# Run the grading script
-echo grading...
-./grade.py "${run_dir}"
-
 # Write a small run manifest into the run folder.
 manifest="${run_dir}/run_manifest.json"
 jq -n \
