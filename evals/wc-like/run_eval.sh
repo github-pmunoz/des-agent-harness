@@ -177,9 +177,10 @@ echo "cmd    : chat-des ${args[*]}"
 echo "----------------------------------------"
 
 # Erase the llama-server kv cache for starting the run cold.
-echo "erasing kv cache..."
+# use printf to avoid the newline
+printf "erasing kv cache... "
 reply="$(erase_kv_cache "$port" "$model")"
-echo "$reply"
+printf "${reply}\n"
 if [[ "$reply" == *'"error"'* ]]; then
   echo "error: kv cache erase failed" >&2
   exit 2
@@ -197,6 +198,10 @@ status=$?
 set -e
 end_ns="$(date +%s%N)"
 elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
+
+# Run the grading script
+echo grading...
+./grade.py "${run_dir}"
 
 # Write a small run manifest into the run folder.
 manifest="${run_dir}/run_manifest.json"
