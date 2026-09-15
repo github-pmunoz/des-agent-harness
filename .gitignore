@@ -9,4 +9,7 @@ dist/
 venv/
 sandbox/
 .sessions/
-evals/
+evals/wc-like/train/
+evals/wc-like/test/
+evals/wc-like/runs/
+

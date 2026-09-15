@@ -1,0 +1,48 @@
+# Task: Build a `wc`-like Python CLI with Test-Driven Development
+
+## Goal
+Implement a small Python command-line application that, for each file given on
+the command line, prints the number of **lines**, **words**, and **bytes** in
+that file — like the Unix `wc` command.
+
+## Definition of the counts
+- **lines**: the number of newline (`\n`) characters in the file. A file whose
+  last line has no trailing newline still counts only the newlines present.
+- **words**: the number of whitespace-separated tokens (i.e. what
+  `str.split()` returns).
+- **bytes**: the size of the file in bytes on disk.
+
+## CLI contract
+- The program is invoked as: `python wc.py FILE [FILE ...]`
+- For each file, print one line: `<lines> <words> <bytes>  <filename>`
+  (three numbers, then the filename, matching `wc`'s column order).
+- If one or more files do not exist or cannot be read, report an error to
+  stderr and exit with a non-zero status.
+- If no files are given, print a short usage message to stderr and exit
+  non-zero.
+
+## Development process — TDD (required)
+You MUST develop this test-first:
+
+1. Write the pytest unit tests **before** (or alongside) the implementation.
+2. Drive development and verification using **only** the training fixtures:
+   - `train/file_*.txt` — the input files
+   - `train/goldens.json` — the correct `lines` / `words` / `bytes` for each
+     training file
+3. Do **NOT** read, open, or use anything in the `test/` directory. The test
+   set is held out and will be used by the grader to evaluate your solution.
+   Your tests must not reference `test/` in any way.
+4. Iterate: run pytest, make the tests pass, and keep the suite green.
+
+## Deliverables
+- `wc.py` — the CLI implementation (a `main()` entry point is fine).
+- `test_wc.py` — your pytest test suite. It should:
+  - load `train/goldens.json` and assert the tool's output matches the
+    goldens for every training file (lines, words, and bytes), and
+  - cover the CLI behaviors above (multiple files, missing file, no args).
+- A passing `pytest` run against the training fixtures.
+
+## Constraints
+- Python 3 standard library only (no third-party packages at runtime).
+- Tests run with `pytest`.
+- Keep everything in the project root; do not modify `train/` or `test/`.
