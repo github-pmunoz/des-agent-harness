@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, field, replace
 from desh.llama.logger import Logger
 from desh.llama.server import LlamaServer
@@ -86,6 +87,22 @@ class InferenceEngine:
     port: int = field(repr=False)
 
 @dataclass(frozen=True)
+class Deadline:
+    """A wall-clock budget for a run: the instant it ends, on the monotonic clock, and the budget
+    it was set from, for the message that reports it. A budget rather than an instant is what a
+    reader can make sense of; an instant rather than a budget is what a check can compare."""
+    at: float           # time.monotonic() value after which no further tool round starts
+    budget: float       # the seconds it was set from, as given on the command line
+
+    @classmethod
+    def in_seconds(cls, budget: float) -> "Deadline":
+        return cls(at=time.monotonic() + budget, budget=budget)
+
+    def passed(self) -> bool:
+        return time.monotonic() > self.at
+
+
+@dataclass(frozen=True)
 class ChatState(State):
     """Immutable chat state."""
     settings: Settings
@@ -110,6 +127,10 @@ class ChatState(State):
     # What MaybeRegenerate does when the queue runs dry: 'prompt' opens the next turn (the
     # interactive loop); 'exit' ends the run (a one-shot --task run).
     idle_policy: str = "prompt"
+    # The run's wall-clock budget, None for no limit. Checked where the round cap is checked, before
+    # the next tool round starts, so a run overshoots it by at most one completion. A subagent
+    # inherits the parent's (Tool.inject), so no child outlives the run that spawned it.
+    deadline: Deadline | None = None
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))
@@ -357,15 +378,24 @@ class Turn:
     cancelled: bool = False
     summary: bool = False
     rounds: tuple[Round, ...] = ()   # tool exchanges between user and assistant; () for a plain turn
-    # why the turn ended early, "" when the model answered: "cap" (round cap hit; the model's text
-    # so far is the answer), "overflow" (no room left for a completion; cancelled as well, so the
-    # turn stays out of the view), "interrupt" (Ctrl+C in auto mode; cancelled) or "error" (a
-    # mid-turn exception; cancelled). Read by whoever must tell the cases apart, the delegate's answer().
+
+    # why the turn ended early
+    # - "" when the model answered
+    # - "cap" (round cap hit; the model's text so far is the answer)
+    # - "overflow" (no room left for a completion; cancelled as well, so the turn stays out of the view)
+    # - "interrupt" (Ctrl+C in auto mode; cancelled)
+    # - "error" (a mid-turn exception; cancelled)
+    # - "deadline" (the run's wall-clock budget ran out; the model's text so far is the answer,
+    #   and unlike "cap" the turn is never continued)
+    # Read by whoever must tell the cases apart: the delegate's answer(), the CLI's exit code.
     stop: str = ""
+
     # the scratchpad as it stood when the turn ended; None for a turn made without one (a run
     # without the tool, a summary turn, a file older than format 3). LoadSession restores the
     # newest one. Not part of the turn's tokens: the block is priced live, as the current value.
+
     scratchpad: Scratchpad | None = None
+
     # what kind of turn this is: "chat" (the default, serialized without the key) or "settings"
     # (a settings change made by a /command; delta carries {setting: new_value}). LoadSession
     # replays settings turns in order to restore the settings.

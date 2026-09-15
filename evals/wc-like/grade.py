@@ -220,22 +220,26 @@ def session_stats(session: dict | None) -> dict:
     round cap and were continued, how many are compaction summaries, and which tool calls the cap
     dropped. Runs under a small cap show their pathology here, not in the token totals."""
     turns = (session or {}).get("turns") or []
+    real = [t for t in turns if not t.get("summary")]
+    last = real[-1] if real else {}
     return {
         "turns": len(turns),
         "capped_turns": sum(1 for t in turns if t.get("stop") == "cap"),
-        "summary_turns": sum(1 for t in turns if t.get("summary")),
-        "final_answer": bool(turns and turns[-1].get("assistant") and not turns[-1].get("stop")),
+        "summary_turns": len(turns) - len(real),
+        "stop": last.get("stop", "") if real else None,      # how the run ended; "" is an answer
+        "final_answer": bool(last.get("assistant")) and not last.get("stop"),
     }
 
 
-def dropped_by_cap(des_log: list[dict]) -> dict:
-    """Tool calls the round cap refused to run, by tool name. The session does not record them;
-    the engine's warning does: 'Tool-call round cap reached (N); Write, Edit not run.'"""
+def calls_not_run(des_log: list[dict]) -> dict:
+    """Tool calls a budget refused to run, by tool name. The session does not record them; the
+    engine's warnings do, in one shape for both budgets:
+    'Tool-call round cap reached (N); Write, Edit not run.' / 'Task deadline reached (Ns); Bash not run.'"""
     dropped = {}
     for e in des_log:
         if e.get("event") != "Warn":
             continue
-        found = re.search(r"round cap reached \(\d+\); (.+?) not run", str(e.get("payload", "")))
+        found = re.search(r"(?:round cap|deadline) reached \([^)]*\); (.+?) not run", str(e.get("payload", "")))
         if found:
             for name in found.group(1).split(", "):
                 dropped[name] = dropped.get(name, 0) + 1
@@ -274,7 +278,7 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
         "engine_steps": len(des_log),
         "engine_errors": sum(1 for e in des_log if e.get("outcome") not in (None, "ok")),
         "compactions": sum(1 for e in des_log if e.get("event") == "CompactHistory"),
-        "dropped_by_cap": dropped_by_cap(des_log),
+        "calls_not_run": calls_not_run(des_log),
         "wall_ms": (manifest or {}).get("elapsed_ms"),
         "exit_status": (manifest or {}).get("status"),
     }
@@ -331,8 +335,8 @@ def summary(r: dict) -> str:
         f"   stdlib_only={r['stdlib_only']['ok']}   holdout_refs_ok={r['holdout_refs']['ok']}",
         f"  cli: {r['cli_contract']}",
         f"  {s['turns']} turns ({s['capped_turns']} capped, {s['summary_turns']} summaries, {s['compactions']} compactions),"
-        f" final answer: {s['final_answer']}",
-        f"  {s['completions']} completions, {s['tool_calls']} tool calls {s['tool_mix']}   dropped by cap: {s['dropped_by_cap']}",
+        f" stop={s['stop']!r} final answer: {s['final_answer']}",
+        f"  {s['completions']} completions, {s['tool_calls']} tool calls {s['tool_mix']}   not run: {s['calls_not_run']}",
         f"  tokens: prompt {s['prompt_tokens']} (cached {s['prompt_tokens_cached']}, peak {s['prompt_tokens_peak']}),"
         f" completion {s['completion_tokens']}",
         f"  time: wall {s['wall_ms']} ms, prompt {s['prompt_ms']} ms, generation {s['generation_ms']} ms,"

@@ -38,7 +38,7 @@ from desh.engine import Engine
 from desh.llama.logger import Logger
 from desh.render import Gutter, Palette, c_out
 from desh.tools import ToolRegistry
-from desh_chat.state import ChatHistory, ChatState, InferenceEngine, Settings
+from desh_chat.state import ChatHistory, ChatState, Deadline, InferenceEngine, Settings
 from desh_chat.events import TurnStart
 from desh_chat.scratchpad import SCRATCHPAD_SYSTEM_PROMPT, Scratchpad
 
@@ -98,7 +98,7 @@ class Delegate:
     debug: bool = False
 
     def delegate(self, task: str, context: str = "", gate: str = "", check: str = "", *,
-                 settings: Settings | None = None) -> str:
+                 settings: Settings | None = None, deadline: Deadline | None = None) -> str:
         """Hand a self-contained task to a subagent and get back only its final answer. Use it
         to keep your own context small: the subagent does the reading, searching and tool calls in
         its own conversation, and none of that comes back to you, only the answer. Prefer it for
@@ -140,6 +140,7 @@ class Delegate:
             operator=False,                 # nobody to prompt: a finished turn returns the run
             auto_prompt=CAP_CONTINUE_MSG,   # checkpoint: a capped turn is continued, not returned
             scratchpad=scratchpad,
+            deadline=deadline,              # the parent's, injected like settings: no child outlives the run
         )
         print(c_out(Palette.CHROME, "╭─ delegate ─ subagent starts" + (f" ({session_file})" if session_file else "")))
         try:
@@ -194,11 +195,12 @@ def answer(state: ChatState) -> str:
       cancelled            the operator pressed ESC or cancelled at a confirmation prompt
       stop == "cap"        the round cap cut the turn short and the auto prompt could not go on;
                            the model's text so far is the answer
+      stop == "deadline"   the run's wall-clock budget ran out; the model's text so far is the answer
       neither              the answer, verbatim ("(no answer)" when the model said nothing)
     Every case must come back as text the parent can act on — it cannot see the child's history.
     The texts the parent reads: "The subagent ran out of context window before finishing.",
-    "The operator cancelled the request.", and for a capped turn the answer followed by
-    "\\n[Subagent hit the tool round cap]".
+    "The operator cancelled the request.", and for a capped or timed-out turn the answer followed
+    by "\\n[Subagent hit the tool round cap]" or "\\n[Subagent hit the task deadline]".
     """
     assert state.pending is None
     turn = state.history.last_non_summary()
@@ -211,4 +213,6 @@ def answer(state: ChatState) -> str:
         return "The operator cancelled the request."
     if turn.stop == "cap":
         return f"{child_msg}\n[Subagent hit the tool round cap]"
+    if turn.stop == "deadline":
+        return f"{child_msg}\n[Subagent hit the task deadline]"
     return child_msg

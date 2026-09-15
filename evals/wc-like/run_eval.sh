@@ -147,6 +147,7 @@ add_value "-te"  "tool_expiration"
 add_value "-sp"  "system_prompt"
 add_value "-to"  "timeout"
 add_value "-ta"  "task"
+add_value "-tt"  "task_timeout"
 
 # harness forced values
 force_value "-cl"  "${completions_log}"
@@ -220,6 +221,10 @@ jq -n \
     started: $started,
     finished: $finished
   }' > "$manifest"
+
+# Grade the run: result.json lands next to the manifest.
+echo "grading..."
+"$(dirname "$0")/grade.py" "${run_dir}"
 
 echo "----------------------------------------"
 echo "chat-des exited with status $status (wall time: ${elapsed_ms} ms)"

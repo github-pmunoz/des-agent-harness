@@ -19,7 +19,7 @@ from desh.tools import ToolRegistry
 from desh_chat.events import TurnStart
 from desh_chat.session import LoadSession
 from desh_chat.display import DisplayBanner
-from desh_chat.state import ChatHistory, Settings, InferenceEngine
+from desh_chat.state import ChatHistory, Deadline, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
 from desh_chat.coding import Workspace, edit_preview
@@ -58,7 +58,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
         # the parent's CURRENT settings travel with every call; the child derives its own from them
-        tools = tools.add(delegate.delegate, name="delegate", inject=("settings",), fold=fold_brief)
+        tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief)
     if args.scratchpad:
         # the working memory itself lives on ChatState; the tools only get a dict for the call
         tools = (tools.add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False)
@@ -108,6 +108,7 @@ def main():
     ap.add_argument("-cl",  "--completions-log", default="", help="JSONL telemetry file")
     ap.add_argument("-dl",  "--des-log",        default="", help="DES engine log")
     ap.add_argument("-to",  "--timeout",        default=0, type=float)
+    ap.add_argument("-tt",  "--task-timeout",   default=0, type=float, help="wall-clock budget in seconds for a --task run, 0 = none; checked before each tool round, so a run overshoots by at most one completion")
     ap.add_argument("-s",   "--session",        default="", help="session file to load or create")
     ap.add_argument("-sf",  "--sessions-folder", default="", help="folder where a new session file is created per run")
     ap.add_argument("-d",   "--debug",          action="store_true", help="Enable debug output")
@@ -170,6 +171,8 @@ def main():
         operator=True,
         auto_prompt=CAP_CONTINUE_MSG if args.cont else None,
         scratchpad=Scratchpad() if args.scratchpad else None,   # empty here; LoadSession restores a saved one
+        # the clock starts here, before the session loads and the router loads the model: both are run time
+        deadline=Deadline.in_seconds(args.task_timeout) if args.task and args.task_timeout > 0 else None,
     )
     log_header = {
         "model": args.model,
@@ -187,12 +190,34 @@ def main():
     if args.task:
         state = replace(state, idle_policy="prompt", operator=False)
 
-    Engine[ChatState](
+    final_state: ChatState = Engine[ChatState](
         des_log=des_log,
         debug=args.debug,
         on_error=on_error,
         on_interrupt=on_interrupt
     ).run(state, seed=runtime_seed, run_id=run_id, log_header=log_header)
+
+    if args.task:
+        sys.exit(task_exit_code(final_state))
+
+
+def task_exit_code(final: ChatState) -> int:
+    """How a one-shot run reports its end to the shell, from the stop reason of the last turn that
+    is not a summary. Every way a turn can end commits a Turn with a stop reason, an exception on
+    the very first request included, so the only turn-less run is one that never got to a turn
+    (a session file that failed to load, say). Interactive runs never come here."""
+    turn = final.history.last_non_summary()
+    if turn is None:
+        return 1
+    stop_to_exit_code: dict[str, int] = {
+        "" : 0,
+        "cap" : 0,
+        "deadline" : 0,
+        "overflow" : 1,
+        "interrupt" : 1,
+        "error" : 1,
+    }
+    return stop_to_exit_code.get(turn.stop, 1)
 
 
 if __name__ == "__main__":

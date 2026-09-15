@@ -21,12 +21,14 @@ from desh.llama.tokens import estimate_tokens
 from desh_chat.display import DisplayStats, Error, Info, Warn
 import pytest
 
+import time
+
 from desh_chat.events import (
     AppendRound, ExecuteToolCalls, MaybeRegenerate, NextRound,
-    StreamCompletion, TurnEnd,
+    StreamCompletion, TurnEnd, TurnStart,
 )
 from desh_chat.session import LoadSession, SaveSession
-from desh_chat.state import EXPIRED_RESULT, ChatHistory, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn
+from desh_chat.state import EXPIRED_RESULT, ChatHistory, Deadline, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn
 
 
 def with_server(make_state, server, **overrides):
@@ -220,6 +222,38 @@ class TestAppendRound:
         assert isinstance(events[1], TurnEnd)
         assert events[1].assistant == "one more?" and events[1].tokens == 10 and events[1].cancelled is False
         assert events[1].stop == "cap"                          # recorded on the Turn, so a reader need not count rounds
+
+
+class TestAppendRoundDeadline:
+    """The run's wall-clock budget is the second budget checked before a round runs. It ends the turn
+    the way the cap does — the model's text so far is the answer, the calls are named as not run —
+    under its own stop reason, and it is checked first: a run out of time is never continued."""
+
+    def test_a_passed_deadline_ends_the_turn_and_names_the_calls(self, make_state):
+        state = make_state(pending=PendingTurn("q"), deadline=Deadline(at=time.monotonic() - 1, budget=300))
+        new_state, events = AppendRound(assistant="so far", tool_calls=(TIME,), tokens=10).execute(state)
+        assert new_state.pending == state.pending             # the refused round is not recorded
+        assert isinstance(events[0], Warn) and "get_time" in events[0].text and "300s" in events[0].text
+        assert isinstance(events[1], TurnEnd)
+        assert events[1].assistant == "so far" and events[1].cancelled is False and events[1].stop == "deadline"
+
+    def test_a_deadline_still_ahead_lets_the_round_run(self, make_state):
+        state = make_state(pending=PendingTurn("q"), deadline=Deadline.in_seconds(60))
+        _, events = AppendRound(assistant="", tool_calls=(WEATHER,), tokens=10).execute(state)
+        assert events == [ExecuteToolCalls(index=0)]
+
+    def test_the_deadline_wins_over_the_round_cap(self, make_state):
+        settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, max_tool_rounds=1)
+        pending = PendingTurn("q").add_round(Round("", (WEATHER,), (result(WEATHER),), tokens=30))
+        state = make_state(settings=settings, pending=pending, deadline=Deadline(at=time.monotonic() - 1, budget=5))
+        _, events = AppendRound(assistant="", tool_calls=(TIME,), tokens=10).execute(state)
+        assert isinstance(events[1], TurnEnd) and events[1].stop == "deadline"
+
+    def test_a_timed_out_turn_is_not_continued_by_the_auto_prompt(self, make_state):
+        history = ChatHistory().append(Turn(user="q", assistant="so far", stop="deadline"))
+        state = make_state(history=history, operator=False, auto_prompt="go on")
+        new_state, events = TurnStart().execute(state)
+        assert events == [] and new_state.pending is None     # the drain branch: the run returns
 
 
 def round_of(assistant, calls, contents, round_no) -> Round:

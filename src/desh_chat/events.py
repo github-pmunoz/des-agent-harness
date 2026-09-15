@@ -221,13 +221,19 @@ class AppendRound(Event):
     tokens: int = 0
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         assert state.pending is not None
+        names = ", ".join(tc.name for tc in self.tool_calls)
+        # Two budgets are checked here, before the calls run; both end the turn with the model's text
+        # so far as the answer and the calls named in the warning. The deadline comes first: a run
+        # out of time must not be continued, and a capped turn would be (TurnStart's policy).
+        if state.deadline is not None and state.deadline.passed():
+            return state, [Warn(f"Task deadline reached ({state.deadline.budget:g}s); {names} not run."),
+                           TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False, stop="deadline")]
         if len(state.pending.rounds) >= state.settings.max_tool_rounds:
             # This event only knows the cap was hit and the calls were not run. Whether the turn is
             # over or a checkpoint is the idle event's business (Continue says so when it goes on).
-            names = ", ".join(tc.name for tc in self.tool_calls)
             return state, [Warn(f"Tool-call round cap reached ({state.settings.max_tool_rounds}); {names} not run."),
                            TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False, stop="cap")]
-        
+
         # A model that asks for the same calls a third time, having twice seen the same results, is
         # looping: the third round is not recorded and the turn ends the way the round cap ends it.
         # Calls are compared by the registry's identity (Tool.identity), not the wire string: a call
@@ -291,11 +297,12 @@ class ExecuteToolCalls(Event):
                 shown.append(Warn(f"  {len(skipped)} later call(s) not run: {', '.join(r.name for r in skipped)}"))
             return replace(state, pending=state.pending.add_results(denied, *skipped)), shown + [DisplayStats(colour=Palette.TOOL_STATS), NextRound()]
 
-        # What the harness supplies to tools that declared it (Tool.inject): 
+        # What the harness supplies to tools that declared it (Tool.inject):
         # - the settings, so a subagent inherits the parent's CURRENT settings, not the ones captured when the registry
         # was built
+        # - the deadline, so a subagent stops when the run that spawned it must
         # - the scratchpad as a dict built from the state value for this one call.
-        provided: dict[str, Any] = {"settings": state.settings}
+        provided: dict[str, Any] = {"settings": state.settings, "deadline": state.deadline}
         if state.scratchpad is not None:
             provided["scratchpad"] = state.scratchpad.to_dict()
         result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments, **provided))

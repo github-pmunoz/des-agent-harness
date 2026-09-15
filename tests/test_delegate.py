@@ -51,9 +51,9 @@ def with_server(make_state, server, **overrides):
 def with_delegate(tools: ToolRegistry, *, inference, settings, session_file=None, root=".") -> ToolRegistry:
     """`tools` plus the delegate tool, whose subagents get `tools` as given — without delegate.
     What cli.build_tools does for the real run, minus the per-flag toolsets: registered with
-    inject=("settings",) so every call carries the parent's current settings."""
+    inject=("settings", "deadline") so every call carries the parent's current settings and deadline."""
     d = Delegate(root=root, inference=inference, settings=settings, tools=tools, session_file=session_file)
-    return tools.add(d.delegate, name="delegate", inject=("settings",), fold=fold_brief)
+    return tools.add(d.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief)
 
 
 def parent_with_delegate(make_state, server, tools=ToolRegistry(), delegate_root=".", **overrides):
@@ -109,7 +109,7 @@ class TestCliWiring:
             assert [t.name for t in tools.tools] == ["Read", "delegate"]
             # the parent's settings go in untouched; the child derives its own per call (item below)
             assert delegate.settings == SETTINGS
-            assert tools.get("delegate").inject == ("settings",)
+            assert tools.get("delegate").inject == ("settings", "deadline")
             assert tools.get("delegate").fold is fold_brief
 
 
