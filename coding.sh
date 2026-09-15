@@ -40,7 +40,7 @@ EOF
 
 # The orchestrator's map of the project is the file tree, generated at launch so it cannot go
 # stale. README.md and INDEX.md are for the subagents, which read them on demand.
-PROJECT_TREE=$(cd "$DESH_HOME" && find . -path ./venv -prune -o -path ./.git -prune -o -path ./sandbox -prune \
+PROJECT_TREE=$(cd "$DESH_HOME" && find . -path ./venv -prune -o evals -prune -o -path ./.git -prune -o -path ./sandbox -prune \
     -o -path ./.sessions -prune -o -name __pycache__ -prune -o -name '*.egg-info' -prune -o -name '.pytest_cache' -prune \
     -o -type f ! -name '*.log' ! -name '*.jsonl' ! -name '*.json' ! -name '*.bad' -print | sort)
 SYSTEM_PROMPT="$SYSTEM_PROMPT"$'\n\n'"Project file tree (paths relative to the project root):"$'\n'"$PROJECT_TREE"
