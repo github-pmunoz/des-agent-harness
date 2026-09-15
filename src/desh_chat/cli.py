@@ -185,7 +185,7 @@ def main():
     runtime_seed += [TurnStart(args.task)] if args.task else [TurnStart()]
 
     if args.task:
-        state = replace(state, idle_policy="exit")
+        state = replace(state, idle_policy="prompt", operator=False)
 
     Engine[ChatState](
         des_log=des_log,
