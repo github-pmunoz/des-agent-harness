@@ -1,3 +1,4 @@
+import json
 import time
 from dataclasses import dataclass, field, replace
 from desh.llama.logger import Logger
@@ -182,9 +183,16 @@ class ChatState(State):
         block = self.scratchpad_block()
         return estimate_tokens(block["content"]) if block is not None else 0
 
+    def tools_tokens(self) -> int:
+        """What the tool schemas cost in the prompt: heuristic, they are re-sent whole every request.
+        Priced as prior, like the system prompt — left to the usage frames, their cost would sit on
+        whichever round's frame first absorbed it, and leave the estimate with that round."""
+        schemas = self.tools.schemas()
+        return estimate_tokens(json.dumps(schemas)) if schemas else 0
+
     def prompt_tokens(self, pending_tokens: int) -> int:
-        """What the next request costs before generation: system prompt, window since the last summary, pending, scratchpad."""
-        return estimate_tokens(self.system_prompt) + self.history.window_tokens() + pending_tokens + self.scratchpad_tokens()
+        """What the next request costs before generation: system prompt, tool schemas, window since the last summary, pending, scratchpad."""
+        return estimate_tokens(self.system_prompt) + self.tools_tokens() + self.history.window_tokens() + pending_tokens + self.scratchpad_tokens()
 
     def gen_room(self, pending_tokens: int) -> int:
         """What the window leaves for the next completion, before any cap: context minus the prompt."""
@@ -204,7 +212,7 @@ class ChatState(State):
 
     def session_tokens(self, pending_tokens: int) -> int:
         """Whole priced tokens of the session so far."""
-        return estimate_tokens(self.system_prompt) + self.history.get_total_tokens() + pending_tokens
+        return estimate_tokens(self.system_prompt) + self.tools_tokens() + self.history.get_total_tokens() + pending_tokens
 
 # -----------------------
 # Tool exchange inside a turn
@@ -252,7 +260,11 @@ class Round:
     assistant: str
     tool_calls: tuple[ToolCall, ...]
     results: tuple[ToolResult, ...] = ()
-    tokens: int = 0     # priced from the usage frame of the completion that produced the calls
+    # Priced from the usage frame of the completion that produced the calls: what that request added
+    # over the prior, so the PREVIOUS round's results plus this round's completion. The round kept
+    # whole by a checkpoint is re-priced to its own text (PendingTurn.compact), since the results
+    # its frame counted are the ones the checkpoint folded.
+    tokens: int = 0
     summary: bool = False
 
     def messages(self, stubbed: bool = False) -> list[dict]:
@@ -286,11 +298,14 @@ class Round:
         lines += [f"TOOL {res.name}: {res.content}" for res in self.results]
         return "\n".join(lines)
 
+    def own_text(self) -> str:
+        """The round's own text — the assistant message and its calls, never the results."""
+        return self.assistant + "".join(tc.name + tc.arguments for tc in self.tool_calls)
+
     def text(self, stubbed: bool = False) -> str:
         """All text of the round as rendered, for heuristic pricing when no usage frame priced it."""
-        calls = "".join(tc.name + tc.arguments for tc in self.tool_calls)
         results = "".join(EXPIRED_RESULT if stubbed else r.content for r in self.results)
-        return self.assistant + calls + results
+        return self.own_text() + results
 
     def mentions(self, describe: Callable[[str, str], str] | None = None) -> str:
         """The calls of the round, one mention each, for the expiring line of the scratchpad block:
@@ -442,7 +457,10 @@ class PendingTurn:
         text = CHECKPOINT_PREFIX + summary
         # a Round has no self-pricing (a Turn does): without a usage frame the checkpoint would cost 0
         summary_round = Round(text, (), (), summary=True, tokens=tokens or estimate_tokens(text))
-        return replace(self, rounds=self.rounds[:-1] + (summary_round,) + self.rounds[-1:])
+        # The kept round's frame priced the results of the round before it, which just folded: its
+        # price is now its own text; its results are the unpriced text, as they were.
+        kept = replace(self.rounds[-1], tokens=estimate_tokens(self.rounds[-1].own_text()))
+        return replace(self, rounds=self.rounds[:-1] + (summary_round, kept))
 
 
 # -----------------------

@@ -306,9 +306,21 @@ class TestCheckpoint:
         assert p.expiring(5) == ()
 
     def test_pricing_counts_the_checkpoint_and_the_view_only(self):
-        p = pending(3).compact("c", tokens=100)        # rounds 1, 2 (10, 20) folded; view: checkpoint 100, round 3 30
-        assert p.priced_tokens(None) == 130
-        assert p.priced_tokens(6) == 130
+        p = pending(3).compact("c", tokens=100)        # rounds 1, 2 (10, 20) folded; view: checkpoint 100, round 3 re-priced
+        own = estimate_tokens(round_(3).own_text())
+        assert p.priced_tokens(None) == 100 + own
+        assert p.priced_tokens(6) == 100 + own
+
+    def test_the_kept_round_is_repriced_to_its_own_text(self):
+        """A round's frame priced the results of the round before it. Once those fold into the
+        checkpoint, keeping the frame count would charge the view for text no longer in the request
+        (a 2K pytest output priced on the round after it overflowed an 8k run that had room)."""
+        big = Round("", (call("Read"),), (ToolResult("call_0", "Read", "x" * 8000),), tokens=10)
+        last = Round("r", (call("Read"),), (ToolResult("call_0", "Read", "small"),), tokens=2000)    # 2000 = big's results, priced here
+        p = PendingTurn("q").add_round(big).add_round(last).compact("c", tokens=50)
+        kept = p.since_last_summary()[1]
+        assert kept.tokens == estimate_tokens(last.own_text()) and kept.tokens < 10
+        assert kept.results == last.results                              # the results stay: they are the unpriced text
 
     def test_an_unpriced_checkpoint_is_estimated(self):
         p = pending(2).compact("c")
@@ -320,3 +332,37 @@ class TestCheckpoint:
         assert [m["role"] for m in turn.messages()] == ["user", "user", "assistant", "tool", "assistant"]
         assert "round 1" not in turn.transcript() and f"USER: {CHECKPOINT_PREFIX}c" in turn.transcript()
         assert Round.from_dict(turn.rounds[2].to_dict()) == turn.rounds[2]       # the flag round-trips
+
+
+# ---------------------
+# The tool schemas are prior, like the system prompt
+# ---------------------
+
+class TestToolSchemasArePrior:
+    """The schemas go on every request whole. Priced as prior they cost the same on every request;
+    left to the usage frames they would sit on whichever round's frame first absorbed them (round
+    one, in practice) and leave the estimate with that round when a checkpoint folds it."""
+
+    def test_the_schemas_are_priced_by_estimate(self, make_state):
+        bare = make_state(pending=PendingTurn("q"), settings=settings(6))
+        with_tools = make_state(pending=PendingTurn("q"), settings=settings(6), tools=REGISTRY)
+        cost = estimate_tokens(json.dumps(REGISTRY.schemas()))
+        assert cost > 0 and bare.tools_tokens() == 0 and with_tools.tools_tokens() == cost
+        assert with_tools.prompt_tokens(with_tools.pending_tokens()) - bare.prompt_tokens(bare.pending_tokens()) == cost
+        assert with_tools.session_tokens(0) - bare.session_tokens(0) == cost
+
+    def test_the_stream_counts_them_as_prior(self, make_state):
+        bare = make_state(pending=PendingTurn("q"), settings=settings(6))
+        with_tools = make_state(pending=PendingTurn("q"), settings=settings(6), tools=REGISTRY)
+        _, (ev_bare,) = NextRound().execute(bare)
+        _, (ev_tools,) = NextRound().execute(with_tools)
+        assert ev_tools.prior_tokens - ev_bare.prior_tokens == with_tools.tools_tokens()
+
+    def test_the_price_does_not_move_when_round_one_folds(self, make_state):
+        """Before: round one's frame carried the schemas, so checkpointing it dropped them from the
+        estimate for one request. Now the prior carries them on either side of the fold."""
+        state = make_state(pending=pending(3), settings=settings(6), tools=REGISTRY)
+        folded = make_state(pending=pending(3).compact("c", tokens=5), settings=settings(6), tools=REGISTRY)
+        _, (before,) = NextRound().execute(state)
+        _, (after,) = NextRound().execute(folded)
+        assert before.prior_tokens >= state.tools_tokens() and after.prior_tokens >= folded.tools_tokens()

@@ -486,7 +486,8 @@ class NextRound(Event):
         k = state.expire_after()
         block = state.scratchpad_block()
         scratchpad_tokens = state.scratchpad_tokens()
-        reserved = sys_prompt_tokens + pending_tokens + scratchpad_tokens + gen_budget
+        prior = sys_prompt_tokens + state.tools_tokens() + scratchpad_tokens     # re-sent whole every request, never a round's own text
+        reserved = prior + pending_tokens + gen_budget
         view = state.history.view_turns(state.settings.context - reserved)
         return state, [StreamCompletion(
             request=Request(
@@ -501,6 +502,6 @@ class NextRound(Event):
                 stream=True,
                 tools=state.tools.schemas(),
                 ),
-            prior_tokens=sys_prompt_tokens + sum(t.tokens for t in view) + pending.priced_tokens(k) + scratchpad_tokens,
+            prior_tokens=prior + sum(t.tokens for t in view) + pending.priced_tokens(k),
             unpriced=pending.unpriced_text(),
         )]

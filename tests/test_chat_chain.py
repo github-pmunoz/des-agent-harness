@@ -556,7 +556,8 @@ class TestCompactPendingTurn:
         p = new_state.pending
         assert len(p.rounds) == 4                        # the folded rounds stay on the record...
         view = p.since_last_summary()
-        assert [r.summary for r in view] == [True, False] and view[1] is state.pending.rounds[-1]     # ...the view is (checkpoint, last)
+        assert [r.summary for r in view] == [True, False]                       # ...the view is (checkpoint, last)
+        assert view[1].tool_calls == state.pending.rounds[-1].tool_calls and view[1].results == state.pending.rounds[-1].results
         assert view[0].assistant == CHECKPOINT_PREFIX + "a tidy checkpoint"
         assert p.non_summary_rounds() == 3               # the round cap counts the model's rounds, folded or not
         assert new_state.history == history
