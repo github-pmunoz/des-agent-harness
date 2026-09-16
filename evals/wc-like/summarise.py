@@ -58,9 +58,8 @@ def counts(result: dict | None, run_manifest: dict | None) -> bool:
     """
     if run_manifest is None or result is None:
         return False
-    if run_manifest.get("status") != 0:
-        return False
-    return True
+    status = run_manifest.get("status")
+    return status == 0 or (status == 1 and result["stats"]["stop"] == "overflow")
 
 
 def aggregate(values: list[float]) -> dict:

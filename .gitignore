@@ -12,5 +12,5 @@ sandbox/
 evals/wc-like/train/
 evals/wc-like/test/
 evals/wc-like/runs/
-!evals/wc-like/*.json
+!evals/wc-like/baseline.json
 evals/wc-like/sweeps/
