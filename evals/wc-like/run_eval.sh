@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# run_eval.sh — launch a single chat-des agent run from a flat JSON config.
+# run_eval.sh — launch a single chat-des agent run from a flat JSON settings.
 #
 # Usage:
-#   ./run_eval.sh <EVAL_CONFIG.json>
+#   ./run_eval.sh <EVAL_SETTINGS.json>
 #
-# The config is a flat JSON object whose keys map 1:1 to chat-des flags.
+# The settings is a flat JSON object whose keys map 1:1 to chat-des flags.
 # Example:
 #   {
 #     "model": "claude-3-5-sonnet",
@@ -39,13 +39,13 @@ set -euo pipefail
 
 # --- arguments -------------------------------------------------------------
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 <EVAL_CONFIG.json>" >&2
+  echo "usage: $0 <EVAL_SETTINGS.json>" >&2
   exit 2
 fi
 
-CONFIG="$1"
-if [[ ! -f "$CONFIG" ]]; then
-  echo "error: config file not found: $CONFIG" >&2
+SETTINGS="$1"
+if [[ ! -f "$SETTINGS" ]]; then
+  echo "error: settings file not found: $SETTINGS" >&2
   exit 2
 fi
 
@@ -60,7 +60,7 @@ workspace="${run_dir}/workspace"
 mkdir -p "$workspace"
 
 # Save a copy of the settings into the run folder.
-cp "$CONFIG" "${run_dir}/run_settings.json"
+cp "$SETTINGS" "${run_dir}/run_settings.json"
 
 # Copy work material into workspace
 cp task.txt "${workspace}/task.txt"
@@ -71,23 +71,23 @@ session_file="${run_dir}/session.json"
 des_log="${run_dir}/des_log.jsonl"
 completions_log="${run_dir}/completions_log.jsonl"
 
-# --- build chat-des arguments from the flat config -------------------------
+# --- build chat-des arguments from the flat settings -------------------------
 # jq is required.
 if ! command -v jq >/dev/null 2>&1; then
-  echo "error: jq is required to parse the config" >&2
+  echo "error: jq is required to parse the settings" >&2
   exit 2
 fi
 
 # has <key>  -> 0 if the key is present (even if null/false)
-has() { jq -e --arg k "$1" 'has($k)' "$CONFIG" >/dev/null 2>&1; }
+has() { jq -e --arg k "$1" 'has($k)' "$SETTINGS" >/dev/null 2>&1; }
 
 # get <key> fails if `has <key>` is false, no default
 get() {
   local key="$1" 
   if has "$key"; then
-    jq -r --arg k "$key" '.[$k]' "$CONFIG"
+    jq -r --arg k "$key" '.[$k]' "$SETTINGS"
   else
-    echo "error: config key $key is missing" >&2
+    echo "error: settings key $key is missing" >&2
     exit 2
   fi
 }
@@ -96,23 +96,23 @@ get() {
 is_true() {
   local key="$1"
   if has "$key"; then
-    jq -e --arg k "$key" '.[$k] == true' "$CONFIG" >/dev/null 2>&1
+    jq -e --arg k "$key" '.[$k] == true' "$SETTINGS" >/dev/null 2>&1
   else
-    echo "error: config key $key is missing" >&2
+    echo "error: settings key $key is missing" >&2
     exit 2
   fi
 }
 
 args=()
 
-# value flags:  flag  config-key  default
+# value flags:  flag  settings-key  default
 add_value() {
   local flag="$1" key="$2"
   val="$(get "$key")"
   args+=("$flag" "$val")
 }
 
-# boolean flags:  flag  config-key
+# boolean flags:  flag  settings-key
 add_bool() {
   local flag="$1" key="$2"
   if is_true "$key"; then
@@ -172,7 +172,7 @@ add_bool "--current_time" "current_time"
 
 # --- launch ----------------------------------------------------------------
 echo "run id : $run_id"
-echo "config : $CONFIG"
+echo "settings : $SETTINGS"
 echo "workspace: $workspace"
 echo "cmd    : chat-des ${args[*]}"
 echo "----------------------------------------"
@@ -204,14 +204,14 @@ elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
 manifest="${run_dir}/run_manifest.json"
 jq -n \
   --arg run_id "$run_id" \
-  --arg config "$CONFIG" \
+  --arg settings "$SETTINGS" \
   --argjson status "$status" \
   --argjson elapsed_ms "$elapsed_ms" \
   --arg started "$(date -d "@$((start_ns / 1000000000))" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)" \
   --arg finished "$(date +%Y-%m-%dT%H:%M:%S%z)" \
   '{
     run_id: $run_id,
-    config: $config,
+    settings: $settings,
     status: $status,
     elapsed_ms: $elapsed_ms,
     started: $started,
