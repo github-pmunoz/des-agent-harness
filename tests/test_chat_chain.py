@@ -20,6 +20,8 @@ Engine.run() test at the end for the end-to-end termination guarantee.
 FakeServer/FakeESCWatcher (conftest.py) stand in for the network and the
 real terminal-raw-mode watcher — no live router, no real stdin required.
 """
+import re
+
 from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 
 from desh.engine import Engine
@@ -166,6 +168,8 @@ class TestUserMessageBudget:
         new_state, events = open_turn(state, "a message long enough to blow a context of 1 token")
         assert [type(e) for e in events] == [Error, TurnEnd]
         assert "exceeds context window" in events[0].text
+        # the request never goes out, so the estimates in the text are the only record of its size
+        assert re.search(r"prompt≈\d+ room=-?\d+ need=\d+", events[0].text)
         assert events[1].cancelled is True and events[1].stop == "overflow"
         assert new_state.pending is not None    # TurnEnd, not NextRound, clears it
 

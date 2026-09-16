@@ -419,12 +419,16 @@ class NextRound(Event):
         # What the pending turn costs in the prompt: rounds already priced by usage frames, plus the
         # heuristic for the text no frame has priced yet (user message on round one, latest results after).
         pending_tokens = state.pending_tokens()
-        if state.gen_room(pending_tokens) < state.min_gen_tokens():
+        gen_room = state.gen_room(pending_tokens)
+        if gen_room < state.min_gen_tokens():
             # Compaction can only help while the window holds something other than a summary.
             summarisable = any(not t.summary for t in state.history.since_last_summary())
             if not self.compacted and summarisable:
                 return state, [Info("Compacting conversation history..."), CompactHistory(), NextRound(compacted=True)]
-            return state, [Error("Request exceeds context window; ending the turn."),
+            # The request never goes out, so no usage frame prices it: these estimates are the only
+            # record of how far the turn grew (the eval grader reads them from the log).
+            return state, [Error(f"Request exceeds context window; ending the turn "
+                                 f"(prompt≈{state.prompt_tokens(pending_tokens)} room={gen_room} need={state.min_gen_tokens()})."),
                            TurnEnd(assistant="", tokens=0, cancelled=True, stop="overflow")]
         gen_budget = state.gen_budget(pending_tokens)
         # The scratchpad block goes LAST: it changes whenever the model writes, and everything before
