@@ -81,6 +81,11 @@ fi
 # has <key>  -> 0 if the key is present (even if null/false)
 has() { jq -e --arg k "$1" 'has($k)' "$SETTINGS" >/dev/null 2>&1; }
 
+# Every key a flag is built from is recorded here (by add_value / add_bool, which run in this
+# shell — get() runs in a command substitution, so it cannot record), and the launch refuses a
+# settings key nothing read. port and model are read directly below.
+consumed=" port model"
+
 # get <key> fails if `has <key>` is false, no default
 get() {
   local key="$1" 
@@ -108,6 +113,7 @@ args=()
 # value flags:  flag  settings-key  default
 add_value() {
   local flag="$1" key="$2"
+  consumed="$consumed $key"
   val="$(get "$key")"
   args+=("$flag" "$val")
 }
@@ -115,6 +121,7 @@ add_value() {
 # boolean flags:  flag  settings-key
 add_bool() {
   local flag="$1" key="$2"
+  consumed="$consumed $key"
   if is_true "$key"; then
     args+=("$flag")
   fi
@@ -170,6 +177,15 @@ add_bool "--bash"         "bash"
 add_bool "--delegate"     "delegate"
 add_bool "--scratchpad"   "scratchpad"
 add_bool "--current_time" "current_time"
+
+# A key this script never read is a typo that would otherwise run silently on the flag's default
+# (a sweep once overrode "tool-cap" while this read "tool_cap": 45 runs at the default).
+for key in $(jq -r 'keys[]' "$SETTINGS"); do
+  case " $consumed " in
+    *" $key "*) ;;
+    *) echo "error: settings key '$key' is not one run_eval.sh reads (keys map 1:1 to chat-des flags, underscores)" >&2; exit 2;;
+  esac
+done
 
 # --- launch ----------------------------------------------------------------
 echo "run id : $run_id"

@@ -16,6 +16,5 @@
   "read": true, "write": true, "edit": true, "bash": true,
   "scratchpad": true, "current_time": false, "delegate": false,
   "port": 8012,
-  "task_timeout": 600,
-  "tool-cap": 12.5
+  "task_timeout": 600
 }
