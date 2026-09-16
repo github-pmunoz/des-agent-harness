@@ -35,6 +35,8 @@ from typing import Any, Callable, Optional
 # Schema derivation
 # ---------------------------------------------------------------------------
 
+DEFAULT_RESULT_CHARS = 8192     # 12.5% of a 16k context, in chars (4 per token): the cap a registry has until the harness sets one
+
 _JSON_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean", list: "array", dict: "object"}
 _JSON_NAMES = {**_JSON_TYPES, type(None): "null"}    # for messages back to the model: JSON words, not Python ones
 
@@ -181,7 +183,10 @@ class ToolRegistry:
     state is a value like everything else on it. An empty registry offers nothing — Request.tools
     stays absent and the model cannot call anything."""
     tools: tuple[Tool, ...] = ()
-    max_result_chars: int = 8000    # every result is bounded here so no tool can flood the context window
+    # Every result is bounded here so no tool can flood the context window. The harness derives the
+    # value from the context (a percentage of it, in chars); the default is that percentage at 16k,
+    # for registries built without a context in view.
+    max_result_chars: int = DEFAULT_RESULT_CHARS
     debug : bool = False
 
     def register(self, tool: Tool) -> ToolRegistry:

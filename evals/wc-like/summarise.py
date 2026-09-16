@@ -31,6 +31,9 @@ METRICS = (
     ("turns", ("stats", "turns")),
     ("compactions", ("stats", "compactions")),
     ("checkpoints", ("stats", "checkpoints")),
+    ("cut_results", ("stats", "cut_results")),
+    ("offset_reads", ("stats", "offset_reads")),
+    ("spill_reads", ("stats", "spill_reads")),
     ("first_green_round", ("stats", "first_green_round")),
 )
 

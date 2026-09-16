@@ -148,6 +148,7 @@ add_value "-sp"  "system_prompt"
 add_value "-to"  "timeout"
 add_value "-ta"  "task"
 add_value "-tt"  "task_timeout"
+add_value "-tc"  "tool_cap"
 
 # harness forced values
 force_value "-cl"  "${completions_log}"

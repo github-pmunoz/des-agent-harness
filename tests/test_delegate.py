@@ -96,7 +96,8 @@ class TestCliWiring:
         from desh_chat.cli import build_tools
         args = argparse.Namespace(workspace=str(tmp_path), read=True, write=False, edit=False, bash=False,
                                   current_time=False, delegate=True, system_prompt="sp", debug=False,
-                                  session="", sessions_folder=str(tmp_path), completions_log="c.jsonl", des_log="d.jsonl", scratchpad=False)
+                                  session="", sessions_folder=str(tmp_path), completions_log="c.jsonl", des_log="d.jsonl", scratchpad=False,
+                                  tool_cap=12.5)
         inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=FakeServer(script=[]), port=PORT)
         session_file = str(tmp_path / "run1.json")
         logger = Logger(str(tmp_path / "c.jsonl"))

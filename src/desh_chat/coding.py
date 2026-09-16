@@ -19,18 +19,28 @@ one command with a fresh reason each time is never caught looping.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 
 from desh.render import Palette, c_out
-from desh.tools import ToolRegistry
+from desh.tools import DEFAULT_RESULT_CHARS, ToolRegistry
+
+
+SPILL_DIR = ".desh/out"     # under the root, so Read can reach it; ignored by git
 
 
 @dataclass(frozen=True)
 class Workspace:
-    """One project root. The tool methods below are what the model calls."""
+    """One project root. The tool methods below are what the model calls.
+
+    result_chars is the cap on one result, the registry's bound made known to the tools that can
+    do better than a blind cut: Read returns whole lines up to it and says where to continue, Bash
+    saves the whole output to a file under the root and says where it is."""
     root: str
+    result_chars: int = DEFAULT_RESULT_CHARS
 
     def __post_init__(self):
         object.__setattr__(self, "root", os.path.realpath(os.path.expanduser(self.root)))
@@ -62,7 +72,31 @@ class Workspace:
             lines = f.read().splitlines(keepends=True)
         start = max(offset, 1) - 1
         end = start + limit if limit > 0 else len(lines)
-        return "".join(lines[start:end])
+        wanted = lines[start:end]
+        if sum(len(line) for line in wanted) <= self.result_chars:
+            return "".join(wanted)
+        # The slice is over the cap: return whole lines from `start` that fit within
+        # self.result_chars TOGETHER with a trailer line that tells the model how many lines the
+        # file has, which lines it is looking at, and the offset to continue from. The whole return
+        # value must stay within self.result_chars, or the registry's blind head-and-tail cut fires
+        # on top of it and the trailer is lost in the middle.
+        def trailer(last: int, cut: bool) -> str:
+            note = " — line truncated" if cut else ""
+            return (f"\n[showing lines {start + 1}-{last + 1} of {len(lines)} "
+                    f"(cap {self.result_chars} chars); continue with offset={last + 2}{note}]")
+        if len(wanted[0]) + len(trailer(start, True)) > self.result_chars:
+            # The very first line does not fit: cut it by characters so content + trailer fit.
+            # Leave a margin below the cap so the registry's blind cut can never fire on top.
+            cut = wanted[0][:max(self.result_chars - len(trailer(start, True)) - 100, 0)]
+            return cut + trailer(start, True)
+        content = ""
+        last = start
+        for i, line in enumerate(wanted, start=start):
+            if len(content) + len(line) + len(trailer(i, False)) > self.result_chars:
+                break
+            content += line
+            last = i
+        return content + trailer(last, False)
 
     def write(self, file_path: str, content: str) -> str:
         """Create or overwrite a text file with the given content, creating parent directories.
@@ -98,8 +132,10 @@ class Workspace:
         if not os.path.exists(full):
             return f"File {file_path} does not exist."
         
-        # Check how many times the string appears in the file
-        file_content = self.read(file_path)
+        # Check how many times the string appears in the file. Read straight from disk: read() is
+        # the model's view, cut to the cap, and an edit written back through it would cut the file.
+        with open(full, "r", encoding="utf-8") as f:
+            file_content = f.read()
         old_string_matches = file_content.count(old_string)
         if old_string_matches == 0:
             return f"`old_string` not found in file."
@@ -133,7 +169,24 @@ class Workspace:
             parts.append("stderr:\n" + proc.stderr.rstrip("\n"))
         if proc.returncode != 0:
             parts.append(f"exit code {proc.returncode}")
-        return "\n".join(parts) if parts else "(no output)"
+        output = "\n".join(parts) if parts else "(no output)"
+        if len(output) <= self.result_chars:
+            return output
+        # Over the cap: the whole output goes to a file the model can Read by range, and the last
+        # line says so. The registry's cut keeps the tail, so the pointer survives whatever it drops.
+        spill = self.spill(command, output)
+        return output + f"\n[output is {len(output)} characters, cut to {self.result_chars}; the whole of it is saved at {spill} — Read it with offset and limit]"
+
+    def spill(self, command: str, output: str) -> str:
+        """Save a command's whole output under SPILL_DIR and return the path relative to the root.
+        Named by time and a hash of the command, so two runs of one command do not collide."""
+        stamp = time.strftime("%H%M%S") + "-" + hashlib.sha1(f"{time.time_ns()}{command}".encode()).hexdigest()[:6]
+        rel = os.path.join(SPILL_DIR, f"bash-{stamp}.txt")
+        full = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(output)
+        return rel
 
 
 def edit_preview(args: dict) -> str:
@@ -156,10 +209,10 @@ def edit_preview(args: dict) -> str:
     return "\n".join(lines)
 
 
-def coding_registry(root: str = ".") -> ToolRegistry:
+def coding_registry(root: str = ".", result_chars: int = DEFAULT_RESULT_CHARS) -> ToolRegistry:
     """Read runs unprompted; Write, Edit and Bash ask. A mention of a call names its path, or its command."""
-    ws = Workspace(root)
-    return (ToolRegistry()
+    ws = Workspace(root, result_chars=result_chars)
+    return (ToolRegistry(max_result_chars=result_chars)
             .add(ws.read, name="Read", confirm=False, target="file_path")
             .add(ws.write, name="Write", target="file_path")
             .add(ws.edit, name="Edit", preview=edit_preview, target="file_path")

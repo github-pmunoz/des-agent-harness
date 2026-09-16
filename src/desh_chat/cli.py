@@ -34,8 +34,11 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     """The toolsets are additive: each flag contributes its tools, none of them means no tools.
     The delegate tool is built from the RESOLVED session path, completions Logger and DES log file,
     never from the raw flags: a subagent writes to the same log objects the parent's engine does."""
-    ws = Workspace(args.workspace)
-    tools = ToolRegistry(debug=args.debug)
+    # The cap is a share of the context, in chars (4 per token). The registry bounds every result to
+    # it as a backstop; Read and Bash cut to it themselves, with a pointer to the rest.
+    max_result_chars = int(settings.context * 4 * args.tool_cap / 100.0)
+    ws = Workspace(args.workspace, result_chars=max_result_chars)
+    tools = ToolRegistry(debug=args.debug, max_result_chars=max_result_chars)
     # `target` is the argument a one-line mention of the call shows (the expiring line of the
     # scratchpad block): a file tool is about its path, Bash about its command, a delegate about
     # its task, a scratchpad tool about its key.
@@ -50,7 +53,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     if args.current_time:
         tools = tools.add(current_time, name="Current time")
     if args.delegate:
-        delegate_tools = ToolRegistry(debug=args.debug)
+        delegate_tools = ToolRegistry(debug=args.debug, max_result_chars=max_result_chars)
         delegate_tools = (delegate_tools.add(ws.read, name="Read", confirm=False, target="file_path")
                           .add(ws.write, name="Write", target="file_path")
                           .add(ws.edit, name="Edit", preview=edit_preview, target="file_path")
@@ -125,6 +128,7 @@ def main():
     ap.add_argument("--delegate",  action="store_true", help="offer delegate: subagents with the same tools and settings")
     ap.add_argument("--scratchpad", action="store_true", help="offer the scratchpad tool")
     ap.add_argument("--current_time", action="store_true", help="offer the current time")
+    ap.add_argument("-tc",  "--tool-cap",       type=float, default=12.5, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
     args = ap.parse_args()
 
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID

@@ -213,6 +213,11 @@ def check_holdout_refs(workspace: str, completions: list[dict]) -> dict:
 
 # --- stats from the completions log ----------------------------------------------
 
+# What a cut result carries, one marker per way of cutting (desh.tools.ToolRegistry.bound, Workspace.read, Workspace.bash).
+CUT_MARKERS = ("characters truncated", "[showing lines", "the whole of it is saved at")
+SPILL_DIR = ".desh/out"
+
+
 def tool_calls_of(row: dict) -> list[dict]:
     choices = (row.get("response") or {}).get("choices") or [{}]
     message = choices[0].get("message") or {}
@@ -251,10 +256,13 @@ def session_stats(session: dict | None) -> dict:
     turns = (session or {}).get("turns") or []
     real = [t for t in turns if not t.get("summary")]
     last = real[-1] if real else {}
+    results = [res.get("content", "") for t in turns for r in t.get("rounds", []) for res in r.get("results", [])]
     return {
         "turns": len(turns),
         "capped_turns": sum(1 for t in turns if t.get("stop") == "cap"),
         "summary_turns": len(turns) - len(real),
+        # results the cap cut: the registry's blind cut, Read's line cut, Bash's spill
+        "cut_results": sum(1 for c in results if any(m in c for m in CUT_MARKERS)),
         "stop": last.get("stop", "") if real else None,      # how the run ended; "" is an answer
         "final_answer": bool(last.get("assistant")) and not last.get("stop"),
     }
@@ -279,9 +287,14 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
     usage = [((r.get("response") or {}).get("usage") or {}) for r in completions]
     timings = [((r.get("response") or {}).get("timings") or {}) for r in completions]
     tools = {}
+    offset_reads = spill_reads = 0      # did the model follow a cut's pointer: a Read by range, a Read of a Bash spill
     for r in completions:
         for call in tool_calls_of(r):
             tools[call["name"]] = tools.get(call["name"], 0) + 1
+            if call["name"] == "Read":
+                args = call["args"]
+                offset_reads += int((args.get("offset") or 1) > 1)
+                spill_reads += int(str(args.get("file_path", "")).startswith(SPILL_DIR))
     finish = {}
     for r in completions:
         reason = (((r.get("response") or {}).get("choices") or [{}])[0]).get("finish_reason")
@@ -294,6 +307,8 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
         "completions": len(completions),
         "tool_calls": sum(tools.values()),
         "tool_mix": tools,
+        "offset_reads": offset_reads,
+        "spill_reads": spill_reads,
         "finish_reasons": finish,
         "prompt_tokens": sum(u.get("prompt_tokens", 0) for u in usage),
         "prompt_tokens_cached": sum(t.get("cache_n", 0) for t in timings),
@@ -356,6 +371,7 @@ def summary(r: dict) -> str:
         f" {s['checkpoints']} checkpoints),"
         f" stop={s['stop']!r} final answer: {s['final_answer']}",
         f"  {s['completions']} completions, {s['tool_calls']} tool calls {s['tool_mix']}   not run: {s['calls_not_run']}",
+        f"  cut results {s['cut_results']}, reads by offset {s['offset_reads']}, reads of a spill {s['spill_reads']}",
         f"  tokens: prompt {s['prompt_tokens']} (cached {s['prompt_tokens_cached']}, peak {s['prompt_tokens_peak']}),"
         f" completion {s['completion_tokens']}",
         f"  time: wall {s['wall_ms']} ms, prompt {s['prompt_ms']} ms, generation {s['generation_ms']} ms,"

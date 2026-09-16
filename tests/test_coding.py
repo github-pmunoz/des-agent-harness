@@ -59,6 +59,37 @@ class TestReadWrite:
         assert ws.read("src/a.py", offset=2, limit=1) == "line 2\n"
         assert ws.read("src/a.py", offset=10) == ""
 
+    def test_read_over_the_cap_returns_whole_lines_and_says_where_to_continue(self, tmp_path):
+        """The model's view of a big file: lines that fit, then a trailer with the file's length,
+        the range shown, the cap (so it can size its next limit) and the offset to go on from.
+        The whole reply stays within the cap, so the registry's blind cut never fires on top."""
+        (tmp_path / "f.py").write_text("".join(f"line {i:03d} " + "x" * 40 + "\n" for i in range(1, 41)))    # 40 lines of 50 chars
+        ws = Workspace(str(tmp_path), result_chars=300)
+        out = ws.read("f.py")
+        body, trailer = out.rsplit("\n", 1)
+        assert body.splitlines() == [f"line {i:03d} " + "x" * 40 for i in range(1, 5)]   # whole lines only
+        assert trailer == "[showing lines 1-4 of 40 (cap 300 chars); continue with offset=5]"
+        assert len(out) <= 300
+        assert ws.read("f.py", offset=5).startswith("line 005 ")                       # the pointer works
+        assert ws.read("f.py", offset=39) == "line 039 " + "x" * 40 + "\nline 040 " + "x" * 40 + "\n"   # fits: no trailer
+        assert coding_registry(str(tmp_path), result_chars=300).invoke("Read", '{"file_path": "f.py"}') == out    # unchanged by the bound
+
+    def test_read_of_one_line_over_the_cap_cuts_it_by_characters(self, tmp_path):
+        (tmp_path / "one.txt").write_text("y" * 2000 + "\n" + "z" * 10 + "\n")
+        out = Workspace(str(tmp_path), result_chars=300).read("one.txt")
+        assert out.startswith("y" * 50) and "z" not in out and len(out) <= 300
+        assert "[showing lines 1-1 of 2" in out and "line truncated" in out and "offset=2" in out
+
+    def test_edit_reads_the_file_whole_whatever_the_cap(self, tmp_path):
+        """Regression: an Edit that went through the capped read() would miss a target past the
+        cut, and write the cut content plus the trailer back over the file for a target inside it."""
+        text = "".join(f"line {i:03d}\n" for i in range(1, 101))
+        (tmp_path / "big.py").write_text(text)
+        ws = Workspace(str(tmp_path), result_chars=200)
+        assert ws.edit("big.py", "line 099", "LINE 099") == "One occurrence of `old_string` replaced."
+        assert ws.edit("big.py", "line 001", "LINE 001") == "One occurrence of `old_string` replaced."
+        assert (tmp_path / "big.py").read_text() == text.replace("line 099", "LINE 099").replace("line 001", "LINE 001")
+
     def test_read_missing_file_raises_for_invoke_to_report(self, ws):
         with pytest.raises(FileNotFoundError):
             ws.read("nope.py")
@@ -138,6 +169,25 @@ class TestBash:
     def test_timeout(self, ws):
         assert ws.bash("hang", "sleep 5", timeout=1) == "command timed out after 1s"
 
+    def test_output_over_the_cap_is_spilled_to_a_file_the_model_can_read(self, tmp_path):
+        """Bash cannot cut for the model, so it keeps the whole output where Read can reach it and
+        says so on its last line; the registry's cut keeps the tail, so the pointer survives."""
+        from desh_chat.coding import SPILL_DIR
+        ws = Workspace(str(tmp_path), result_chars=800)
+        out = ws.bash("a lot", "python3 -c 'print(\"x\" * 1500)'")
+        assert out.startswith("x" * 1500) and "the whole of it is saved at" in out.splitlines()[-1]
+        rel = out.split("saved at ")[1].split(" ")[0]
+        assert rel.startswith(SPILL_DIR) and (tmp_path / rel).read_text() == "x" * 1500
+        bounded = coding_registry(str(tmp_path), result_chars=800).invoke("Bash", '{"reason": "r", "command": "python3 -c \'print(\\"x\\" * 1500)\'"}')
+        assert len(bounded) <= 800 + 60 and "characters truncated" in bounded
+        assert bounded.rstrip().endswith("Read it with offset and limit]") and "saved at " + SPILL_DIR in bounded
+
+    def test_output_within_the_cap_is_not_spilled(self, tmp_path):
+        from desh_chat.coding import SPILL_DIR
+        ws = Workspace(str(tmp_path), result_chars=800)
+        assert ws.bash("small", "echo hi") == "hi"
+        assert not (tmp_path / SPILL_DIR).exists()
+
     def test_reason_is_mandatory_and_comes_before_the_command_in_the_schema(self, tmp_path):
         bash = coding_registry(str(tmp_path)).get("Bash")
         assert bash.identity == ("command",)     # the reason is wording, not part of the call
@@ -187,10 +237,16 @@ class TestCodingRegistry:
         assert "[... 50 characters truncated ...]" in out
         assert ToolRegistry(max_result_chars=100).bound("short") == "short"
 
+    def test_the_cap_defaults_to_the_16k_share_and_the_harness_sets_it(self, tmp_path):
+        from desh.tools import DEFAULT_RESULT_CHARS
+        assert ToolRegistry().max_result_chars == DEFAULT_RESULT_CHARS == 8192
+        r = coding_registry(str(tmp_path), result_chars=300)
+        assert r.max_result_chars == 300 and r.get("Bash") is not None
+
     def test_big_read_is_bounded_by_default(self, tmp_path):
         (tmp_path / "big.txt").write_text("x" * 20000)
         out = coding_registry(str(tmp_path)).invoke("Read", '{"file_path": "big.txt"}')
-        assert len(out) < 8100 and "truncated" in out
+        assert len(out) <= 8192 and "line truncated" in out
 
 
 # ---------------------
