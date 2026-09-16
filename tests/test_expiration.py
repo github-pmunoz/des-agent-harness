@@ -20,7 +20,7 @@ from desh.llama.wire import ToolCall
 from desh.tools import ToolRegistry
 from desh_chat.events import NextRound, StreamCompletion
 from desh_chat.scratchpad import Scratchpad
-from desh_chat.state import EXPIRED_RESULT, MENTION_CHARS, ChatHistory, PendingTurn, Round, Settings, ToolResult, Turn
+from desh_chat.state import CHECKPOINT_PREFIX, EXPIRED_RESULT, MENTION_CHARS, ChatHistory, PendingTurn, Round, Settings, ToolResult, Turn
 
 
 def call(name: str, index: int = 0, **arguments) -> ToolCall:
@@ -251,3 +251,72 @@ class TestPricing:
         _, events = NextRound().execute(state)
         assert isinstance(events[0], StreamCompletion)
         assert state.gen_room(state.pending_tokens()) >= state.min_gen_tokens()
+
+
+# ---------------------
+# A checkpoint in the turn: the bands and the pricing run over the view
+# ---------------------
+
+def checkpointed(folded: int, after: int) -> PendingTurn:
+    """A turn of `folded` rounds checkpointed, then `after` more rounds: the view is the checkpoint
+    plus rounds folded+1 .. folded+after."""
+    p = pending(folded + 1).compact("c")        # rounds 1..folded fold, round folded+1 stays whole
+    for n in range(folded + 2, folded + after + 1):
+        p = p.add_round(round_(n))
+    return p
+
+
+class TestCheckpoint:
+    def test_compact_places_the_checkpoint_before_the_last_round(self):
+        p = pending(3).compact("c", tokens=100)
+        assert [r.summary for r in p.rounds] == [False, False, True, False]     # the record keeps every round
+        assert p.since_last_summary() == p.rounds[-2:]                          # the view is (checkpoint, round 3)
+        assert p.since_last_summary()[0].assistant == CHECKPOINT_PREFIX + "c"
+        assert p.non_summary_rounds() == 3
+
+    def test_a_second_checkpoint_subsumes_the_first(self):
+        p = checkpointed(2, 3).compact("two")          # view was (one, 3, 4, 5): 3 and 4 fold with `one`
+        view = p.since_last_summary()
+        assert [r.assistant for r in view] == [CHECKPOINT_PREFIX + "two", "round 5"]
+        assert sum(1 for r in p.rounds if r.summary) == 2
+        transcript = checkpointed(2, 3).transcript(checkpointed(2, 3).since_last_summary()[:-1])
+        assert f"USER: {CHECKPOINT_PREFIX}c" in transcript and "round 4" in transcript and "round 5" not in transcript
+
+    def test_compact_needs_two_model_rounds_in_the_view(self):
+        import pytest
+        with pytest.raises(AssertionError):
+            pending(1).compact("c")
+        with pytest.raises(AssertionError):
+            checkpointed(2, 1).compact("again")        # view (checkpoint, round 3): nothing to fold
+
+    def test_the_checkpoint_renders_as_one_user_message_and_is_never_stubbed(self):
+        p = checkpointed(2, 3)                         # view: checkpoint, 3, 4, 5
+        for k in (1, 2, 3, 4):
+            assert not p.stubbed(0, k)
+        msgs = p.messages(expire_after=1)
+        assert msgs[1] == {"role": "user", "content": CHECKPOINT_PREFIX + "c"}
+        assert results_in(msgs) == [EXPIRED_RESULT, EXPIRED_RESULT, "result 5"]
+        assert "result 1" not in json.dumps(msgs) and "result 2" not in json.dumps(msgs)
+
+    def test_distances_and_round_numbers_are_the_models(self):
+        p = checkpointed(2, 3)                         # view: checkpoint, 3, 4, 5 (distances -, 2, 1, 0)
+        assert p.expiring(2) == ("round 4: Read",)
+        assert p.expiring(3) == ("round 3: Read",)
+        assert p.expiring(4) == ()                     # the checkpoint never leaves
+        assert p.expiring(5) == ()
+
+    def test_pricing_counts_the_checkpoint_and_the_view_only(self):
+        p = pending(3).compact("c", tokens=100)        # rounds 1, 2 (10, 20) folded; view: checkpoint 100, round 3 30
+        assert p.priced_tokens(None) == 130
+        assert p.priced_tokens(6) == 130
+
+    def test_an_unpriced_checkpoint_is_estimated(self):
+        p = pending(2).compact("c")
+        assert p.since_last_summary()[0].tokens == estimate_tokens(CHECKPOINT_PREFIX + "c")
+
+    def test_the_finished_turn_keeps_the_record_and_renders_the_view(self):
+        turn = pending(3).compact("c", tokens=100).finish("done", tokens=0, cancelled=False)
+        assert len(turn.rounds) == 4
+        assert [m["role"] for m in turn.messages()] == ["user", "user", "assistant", "tool", "assistant"]
+        assert "round 1" not in turn.transcript() and f"USER: {CHECKPOINT_PREFIX}c" in turn.transcript()
+        assert Round.from_dict(turn.rounds[2].to_dict()) == turn.rounds[2]       # the flag round-trips

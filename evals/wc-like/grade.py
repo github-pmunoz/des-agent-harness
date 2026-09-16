@@ -307,6 +307,7 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
         "engine_steps": len(des_log),
         "engine_errors": sum(1 for e in des_log if e.get("outcome") not in (None, "ok")),
         "compactions": sum(1 for e in des_log if e.get("event") == "CompactHistory"),
+        "checkpoints": sum(1 for e in des_log if e.get("event") == "CompactPendingTurn"),
         "calls_not_run": calls_not_run(des_log),
         "wall_ms": (manifest or {}).get("elapsed_ms"),
         "exit_status": (manifest or {}).get("status"),
@@ -351,7 +352,8 @@ def summary(r: dict) -> str:
         f"  held-out {h['passed']}/{h['total']}   pytest {p.get('passed', 0)} passed {p.get('failed', 0)} failed"
         f"   stdlib_only={r['stdlib_only']['ok']}   holdout_refs_ok={r['holdout_refs']['ok']}",
         f"  cli: {r['cli_contract']}",
-        f"  {s['turns']} turns ({s['capped_turns']} capped, {s['summary_turns']} summaries, {s['compactions']} compactions),"
+        f"  {s['turns']} turns ({s['capped_turns']} capped, {s['summary_turns']} summaries, {s['compactions']} compactions,"
+        f" {s['checkpoints']} checkpoints),"
         f" stop={s['stop']!r} final answer: {s['final_answer']}",
         f"  {s['completions']} completions, {s['tool_calls']} tool calls {s['tool_mix']}   not run: {s['calls_not_run']}",
         f"  tokens: prompt {s['prompt_tokens']} (cached {s['prompt_tokens_cached']}, peak {s['prompt_tokens_peak']}),"

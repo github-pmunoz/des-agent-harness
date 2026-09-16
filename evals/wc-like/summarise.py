@@ -30,6 +30,7 @@ METRICS = (
     ("tool_calls", ("stats", "tool_calls")),
     ("turns", ("stats", "turns")),
     ("compactions", ("stats", "compactions")),
+    ("checkpoints", ("stats", "checkpoints")),
     ("first_green_round", ("stats", "first_green_round")),
 )
 

@@ -9,6 +9,15 @@ from desh.tools import ToolRegistry
 from desh_chat.scratchpad import Scratchpad
 from typing import Any, Callable
 
+def rounds_since_last_summary(rounds: tuple[Round, ...]) -> tuple[Round, ...]:
+    """The rounds since the last summary, including the latest summary round."""
+    view = []
+    for round in reversed(rounds):
+        view.append(round)
+        if round.summary:
+            break
+    return tuple(reversed(view))
+
 # -----------------------
 # Chat DES State
 # -----------------------
@@ -165,7 +174,7 @@ class ChatState(State):
         # that is), so the model can decide what to persist without recalling what round N read
         expiring = self.pending.expiring(self.expire_after(), describe=self.tools.target) if self.pending is not None else ()
         # the round the next completion is: one past the completed ones, against the turn's cap
-        round = (len(self.pending.rounds) + 1, self.settings.max_tool_rounds) if self.pending is not None else None
+        round = (self.pending.non_summary_rounds() + 1, self.settings.max_tool_rounds) if self.pending is not None else None
         return self.scratchpad.to_context(self.settings.tool_expiration, expiring=expiring, round=round)
 
     def scratchpad_tokens(self) -> int:
@@ -223,6 +232,7 @@ class ToolResult:
 # What a tool message says once its result has expired from the context. Constant on purpose: the
 # stubbed prefix of a request must not change from one round to the next, or the server re-prefills it.
 EXPIRED_RESULT = "[expired: this result is no longer in context]"
+CHECKPOINT_PREFIX = "Checkpoint of this turn so far, in place of the rounds before it: "
 
 # How much of a call's target the expiring line shows: enough to recognise a path or a command,
 # never a dump — the line is re-sent with every request while the round is expiring.
@@ -243,9 +253,14 @@ class Round:
     tool_calls: tuple[ToolCall, ...]
     results: tuple[ToolResult, ...] = ()
     tokens: int = 0     # priced from the usage frame of the completion that produced the calls
+    summary: bool = False
 
     def messages(self, stubbed: bool = False) -> list[dict]:
-        """The wire form of this round, as it is echoed back in every later request of the conversation."""
+        """The wire form of this round, as it is echoed back in every later request of the conversation.
+        A summary round is the checkpoint of the rounds folded before it: one user message, with no
+        ack of its own, because the round kept whole after it supplies the assistant's continuation."""
+        if self.summary:
+            return [{"role": "user", "content": self.assistant}]
         messages: list[dict] = [{ #stripping away the tc index
             "role": "assistant",
             "content": self.assistant,
@@ -261,6 +276,15 @@ class Round:
         for result in self.results:
             messages.append(replace(result, content=EXPIRED_RESULT).message() if stubbed else result.message())
         return messages
+
+    def transcript(self) -> str:
+        """Plain-text rendering for the compaction prompts and the history display, results whole."""
+        if self.summary:
+            return f"USER: {self.assistant}"
+        calls = ", ".join(f"{tc.name}({tc.arguments})" for tc in self.tool_calls)
+        lines = [f"ASSISTANT (tool calls): {self.assistant + ' ' if self.assistant else ''}{calls}"]
+        lines += [f"TOOL {res.name}: {res.content}" for res in self.results]
+        return "\n".join(lines)
 
     def text(self, stubbed: bool = False) -> str:
         """All text of the round as rendered, for heuristic pricing when no usage frame priced it."""
@@ -283,7 +307,7 @@ class Round:
     def to_dict(self) -> dict:
         return {"assistant": self.assistant, "tokens": self.tokens,
                 "tool_calls": [tc.to_dict() for tc in self.tool_calls],
-                "results": [r.to_dict() for r in self.results]}
+                "results": [r.to_dict() for r in self.results], "summary": self.summary}
 
     @classmethod
     def from_dict(cls, d: dict) -> Round:
@@ -291,7 +315,7 @@ class Round:
                    tool_calls=tuple(ToolCall(index=tc["index"], id=tc["id"], type=tc["type"],
                                              name=tc["function"]["name"], arguments=tc["function"]["arguments"])
                                     for tc in d["tool_calls"]),
-                   results=tuple(ToolResult.from_dict(r) for r in d.get("results", [])))
+                   results=tuple(ToolResult.from_dict(r) for r in d.get("results", [])), summary=d.get("summary", False))
 
 
 @dataclass(frozen=True)
@@ -317,31 +341,42 @@ class PendingTurn:
     # k <= 0) turns expiration off. Pure functions of (rounds, k): nothing is recorded, so the
     # session file and the repeat detector always see the full results, and a changed k re-renders.
 
+    # Both bands and the request are over the VIEW (since_last_summary): the rounds a checkpoint
+    # folded are not in the request, so they have no distance, and the checkpoint itself never
+    # expires — it is the compressed record of what the model would otherwise re-read.
+
     def stubbed(self, index: int, expire_after: int | None) -> bool:
-        """Whether round `index` renders stubbed in the next request."""
-        return expire_after is not None and expire_after > 0 and len(self.rounds) - 1 - index >= expire_after
+        """Whether round `index` of the view renders stubbed in the next request."""
+        view = self.since_last_summary()
+        return (expire_after is not None and expire_after > 0 and not view[index].summary
+                and len(view) - 1 - index >= expire_after)
 
     def expiring(self, expire_after: int | None, describe: Callable[[str, str], str] | None = None) -> tuple[str, ...]:
         """One line per round whose results are shown for the last time in the next request:
         'round N: Read tests/conftest.py, Bash ls' — the calls with what they were about (Round.mentions),
-        never their results: the model reads those where they still are and decides what to persist."""
+        never their results: the model reads those where they still are and decides what to persist.
+        N is the round's number in the turn as the model counts it (checkpoints do not count)."""
         if expire_after is None or expire_after <= 0:
             return ()
-        index = len(self.rounds) - expire_after      # distance == expire_after - 1
-        return (f"round {index + 1}: {self.rounds[index].mentions(describe)}",) if index >= 0 else ()
+        view = self.since_last_summary()
+        index = len(view) - expire_after      # distance == expire_after - 1
+        if index < 0 or view[index].summary:
+            return ()
+        number = self.non_summary_rounds() - (len(view) - 1 - index)     # the rounds after it are all the model's
+        return (f"round {number}: {view[index].mentions(describe)}",)
 
     def messages(self, expire_after: int | None = None) -> list[dict]:
         assert self.user is not None, "pending turn has no message yet"
         return ([{"role": "user", "content": self.user}]
-                + [m for i, r in enumerate(self.rounds) for m in r.messages(stubbed=self.stubbed(i, expire_after))])
+                + [m for i, r in enumerate(self.since_last_summary()) for m in r.messages(stubbed=self.stubbed(i, expire_after))])
 
     def priced_tokens(self, expire_after: int | None = None) -> int:
         """What the completed rounds cost in the next request. A round's `tokens` is what its usage
         frame priced, with the results whole; a stubbed round no longer costs that."""
         if expire_after is not None:
-            return sum(r.tokens if i < expire_after else estimate_tokens(r.text(stubbed=True)) for i, r in enumerate(reversed(self.rounds)))
+            return sum(r.tokens if i < expire_after else estimate_tokens(r.text(stubbed=True)) for i, r in enumerate(reversed(self.since_last_summary())))
         else:
-            return sum(r.tokens for r in self.rounds)
+            return sum(r.tokens for r in self.since_last_summary())
 
     def unpriced_text(self) -> str:
         """The prompt text the NEXT completion's usage frame will price: the user message on round one,
@@ -376,9 +411,38 @@ class PendingTurn:
         the usage frames that priced them whole. scratchpad is the working memory as it stands
         when the turn ends, recorded on the Turn for the session file."""
         assert self.user is not None, "pending turn has no message yet"
-        stubbed_rounds = sum(estimate_tokens(r.text(stubbed=True)) for r in self.rounds)
+        stubbed_rounds = sum(estimate_tokens(r.text(stubbed=True)) for r in self.since_last_summary())
+        # every round goes on the record (the session file shows what a checkpoint folded); the
+        # Turn renders and prices its view, as the pending turn did
         return Turn(self.user, assistant, tokens=tokens + stubbed_rounds if tokens else 0,
                     cancelled=cancelled, rounds=self.rounds, stop=stop, scratchpad=scratchpad)
+
+    def since_last_summary(self) -> tuple[Round, ...]:
+        """The rounds the next request carries: the latest checkpoint, when there is one, and
+        every round after it. The rounds a checkpoint folded stay in `rounds` for the record."""
+        return rounds_since_last_summary(self.rounds)
+
+    def non_summary_rounds(self) -> int:
+        """The model's rounds in the whole turn, checkpoints excluded: what the round cap counts.
+        A checkpoint frees context, it does not open a new turn, so the cap does not restart."""
+        return sum(1 for r in self.rounds if not r.summary)
+
+    def transcript(self, rounds: tuple[Round, ...]) -> str:
+        """Plain-text rendering of the user message and `rounds`, for the checkpoint prompt. A
+        checkpoint among them renders as the user message it is on the wire, so a second checkpoint
+        subsumes the first."""
+        return "\n".join([f"USER: {self.user}"] + [r.transcript() for r in rounds])
+
+    def compact(self, summary: str, tokens: int = 0) -> PendingTurn:
+        """Fold the view's rounds but the last into one checkpoint round: the summary as the model
+        will read it, priced by `tokens` (0 -> heuristic). The last round is kept whole because it
+        is the model's live continuation: its calls and results are what the next completion is
+        about. Requires two non-summary rounds in the view, so at least one is folded."""
+        assert sum(1 for r in self.since_last_summary() if not r.summary) >= 2, "nothing to fold"
+        text = CHECKPOINT_PREFIX + summary
+        # a Round has no self-pricing (a Turn does): without a usage frame the checkpoint would cost 0
+        summary_round = Round(text, (), (), summary=True, tokens=tokens or estimate_tokens(text))
+        return replace(self, rounds=self.rounds[:-1] + (summary_round,) + self.rounds[-1:])
 
 
 # -----------------------
@@ -420,26 +484,22 @@ class Turn:
     def __post_init__(self):
         if self.tokens == 0:
             # the rounds of a history turn render stubbed (messages), so that is what they cost
-            rounds = sum(estimate_tokens(r.text(stubbed=True)) for r in self.rounds)
+            rounds = sum(estimate_tokens(r.text(stubbed=True)) for r in rounds_since_last_summary(self.rounds))
             object.__setattr__(self, 'tokens', estimate_tokens(self.user) + estimate_tokens(self.assistant) + rounds)
 
     def messages(self):
         """The wire form of a finished turn. Its rounds are always stubbed: the final answer is what
         the results led to, and a turn's prefix never changes again once it is in history."""
         return ([{"role": "user", "content": self.user}]
-                + [m for r in self.rounds for m in r.messages(stubbed=True)]
+                + [m for r in rounds_since_last_summary(self.rounds) for m in r.messages(stubbed=True)]
                 + [{"role": "assistant", "content": self.assistant}])
 
     def transcript(self) -> str:
-        """Plain-text rendering for the compaction prompt and the history display."""
-        lines = [f"USER: {self.user}"]
-        for r in self.rounds:
-            calls = ", ".join(f"{tc.name}({tc.arguments})" for tc in r.tool_calls)
-            lines.append(f"ASSISTANT (tool calls): {r.assistant + ' ' if r.assistant else ''}{calls}")
-            for res in r.results:
-                lines.append(f"TOOL {res.name}: {res.content}")
-        lines.append(f"ASSISTANT: {self.assistant}")
-        return "\n".join(lines)
+        """Plain-text rendering for the compaction prompt and the history display: the view only,
+        since a checkpoint already stands for the rounds it folded."""
+        return "\n".join([f"USER: {self.user}"]
+                         + [r.transcript() for r in rounds_since_last_summary(self.rounds)]
+                         + [f"ASSISTANT: {self.assistant}"])
 
     def to_dict(self) -> dict:
         d = {"user": self.user, "assistant": self.assistant, "tokens": self.tokens,

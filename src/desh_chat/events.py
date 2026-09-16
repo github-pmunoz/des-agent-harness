@@ -20,7 +20,7 @@ from desh.llama.wire import Completion, Request, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_tokens, turn_tokens
 from desh.tools import Tool
-from desh_chat.state import ChatState, ChatHistory, PendingTurn, Round, ToolResult
+from desh_chat.state import CHECKPOINT_PREFIX, ChatState, ChatHistory, PendingTurn, Round, ToolResult
 from desh_chat.scratchpad import Scratchpad
 from desh_chat.display import DisplayStats, Error, Info, Warn
 from desh_chat.session import persist
@@ -150,7 +150,8 @@ class LogCompletion(Event):
 #   NextRound                budgets + builds the request from history view
 #                            + pending.messages(); compacts first when the
 #                            window leaves less than min_gen_tokens           -> StreamCompletion
-#                                                                             | CompactHistory + NextRound(compacted=True)
+#                                                                             | CompactHistory + NextRound
+#                                                                             | CompactPendingTurn + NextRound
 #                                                                             | TurnEnd(cancelled, stop="overflow")
 #   StreamCompletion         streams one round; routes on finish_reason:
 #                              cancelled            -> TurnEnd(cancelled=True)
@@ -163,9 +164,12 @@ class LogCompletion(Event):
 #   TurnEnd                  freezes pending into a history Turn, clears it  -> SaveSession + MaybeRegenerate
 #
 # Today's plain chat is the one-round case: NextRound -> StreamCompletion -> TurnEnd.
-# Only TurnEnd appends to history. Compaction rewrites history, never pending: it runs from
-# NextRound with the turn's rounds intact, or from /compact against an empty placeholder, which
-# is not a turn in progress. An interrupt mid-loop (Ctrl+C -> Exit) simply drops state.pending.
+# Only TurnEnd appends to history. Compaction is a ladder NextRound climbs one rung per request:
+# CompactHistory rewrites history with the turn's rounds intact (it also runs from /compact
+# against an empty placeholder, which is not a turn in progress); CompactPendingTurn folds the
+# turn's own rounds but the last into a checkpoint round, history untouched. Each rung removes
+# the condition that allowed it, so the ladder ends. An interrupt mid-loop (Ctrl+C -> Exit)
+# simply drops state.pending.
 #
 # Confirmation happens inside the round, per call, not as a verdict over the whole round: the
 # operator answers yes / no / no-with-guidance / cancel as each call comes up. A "no" short-circuits
@@ -228,7 +232,7 @@ class AppendRound(Event):
         if state.deadline is not None and state.deadline.passed():
             return state, [Warn(f"Task deadline reached ({state.deadline.budget:g}s); {names} not run."),
                            TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False, stop="deadline")]
-        if len(state.pending.rounds) >= state.settings.max_tool_rounds:
+        if state.pending.non_summary_rounds() >= state.settings.max_tool_rounds:
             # This event only knows the cap was hit and the calls were not run. Whether the turn is
             # over or a checkpoint is the idle event's business (Continue says so when it goes on).
             return state, [Warn(f"Tool-call round cap reached ({state.settings.max_tool_rounds}); {names} not run."),
@@ -241,7 +245,7 @@ class AppendRound(Event):
         # OBS: The results comparison relies on every recorded round having one result per call
         def shape(calls: tuple[ToolCall, ...]) -> tuple[tuple[str, str], ...]:
             return tuple(sorted(state.tools.identity(tc.name, tc.arguments) for tc in calls))
-        has_tail = len(state.pending.rounds) >= 2
+        has_tail = sum(1 for r in state.pending.since_last_summary() if not r.summary) >= 2
         if has_tail:
             last, before = state.pending.rounds[-1:], state.pending.rounds[-2:-1]
             if last and before and shape(self.tool_calls) == shape(last[0].tool_calls) == shape(before[0].tool_calls) \
@@ -391,6 +395,41 @@ class CompactHistory(Event):
 
 
 @dataclass(frozen=True)
+class CompactPendingTurn(Event):
+    """Checkpoint the pending turn: fold every round of its view but the last into one summary
+    round (PendingTurn.compact). The second rung of NextRound's ladder, taken when the history has
+    nothing left to fold and the turn itself is what fills the window. Rewrites pending only —
+    history is left as it is — and, like CompactHistory, schedules no successor."""
+    def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
+        pending = state.pending
+        assert pending is not None and pending.user is not None
+        s = state.settings
+        instruction = s.compaction_prompt      # the same instruction: a checkpoint is the summary of a working session so far
+        transcript = pending.transcript(pending.since_last_summary()[:-1])
+        target_tokens = int(s.context * s.compaction_target)
+        gen_budget = int(min(target_tokens, s.context - estimate_tokens(instruction) - estimate_tokens(transcript), s.turn_token_cap * s.context))
+        if gen_budget < s.min_compaction_tokens:
+            print(c_out(Palette.WARNING, f"Checkpoint is tight on room ({gen_budget} tokens computed, context={s.context}) — forcing {s.min_compaction_tokens} and the summary may come out truncated."))
+            gen_budget = s.min_compaction_tokens
+        req = Request(
+            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"Conversation transcript:\n{transcript}"}],
+            model=s.model,
+            temperature=0.0,
+            max_tokens=gen_budget,
+            think=False,
+            stream=False
+        )
+        completion = state.inference.server.complete(req)
+        # As for a summary turn: the generated text has a real count, the prefix around it is heuristic.
+        summary_tokens = 0
+        if completion.usage and completion.usage.get("completion_tokens"):
+            summary_tokens = completion.usage["completion_tokens"] + estimate_tokens(CHECKPOINT_PREFIX)
+        return replace(state, pending=pending.compact(completion.content, tokens=summary_tokens)), [
+            Info(f"{completion.content}"),
+            LogCompletion(request=req, completion=completion, port=state.inference.port)]
+
+
+@dataclass(frozen=True)
 class UserMessage(Event):
     """The turn's message arrived: fill the placeholder TurnStart opened and request the first round."""
     message: str
@@ -404,14 +443,15 @@ class NextRound(Event):
     """Budget and build the request for the next completion of the pending turn: system prompt, the
     history view that fits, then the pending turn so far (user message + every tool round).
 
-    Compaction is decided here, once per request, because this is the only point that knows what
-    the request needs: when the window leaves less than min_gen_tokens for the completion, and
-    there is a window to summarise, the history is compacted and the request rebuilt from the
-    summary. Once is the limit — a turn that is itself too large for the context would otherwise
-    summarise the summary forever — and what still does not fit ends the turn as an overflow,
-    recorded as a cancelled turn so the loop head can see it (a dropped message would be issued
-    again by an auto prompt, forever)."""
-    compacted: bool = False     # True on the retry after a compaction: no second one
+    Compaction is decided here because this is the only point that knows what the request needs.
+    When the window leaves less than min_gen_tokens for the completion, the ladder is climbed one
+    rung and the request rebuilt: history first, while it holds anything but a summary (the colder
+    content, and the turn is the live task); then the pending turn, while its view holds two rounds
+    the model made (one to fold, the last kept whole). No flag counts the rungs: each compaction
+    removes the condition that allowed it — a summarised window is not summarisable, a checkpointed
+    view holds one model round — so the ladder ends by itself. What still does not fit ends the
+    turn as an overflow, recorded as a cancelled turn so the loop head can see it (a dropped
+    message would be issued again by an auto prompt, forever)."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         assert state.pending is not None and state.pending.user is not None
         pending = state.pending
@@ -421,10 +461,12 @@ class NextRound(Event):
         pending_tokens = state.pending_tokens()
         gen_room = state.gen_room(pending_tokens)
         if gen_room < state.min_gen_tokens():
-            # Compaction can only help while the window holds something other than a summary.
-            summarisable = any(not t.summary for t in state.history.since_last_summary())
-            if not self.compacted and summarisable:
-                return state, [Info("Compacting conversation history..."), CompactHistory(), NextRound(compacted=True)]
+            non_compacted_history = any(not t.summary for t in state.history.since_last_summary())
+            if non_compacted_history:
+                return state, [Info("Compacting conversation history..."), CompactHistory(), NextRound()]
+            non_compacted_pending = sum(1 for r in pending.since_last_summary() if not r.summary) >= 2
+            if non_compacted_pending:
+                return state, [Info("Compacting pending turn..."), CompactPendingTurn(), NextRound()]
             # The request never goes out, so no usage frame prices it: these estimates are the only
             # record of how far the turn grew (the eval grader reads them from the log).
             return state, [Error(f"Request exceeds context window; ending the turn "

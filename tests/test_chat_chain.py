@@ -2,7 +2,7 @@
 tool loops are covered in test_turn_loop.py):
 
   MaybeRegenerate -> TurnStart -> [DisplayStats, PromptUser] -> UserMessage -> NextRound
-    -> (CompactHistory -> [Info, LogCompletion], NextRound(compacted=True) ->)
+    -> (CompactHistory | CompactPendingTurn -> [Info, LogCompletion], NextRound ->)
     -> StreamCompletion -> [TurnEnd, LogCompletion] -> TurnEnd -> MaybeRegenerate
 
 TurnStart opens state.pending empty and UserMessage fills it; NextRound is where the
@@ -30,11 +30,27 @@ from desh.llama.wire import Request
 from desh.llama.tokens import estimate_tokens
 from desh_chat.display import DisplayStats, Error, Info
 from desh_chat.events import (
-    CompactHistory, Exit, LogCompletion, MaybeRegenerate,
+    CompactHistory, CompactPendingTurn, Exit, LogCompletion, MaybeRegenerate,
     NextRound, PromptUser, StreamCompletion, TurnEnd, TurnStart, UserMessage,
 )
 from desh_chat.handlers import on_interrupt
-from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Settings, Turn
+from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn
+
+
+def tool_round(n: int, tokens: int = 10) -> Round:
+    """Round n of a turn: one Read call, answered, priced `tokens`."""
+    from desh.llama.wire import ToolCall
+    tc = ToolCall(index=0, id=f"call_{n}", type="function", name="Read", arguments='{"file_path": "f"}')
+    return Round(f"round {n}", (tc,), (ToolResult(tc.id, tc.name, f"result {n}"),), tokens=tokens)
+
+
+def mid_turn(state, message: str, rounds: int):
+    """A turn already `rounds` tool rounds in, as NextRound sees it when the results come back."""
+    pending = PendingTurn(message)
+    for n in range(1, rounds + 1):
+        pending = pending.add_round(tool_round(n))
+    from dataclasses import replace
+    return replace(state, pending=pending)
 
 
 def with_server(make_state, server, **overrides):
@@ -368,27 +384,44 @@ class TestNextRoundCompaction:
         history = ChatHistory().append(Turn("long", "reply", tokens=500))     # leaves 492
         new_state, events = open_turn(make_state(settings=self.SETTINGS, history=history), "hi")
         assert [type(e) for e in events] == [Info, CompactHistory, NextRound]
-        assert events[2] == NextRound(compacted=True)
+        assert events[2] == NextRound()      # no flag: the retry reads the state as it is by then
         assert new_state.pending is not None and new_state.pending.rounds == ()    # the turn is untouched
 
     def test_the_retry_is_built_from_the_compacted_history(self, make_state):
-        """CompactHistory rewrites history and schedules nothing; NextRound(compacted=True) reads the
+        """CompactHistory rewrites history and schedules nothing; the NextRound after it reads the
         state as it is by then, so the request carries the summary and not the turns behind it."""
         server = FakeServer(script=[{"content": "a tidy summary"}, {"content": "unused"}])
         history = ChatHistory().append(Turn("long question", "long reply", tokens=500))
         state = with_server(make_state, server, settings=self.SETTINGS, history=history)
         state, events = open_turn(state, "hi")
         state, _ = events[1].execute(state)                  # CompactHistory
-        _, events = events[2].execute(state)                 # NextRound(compacted=True)
+        _, events = events[2].execute(state)                 # NextRound
         assert [type(e) for e in events] == [StreamCompletion]
         contents = [m["content"] for m in events[0].request.messages]
         assert ChatHistory.SUMMARY_PREFIX + "a tidy summary" in contents
         assert "long question" not in contents
 
-    def test_still_short_after_compacting_ends_the_turn_as_an_overflow(self, make_state):
+    # The ladder's second rung: with the history down to a summary, the turn's own rounds are what
+    # fills the window. A 500-token summary leaves 492 before the turn, so every case below is short.
+
+    def test_history_is_folded_before_the_turn_even_when_the_turn_is_long(self, make_state):
         history = ChatHistory().append(Turn("long", "reply", tokens=500))
-        state, _ = open_turn(make_state(settings=self.SETTINGS, history=history), "hi")
-        _, events = NextRound(compacted=True).execute(state)
+        state = mid_turn(make_state(settings=self.SETTINGS, history=history), "hi", rounds=3)
+        _, events = NextRound().execute(state)
+        assert [type(e) for e in events] == [Info, CompactHistory, NextRound]
+
+    def test_a_summarised_history_and_two_rounds_checkpoint_the_turn(self, make_state):
+        history = ChatHistory().compact("s", tokens=500)
+        state = mid_turn(make_state(settings=self.SETTINGS, history=history), "hi", rounds=2)
+        new_state, events = NextRound().execute(state)
+        assert [type(e) for e in events] == [Info, CompactPendingTurn, NextRound]
+        assert new_state.history == history      # the rung rewrites nothing itself
+
+    def test_a_summarised_history_and_one_round_end_the_turn_as_an_overflow(self, make_state):
+        """One round is the model's live continuation and stays whole: there is nothing to fold."""
+        history = ChatHistory().compact("s", tokens=500)
+        state = mid_turn(make_state(settings=self.SETTINGS, history=history), "hi", rounds=1)
+        _, events = NextRound().execute(state)
         assert [type(e) for e in events] == [Error, TurnEnd]
         assert events[1].cancelled is True and events[1].stop == "overflow"
 
@@ -502,6 +535,83 @@ class TestCompactHistory:
         state = with_server(make_state, server, settings=settings, history=history)
         CompactHistory().execute(state)
         assert "tight on room" not in capsys.readouterr().out
+
+
+# ---------------------
+# CompactPendingTurn
+# ---------------------
+
+class TestCompactPendingTurn:
+    """The ladder's second rung: the turn's own rounds but the last fold into a checkpoint round,
+    history is left alone, and like CompactHistory the event schedules no successor."""
+
+    def test_happy_path_folds_the_view_but_the_last_round(self, make_state, capsys):
+        from desh_chat.state import CHECKPOINT_PREFIX
+        server = FakeServer(script=[{"content": "a tidy checkpoint"}])
+        history = ChatHistory().append(Turn("earlier", "reply", tokens=100))
+        state = mid_turn(with_server(make_state, server, history=history), "hi", rounds=3)
+
+        new_state, events = CompactPendingTurn().execute(state)
+
+        p = new_state.pending
+        assert len(p.rounds) == 4                        # the folded rounds stay on the record...
+        view = p.since_last_summary()
+        assert [r.summary for r in view] == [True, False] and view[1] is state.pending.rounds[-1]     # ...the view is (checkpoint, last)
+        assert view[0].assistant == CHECKPOINT_PREFIX + "a tidy checkpoint"
+        assert p.non_summary_rounds() == 3               # the round cap counts the model's rounds, folded or not
+        assert new_state.history == history
+        assert [type(e) for e in events] == [Info, LogCompletion]
+        events[0].execute(new_state)
+        assert "a tidy checkpoint" in capsys.readouterr().out
+
+    def test_the_transcript_is_the_view_without_its_last_round(self, make_state):
+        from desh_chat.state import COMPACTION_PROMPT
+        server = FakeServer(script=[{"content": "c"}])
+        state = mid_turn(with_server(make_state, server), "the task", rounds=3)
+        CompactPendingTurn().execute(state)
+        assert server.calls[0][0] == "complete"
+        req = server.calls[0][1]
+        assert req.messages[0] == {"role": "system", "content": COMPACTION_PROMPT}
+        sent = req.messages[1]["content"]
+        assert "USER: the task" in sent and "result 1" in sent and "result 2" in sent
+        assert "result 3" not in sent                    # the last round is kept whole, not summarised
+        assert req.stream is False and req.temperature == 0.0 and req.think is False
+
+    def test_the_retry_is_built_from_the_checkpoint(self, make_state):
+        from desh_chat.state import CHECKPOINT_PREFIX
+        server = FakeServer(script=[{"content": "a tidy checkpoint"}, {"content": "unused"}])
+        state = mid_turn(with_server(make_state, server), "hi", rounds=3)
+        state, _ = CompactPendingTurn().execute(state)
+        _, events = NextRound().execute(state)
+        assert [type(e) for e in events] == [StreamCompletion]
+        msgs = events[0].request.messages
+        contents = [m["content"] for m in msgs]
+        assert contents.index(CHECKPOINT_PREFIX + "a tidy checkpoint") == contents.index("hi") + 1   # one user message, right after the task
+        assert [m["role"] for m in msgs if m["role"] == "tool"] == ["tool"]     # round 3's result only
+        assert "result 1" not in contents and "result 2" not in contents and "result 3" in contents
+
+    def test_the_checkpoint_is_priced_from_the_usage_frame_or_estimated(self, make_state):
+        from desh_chat.state import CHECKPOINT_PREFIX
+        priced = FakeServer(script=[{"content": "c", "usage": {"prompt_tokens": 50, "completion_tokens": 40}}])
+        state, _ = CompactPendingTurn().execute(mid_turn(with_server(make_state, priced), "hi", rounds=2))
+        assert state.pending.since_last_summary()[0].tokens == 40 + estimate_tokens(CHECKPOINT_PREFIX)
+        unpriced = FakeServer(script=[{"content": "c"}])              # no usage frame
+        state, _ = CompactPendingTurn().execute(mid_turn(with_server(make_state, unpriced), "hi", rounds=2))
+        assert state.pending.since_last_summary()[0].tokens == estimate_tokens(CHECKPOINT_PREFIX + "c")
+
+    def test_a_checkpointed_view_is_not_checkpointed_again(self, make_state):
+        """Termination of the ladder without a flag: after the rung the view holds one model round,
+        so a retry that is still short goes to the overflow record, not to a third compaction."""
+        settings = TestNextRoundCompaction.SETTINGS
+        server = FakeServer(script=[{"content": "c"}])
+        history = ChatHistory().compact("s", tokens=500)
+        state = mid_turn(with_server(make_state, server, settings=settings, history=history), "hi", rounds=2)
+        _, events = NextRound().execute(state)
+        assert [type(e) for e in events] == [Info, CompactPendingTurn, NextRound]
+        state, _ = events[1].execute(state)
+        _, events = events[2].execute(state)
+        assert [type(e) for e in events] == [Error, TurnEnd]
+        assert events[1].stop == "overflow"
 
 
 # ---------------------
