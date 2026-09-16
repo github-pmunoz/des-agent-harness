@@ -128,7 +128,7 @@ def main():
     ap.add_argument("--delegate",  action="store_true", help="offer delegate: subagents with the same tools and settings")
     ap.add_argument("--scratchpad", action="store_true", help="offer the scratchpad tool")
     ap.add_argument("--current_time", action="store_true", help="offer the current time")
-    ap.add_argument("-tc",  "--tool-cap",       type=float, default=12.5, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
+    ap.add_argument("-tc",  "--tool-cap",       type=float, default=10.0, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
     args = ap.parse_args()
 
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID

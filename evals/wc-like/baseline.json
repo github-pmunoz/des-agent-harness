@@ -5,7 +5,7 @@
   "max_turn_tokens": 16384,
   "max_tool_rounds": 30,
   "tool_expiration": 10,
-  "tool_cap": 12.5,
+  "tool_cap": 10.0,
   "system_prompt": "You are a coding agent.",
   "timeout": 600,
   "task": "Read task.txt and execute the instructions there.",
