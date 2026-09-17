@@ -89,7 +89,7 @@ class TestSettingsSerialization:
         s = Settings(model="model-b", temperature=0.9, think=True, context=8192, max_turn_tokens=4096,
                      max_tool_rounds=7, tool_expiration=3, compaction_threshold=0.5,
                      compaction_target=0.2, turn_token_cap=0.3, min_compaction_tokens=128,
-                     auto=True, compaction_prompt="summarise it")
+                     auto=True, compaction_prompt="summarise it", checkpoint_target=0.1, checkpoint_prompt="checkpoint it")
         assert Settings.from_dict(s.to_dict()) == s
         json.dumps(s.to_dict())     # every value is plain JSON
 

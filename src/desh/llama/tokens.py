@@ -18,6 +18,15 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+# Tool results are code, paths and tool output, which tokenize denser than prose: a real prompt
+# peak sat ~20% above the chars/4 line at every context, and the gap scaled with the result cap.
+RESULT_CHARS_PER_TOKEN = 3.3
+
+def estimate_result_tokens(text: str) -> int:
+    """Pre-completion estimate for tool results and transcripts of them."""
+    return int(len(text) / RESULT_CHARS_PER_TOKEN)
+
+
 def turn_tokens(usage: Optional[dict], user: str, assistant: str, reasoning: str, prior_tokens: int) -> int:
     """
     Price one Turn (user message + assistant reply) for history budgeting.

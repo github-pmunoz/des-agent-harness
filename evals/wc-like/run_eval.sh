@@ -156,6 +156,7 @@ add_value "-to"  "timeout"
 add_value "-ta"  "task"
 add_value "-tt"  "task_timeout"
 add_value "-tc"  "tool_cap"
+add_value "-ct"  "checkpoint_target"
 
 # harness forced values
 force_value "-cl"  "${completions_log}"

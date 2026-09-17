@@ -18,7 +18,7 @@ from desh.render import Palette, c_out, rl_prompt
 from desh.llama.stages import Seam, CodeFence, PyHighlight, Terminal, ToolProgress
 from desh.llama.wire import Completion, Request, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
-from desh.llama.tokens import estimate_tokens, turn_tokens
+from desh.llama.tokens import estimate_result_tokens, estimate_tokens, turn_tokens
 from desh.tools import Tool
 from desh_chat.state import CHECKPOINT_PREFIX, ChatState, ChatHistory, PendingTurn, Round, ToolResult
 from desh_chat.scratchpad import Scratchpad
@@ -361,6 +361,16 @@ class TurnEnd(Event):
         return new_state, persist(state) + [MaybeRegenerate()]
 
 
+TRANSCRIPT_LEAD = "Conversation transcript:\n"
+TRANSCRIPT_MARGIN = 64      # tokens kept free in a compaction request for template overhead and estimate error
+
+
+def transcript_budget(context: int, instruction: str, target_tokens: int) -> int:
+    """What a compaction request can spend on its transcript: the window minus the instruction,
+    the lead, the summary it must leave room for, and a margin."""
+    return max(context - estimate_tokens(instruction) - estimate_tokens(TRANSCRIPT_LEAD) - target_tokens - TRANSCRIPT_MARGIN, 0)
+
+
 @dataclass(frozen=True)
 class CompactHistory(Event):
     """Replace the window since the last summary with a summary turn. Rewrites history only —
@@ -368,15 +378,18 @@ class CompactHistory(Event):
     sequences what follows (NextRound retries the request, /compact returns to the loop head),
     which is what lets one event serve both."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        instruction = state.settings.compaction_prompt     # a setting, so a run can be built with another (see COMPACTION_PROMPT)
-        transcript ="\n\n".join([t.transcript() for t in state.history.since_last_summary()])
-        target_tokens = int(state.settings.context * state.settings.compaction_target)
-        gen_budget = int(min(target_tokens, state.settings.context - estimate_tokens(instruction) - estimate_tokens(transcript), state.settings.turn_token_cap * state.settings.context))
-        if gen_budget < state.settings.min_compaction_tokens:
-            print(c_out(Palette.WARNING, f"Compaction is tight on room ({gen_budget} tokens computed, context={state.settings.context}) — forcing {state.settings.min_compaction_tokens} and the summary may come out truncated."))
-            gen_budget = state.settings.min_compaction_tokens
+        s = state.settings
+        instruction = s.compaction_prompt     # a setting, so a run can be built with another (see COMPACTION_PROMPT)
+        target_tokens = int(s.context * s.compaction_target)
+        # The transcript is fitted to what the window leaves next to the instruction and the
+        # summary (ChatHistory.transcript): a request larger than the context would fail outright.
+        transcript = state.history.transcript(transcript_budget(s.context, instruction, target_tokens))
+        gen_budget = int(min(target_tokens, s.context - estimate_tokens(instruction) - estimate_result_tokens(transcript), s.turn_token_cap * s.context))
+        if gen_budget < s.min_compaction_tokens:
+            print(c_out(Palette.WARNING, f"Compaction is tight on room ({gen_budget} tokens computed, context={s.context}) — forcing {s.min_compaction_tokens} and the summary may come out truncated."))
+            gen_budget = s.min_compaction_tokens
         req = Request(
-            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"Conversation transcript:\n{transcript}" }],
+            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"{TRANSCRIPT_LEAD}{transcript}" }],
             model=state.settings.model,
             temperature=0.0,
             max_tokens=gen_budget,
@@ -404,15 +417,18 @@ class CompactPendingTurn(Event):
         pending = state.pending
         assert pending is not None and pending.user is not None
         s = state.settings
-        instruction = s.compaction_prompt      # the same instruction: a checkpoint is the summary of a working session so far
-        transcript = pending.transcript(pending.since_last_summary()[:-1])
-        target_tokens = int(s.context * s.compaction_target)
-        gen_budget = int(min(target_tokens, s.context - estimate_tokens(instruction) - estimate_tokens(transcript), s.turn_token_cap * s.context))
+        instruction = s.checkpoint_prompt      # its own instruction and share of the context (see CHECKPOINT_PROMPT)
+        target_tokens = int(s.context * s.checkpoint_target)
+        # The rounds render as the model last saw them (the request's bands) and are fitted to what
+        # the window leaves next to the instruction and the summary (PendingTurn.transcript).
+        transcript = pending.transcript(pending.since_last_summary()[:-1], state.expire_after(),
+                                        transcript_budget(s.context, instruction, target_tokens))
+        gen_budget = int(min(target_tokens, s.context - estimate_tokens(instruction) - estimate_result_tokens(transcript), s.turn_token_cap * s.context))
         if gen_budget < s.min_compaction_tokens:
             print(c_out(Palette.WARNING, f"Checkpoint is tight on room ({gen_budget} tokens computed, context={s.context}) — forcing {s.min_compaction_tokens} and the summary may come out truncated."))
             gen_budget = s.min_compaction_tokens
         req = Request(
-            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"Conversation transcript:\n{transcript}"}],
+            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"{TRANSCRIPT_LEAD}{transcript}"}],
             model=s.model,
             temperature=0.0,
             max_tokens=gen_budget,

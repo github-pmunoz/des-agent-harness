@@ -129,6 +129,7 @@ def main():
     ap.add_argument("--scratchpad", action="store_true", help="offer the scratchpad tool")
     ap.add_argument("--current_time", action="store_true", help="offer the current time")
     ap.add_argument("-tc",  "--tool-cap",       type=float, default=10.0, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
+    ap.add_argument("-ct",  "--checkpoint-target", type=float, default=0.15, help="share of the context a mid-turn checkpoint summary may take")
     args = ap.parse_args()
 
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
@@ -157,6 +158,7 @@ def main():
         max_tool_rounds=args.max_tool_rounds,
         tool_expiration=args.tool_expiration,
         auto=args.auto,
+        checkpoint_target=args.checkpoint_target,
     )
     inference = InferenceEngine(
         server=client,

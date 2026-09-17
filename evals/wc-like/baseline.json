@@ -6,6 +6,7 @@
   "max_tool_rounds": 30,
   "tool_expiration": 10,
   "tool_cap": 10.0,
+  "checkpoint_target": 0.15,
   "system_prompt": "You are a coding agent.",
   "timeout": 600,
   "task": "Read task.txt and execute the instructions there.",

@@ -15,7 +15,7 @@ import json
 
 from conftest import MODELS
 
-from desh.llama.tokens import estimate_tokens
+from desh.llama.tokens import estimate_result_tokens, estimate_tokens
 from desh.llama.wire import ToolCall
 from desh.tools import ToolRegistry
 from desh_chat.events import NextRound, StreamCompletion
@@ -366,3 +366,96 @@ class TestToolSchemasArePrior:
         _, (before,) = NextRound().execute(state)
         _, (after,) = NextRound().execute(folded)
         assert before.prior_tokens >= state.tools_tokens() and after.prior_tokens >= folded.tools_tokens()
+
+
+# ---------------------
+# The compaction transcript: the view's bands, fitted to a budget
+# ---------------------
+
+class TestTranscriptFit:
+    """fit_transcript gives up the least first: the oldest section is reduced to its last rendering,
+    then the next; then the oldest non-fixed sections are left out with one line saying so; a
+    fixed section (the task message, a checkpoint, a summary) is never left out; and if the fixed
+    sections alone do not fit, the head of the text is cut."""
+
+    HEADER = "[2 earlier rounds left out of this transcript]"
+
+    def sections(self):
+        from desh_chat.state import Section
+        return [Section(("TASK",), fixed=True),
+                Section(("A whole " + "a" * 200, "A stubbed " + "a" * 40)),
+                Section(("B whole " + "b" * 200, "B stubbed " + "b" * 40)),
+                Section(("C whole " + "c" * 200, "C stubbed " + "c" * 40))]
+
+    def test_no_budget_renders_everything_whole(self):
+        from desh_chat.state import fit_transcript
+        text = fit_transcript(self.sections(), None)
+        assert text.startswith("TASK\nA whole") and "C whole" in text
+
+    def test_the_oldest_is_reduced_first(self):
+        from desh_chat.state import fit_transcript
+        want = "TASK\nA stubbed " + "a" * 40 + "\nB whole " + "b" * 200 + "\nC whole " + "c" * 200
+        text = fit_transcript(self.sections(), estimate_result_tokens(want) + 1)
+        assert text == want
+
+    def test_then_the_oldest_are_left_out_with_a_note_and_fixed_ones_stay(self):
+        from desh_chat.state import fit_transcript
+        want = self.HEADER + "\nTASK\nC stubbed " + "c" * 40
+        text = fit_transcript(self.sections(), estimate_result_tokens(want) + 1)
+        assert text == want
+
+    def test_the_head_is_cut_as_a_last_resort(self):
+        from desh_chat.state import fit_transcript, Section
+        text = fit_transcript([Section(("x" * 1000,), fixed=True)], 30)
+        assert text.startswith("[transcript cut to fit]\n") and len(text) < 200
+
+    def long_pending(self, n: int) -> PendingTurn:
+        """Like pending(n), with results longer than the expiry stub, as real ones are."""
+        p = PendingTurn("q")
+        for i in range(1, n + 1):
+            tc = call("Read")
+            p = p.add_round(Round(f"round {i}", (tc,), (ToolResult(tc.id, tc.name, f"result {i} " + "x" * 200),), tokens=10 * i))
+        return p
+
+    def test_the_pending_transcript_follows_the_request_bands_and_the_budget(self):
+        """With k=2 the folded rounds 1..3 of a 4-round turn render as the model last saw them:
+        1 and 2 stubbed, 3 whole. A budget too small for round 3 whole stubs it too."""
+        p = self.long_pending(4)
+        folded = p.since_last_summary()[:-1]
+        whole = p.transcript(folded, expire_after=2)
+        lines = whole.splitlines()
+        assert lines[0] == "USER: q"
+        assert lines[2] == f"TOOL Read: {EXPIRED_RESULT}" and lines[4] == f"TOOL Read: {EXPIRED_RESULT}" and lines[6].startswith("TOOL Read: result 3 x")
+        fitted = p.transcript(folded, expire_after=2, budget_tokens=estimate_result_tokens(whole) - 1)
+        assert fitted.splitlines()[6] == f"TOOL Read: {EXPIRED_RESULT}"
+        assert p.transcript(folded, expire_after=None).splitlines()[2].startswith("TOOL Read: result 1 x")
+
+    def test_a_checkpoint_in_the_transcript_is_fixed(self):
+        p = checkpointed(2, 3)                                  # view: checkpoint, 3, 4, 5
+        want = "[2 earlier rounds left out of this transcript]\nUSER: q\nUSER: " + CHECKPOINT_PREFIX + "c"
+        assert p.transcript(p.since_last_summary()[:-1], expire_after=1, budget_tokens=estimate_result_tokens(want) + 1) == want
+
+    def test_the_history_transcript_stubs_rounds_and_reduces_oldest_turns_first(self):
+        turns = [Turn(f"q{i}", f"a{i}", rounds=(round_(1),), tokens=5) for i in range(3)]
+        h = ChatHistory()
+        for t in turns:
+            h = h.append(t)
+        whole = h.transcript()
+        assert "result 1" not in whole and whole.count(EXPIRED_RESULT) == 3      # as the model last saw them
+        reduced = h.transcript(budget_tokens=estimate_result_tokens(whole) - 1)
+        assert reduced.startswith("USER: q0\nASSISTANT: a0") and reduced.count(EXPIRED_RESULT) == 2
+        h = ChatHistory().compact("s", tokens=5).append(Turn("q " + "x" * 300, "a", tokens=5))   # too long even without rounds
+        summary_only = "[1 earlier turns left out of this transcript]\n" + h.turns[0].transcript()
+        assert h.transcript(budget_tokens=estimate_result_tokens(summary_only) + 1) == summary_only     # a summary is fixed
+
+
+class TestResultPricing:
+    def test_the_latest_results_are_priced_denser_than_prose(self, make_state):
+        """The unpriced text is tool output after round one: code and paths tokenize at ~3.3
+        chars per token, not 4. The first request's unpriced text is the user message: prose."""
+        from desh.llama.tokens import estimate_result_tokens
+        p = pending(1)
+        state = make_state(pending=p, settings=settings(6))
+        assert state.pending_tokens() == p.priced_tokens(6) + estimate_result_tokens("result 1")
+        first = make_state(pending=PendingTurn("q" * 40), settings=settings(6))
+        assert first.pending_tokens() == estimate_tokens("q" * 40)

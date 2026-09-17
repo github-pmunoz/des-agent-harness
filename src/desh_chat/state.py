@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from desh.llama.logger import Logger
 from desh.llama.server import LlamaServer
 from desh.llama.wire import ToolCall
-from desh.llama.tokens import estimate_tokens
+from desh.llama.tokens import RESULT_CHARS_PER_TOKEN, estimate_result_tokens, estimate_tokens
 from desh.engine import State
 from desh.tools import ToolRegistry
 from desh_chat.scratchpad import Scratchpad
@@ -19,6 +19,51 @@ def rounds_since_last_summary(rounds: tuple[Round, ...]) -> tuple[Round, ...]:
             break
     return tuple(reversed(view))
 
+
+@dataclass(frozen=True)
+class Section:
+    """One piece of a compaction transcript, oldest first in the list: its renderings from the
+    fullest to the most reduced (a round with its results whole, then stubbed; a turn with its
+    rounds, then without), and whether it may be left out altogether. A summary and the task
+    message are fixed: they carry everything before them."""
+    renderings: tuple[str, ...]
+    fixed: bool = False
+
+
+def fit_transcript(sections: list[Section], budget_tokens: int | None, unit: str = "rounds") -> str:
+    """Join the sections into a transcript that fits `budget_tokens` (None: no bound), giving up
+    the least first: the oldest section is reduced to its last rendering, then the next, and so
+    on; if that is not enough the oldest non-fixed sections are left out, oldest first, with one
+    line saying how many; if the fixed sections alone do not fit, the head of the text is cut.
+    A compaction request that does not fit the window would fail outright, and the summary is
+    what the model works from next, so a poorer transcript beats none."""
+    level = [0] * len(sections)
+    omitted = 0
+
+    def render() -> str:
+        head = [f"[{omitted} earlier {unit} left out of this transcript]"] if omitted else []
+        return "\n".join(head + [s.renderings[l] for s, l in zip(sections, level) if l < len(s.renderings)])
+
+    def over(text: str) -> bool:
+        return budget_tokens is not None and estimate_result_tokens(text) > budget_tokens
+
+    text = render()
+    for i, s in enumerate(sections):
+        while over(text) and level[i] < len(s.renderings) - 1:
+            level[i] += 1
+            text = render()
+    for i, s in enumerate(sections):
+        if not over(text):
+            break
+        if not s.fixed:
+            level[i] = len(s.renderings)
+            omitted += 1
+            text = render()
+    if over(text):
+        keep = int((budget_tokens or 0) * RESULT_CHARS_PER_TOKEN)
+        text = "[transcript cut to fit]\n" + text[-keep:] if keep > 0 else "[transcript cut to fit]"
+    return text
+
 # -----------------------
 # Chat DES State
 # -----------------------
@@ -31,6 +76,17 @@ COMPACTION_PROMPT = """You will be sent the transcript of a working session: a t
 Keep, exactly as written: the task and its success criterion; every file path touched and what was done to it; the function, class and test names, signatures, line numbers and error messages that were established; short code fragments that will be needed again verbatim, such as the exact text an edit must match or a command that must be re-run; test results as reported; decisions made and why; what remains to do, as concrete next steps.
 
 Drop: narration, the full contents of files that were read, tool output that a later step superseded. Prefer a terse list to prose. Do not mention this instruction and do not repeat the transcript."""
+
+# The system prompt of the checkpoint request (CompactPendingTurn). Unlike a history summary, the
+# checkpoint is read right after the task message and next to the scratchpad block, in a window
+# that is already tight, and it is rewritten every few rounds: so it must not restate the task,
+# must not duplicate what the scratchpad holds, must say what the next concrete action is, and
+# must stay short.
+CHECKPOINT_PROMPT = """You will be sent a transcript of agent rounds being folded away. Write the checkpoint the assistant will read in place of them, right after the task message and next to the scratchpad block.
+
+Do not restate the task — the task message is right before the checkpoint. Do not duplicate what the scratchpad holds — the scratchpad block follows the checkpoint. If the transcript already contains an earlier checkpoint, replace it with this one; do not append to it.
+
+Keep: the one thing the assistant was about to do next, as a single concrete action, with the file paths, names and error messages that action depends on exactly as written; which files were written or edited and whether they pass, with test results as reported; what was verified versus what was only assumed. A result shown as expired was no longer available to the assistant: record only what later rounds establish. Drop narration and superseded detail. Stay short — the checkpoint must fit in a small fraction of the context window. Do not mention this instruction."""
 
 
 @dataclass(frozen=True)
@@ -48,6 +104,11 @@ class Settings:
     min_compaction_tokens: int = 64
     auto: bool = False           # auto mode: confirmed tools run without asking; Ctrl+C turns it off
     compaction_prompt: str = field(default=COMPACTION_PROMPT, repr=False)    # system prompt of the compaction request
+    # A checkpoint (CompactPendingTurn) has its own instruction and share of the context: it sits
+    # after the task message and next to the scratchpad, so it must not repeat either, and it is
+    # rewritten every few rounds in a tight window, so it is kept smaller than a history summary.
+    checkpoint_target: float = 0.15
+    checkpoint_prompt: str = field(default=CHECKPOINT_PROMPT, repr=False)
 
     def to_dict(self) -> dict:
         """Plain-JSON form of every field, for the session document (format 4)."""
@@ -65,6 +126,8 @@ class Settings:
             "min_compaction_tokens": self.min_compaction_tokens,
             "auto": self.auto,
             "compaction_prompt": self.compaction_prompt,
+            "checkpoint_target": self.checkpoint_target,
+            "checkpoint_prompt": self.checkpoint_prompt,
         }
 
     @classmethod
@@ -87,6 +150,8 @@ class Settings:
             min_compaction_tokens=d.get("min_compaction_tokens", 64),
             auto=d.get("auto", False),
             compaction_prompt=d.get("compaction_prompt", COMPACTION_PROMPT),
+            checkpoint_target=d.get("checkpoint_target", 0.15),
+            checkpoint_prompt=d.get("checkpoint_prompt", CHECKPOINT_PROMPT),
         )
 
 @dataclass(frozen=True)
@@ -163,7 +228,11 @@ class ChatState(State):
     def pending_tokens(self) -> int:
         """What the pending turn costs in the prompt: priced rounds plus the heuristic for the text no usage frame has priced."""
         p = self.pending
-        return 0 if p is None else p.priced_tokens(self.expire_after()) + estimate_tokens(p.unpriced_text())
+        if p is None:
+            return 0
+        # the user message is prose, the latest results are tool output: different densities
+        unpriced = estimate_tokens(p.unpriced_text()) if not p.rounds else estimate_result_tokens(p.unpriced_text())
+        return p.priced_tokens(self.expire_after()) + unpriced
 
     def scratchpad_block(self) -> dict | None:
         """The scratchpad as the last message of the next request, with the line announcing the
@@ -289,13 +358,14 @@ class Round:
             messages.append(replace(result, content=EXPIRED_RESULT).message() if stubbed else result.message())
         return messages
 
-    def transcript(self) -> str:
-        """Plain-text rendering for the compaction prompts and the history display, results whole."""
+    def transcript(self, stubbed: bool = False) -> str:
+        """Plain-text rendering for the compaction prompts and the history display. `stubbed`
+        renders the results as EXPIRED_RESULT, the way the model last saw them."""
         if self.summary:
             return f"USER: {self.assistant}"
         calls = ", ".join(f"{tc.name}({tc.arguments})" for tc in self.tool_calls)
         lines = [f"ASSISTANT (tool calls): {self.assistant + ' ' if self.assistant else ''}{calls}"]
-        lines += [f"TOOL {res.name}: {res.content}" for res in self.results]
+        lines += [f"TOOL {res.name}: {EXPIRED_RESULT if stubbed else res.content}" for res in self.results]
         return "\n".join(lines)
 
     def own_text(self) -> str:
@@ -442,11 +512,22 @@ class PendingTurn:
         A checkpoint frees context, it does not open a new turn, so the cap does not restart."""
         return sum(1 for r in self.rounds if not r.summary)
 
-    def transcript(self, rounds: tuple[Round, ...]) -> str:
-        """Plain-text rendering of the user message and `rounds`, for the checkpoint prompt. A
-        checkpoint among them renders as the user message it is on the wire, so a second checkpoint
-        subsumes the first."""
-        return "\n".join([f"USER: {self.user}"] + [r.transcript() for r in rounds])
+    def transcript(self, rounds: tuple[Round, ...], expire_after: int | None = None, budget_tokens: int | None = None) -> str:
+        """Plain-text rendering of the user message and `rounds` (a prefix of the view), for the
+        checkpoint prompt. Each round renders as the model last saw it — whole or stubbed by the
+        same bands as the request — and the whole is fitted to `budget_tokens` (fit_transcript):
+        the oldest whole results are stubbed first, then the oldest rounds left out. A checkpoint
+        among the rounds renders as the user message it is on the wire and is never reduced, so a
+        second checkpoint subsumes the first."""
+        sections = [Section((f"USER: {self.user}",), fixed=True)]
+        for i, r in enumerate(rounds):
+            if r.summary:
+                sections.append(Section((r.transcript(),), fixed=True))
+            elif self.stubbed(i, expire_after):
+                sections.append(Section((r.transcript(stubbed=True),)))
+            else:
+                sections.append(Section((r.transcript(), r.transcript(stubbed=True))))
+        return fit_transcript(sections, budget_tokens, unit="rounds")
 
     def compact(self, summary: str, tokens: int = 0) -> PendingTurn:
         """Fold the view's rounds but the last into one checkpoint round: the summary as the model
@@ -512,12 +593,14 @@ class Turn:
                 + [m for r in rounds_since_last_summary(self.rounds) for m in r.messages(stubbed=True)]
                 + [{"role": "assistant", "content": self.assistant}])
 
-    def transcript(self) -> str:
-        """Plain-text rendering for the compaction prompt and the history display: the view only,
-        since a checkpoint already stands for the rounds it folded."""
-        return "\n".join([f"USER: {self.user}"]
-                         + [r.transcript() for r in rounds_since_last_summary(self.rounds)]
-                         + [f"ASSISTANT: {self.assistant}"])
+    def transcript(self, rounds: bool = True, stubbed: bool = False) -> str:
+        """Plain-text rendering for the history display and the compaction prompt: the view only,
+        since a checkpoint already stands for the rounds it folded. The display reads results
+        whole; the compaction reads them `stubbed`, as the model last saw them (a history turn's
+        answer is what its results led to). `rounds` False leaves the rounds out altogether: the
+        reduced form the compaction transcript falls back to when the window does not fit."""
+        middle = [r.transcript(stubbed=stubbed) for r in rounds_since_last_summary(self.rounds)] if rounds else []
+        return "\n".join([f"USER: {self.user}"] + middle + [f"ASSISTANT: {self.assistant}"])
 
     def to_dict(self) -> dict:
         d = {"user": self.user, "assistant": self.assistant, "tokens": self.tokens,
@@ -626,6 +709,15 @@ class ChatHistory:
             if turn.summary:
                 break
         return list(reversed(view))
+
+    def transcript(self, budget_tokens: int | None = None) -> str:
+        """The window since the last summary as the compaction prompt reads it: each turn as the
+        model last saw it (rounds stubbed), fitted to `budget_tokens` by fit_transcript — the
+        oldest turns lose their rounds first, then are left out; a summary turn never is."""
+        sections = [Section((t.transcript(),), fixed=True) if t.summary
+                    else Section((t.transcript(stubbed=True), t.transcript(rounds=False)))
+                    for t in self.since_last_summary()]
+        return fit_transcript(sections, budget_tokens, unit="turns")
 
     def last_non_summary(self) -> Turn | None:
         """The last turn that is not a summary."""

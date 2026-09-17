@@ -566,13 +566,13 @@ class TestCompactPendingTurn:
         assert "a tidy checkpoint" in capsys.readouterr().out
 
     def test_the_transcript_is_the_view_without_its_last_round(self, make_state):
-        from desh_chat.state import COMPACTION_PROMPT
+        from desh_chat.state import CHECKPOINT_PROMPT
         server = FakeServer(script=[{"content": "c"}])
         state = mid_turn(with_server(make_state, server), "the task", rounds=3)
         CompactPendingTurn().execute(state)
         assert server.calls[0][0] == "complete"
         req = server.calls[0][1]
-        assert req.messages[0] == {"role": "system", "content": COMPACTION_PROMPT}
+        assert req.messages[0] == {"role": "system", "content": CHECKPOINT_PROMPT}     # its own instruction, not the history summary's
         sent = req.messages[1]["content"]
         assert "USER: the task" in sent and "result 1" in sent and "result 2" in sent
         assert "result 3" not in sent                    # the last round is kept whole, not summarised
@@ -681,3 +681,42 @@ class TestFullEngineRun:
         contents = [m["content"] for m in events[0].request.messages]
         assert "cancel me" not in contents
         assert not any("partial" in c for c in contents)
+
+
+# ---------------------
+# Compaction requests fit the window
+# ---------------------
+
+class TestCompactionTranscriptBound:
+    """Both compactions build a transcript of what the model saw and fit it next to the instruction
+    and the summary they must leave room for: a request larger than the context would fail."""
+
+    def test_history_rounds_are_stubbed_in_the_summary_request(self, make_state):
+        server = FakeServer(script=[{"content": "s"}])
+        history = ChatHistory().append(Turn("q", "a", rounds=(tool_round(1),), tokens=50))
+        CompactHistory().execute(with_server(make_state, server, history=history))
+        sent = server.calls[0][1].messages[1]["content"]
+        assert "result 1" not in sent and "expired" in sent
+
+    def test_a_window_over_the_budget_is_reduced_and_the_request_fits(self, make_state):
+        from desh.llama.tokens import estimate_result_tokens
+        settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=1000, max_turn_tokens=500, compaction_target=0.25)
+        history = ChatHistory()
+        for i in range(6):
+            history = history.append(Turn(f"q{i} " + "x" * 800, f"a{i} " + "y" * 800, tokens=400))   # ~6 x 500 tokens: far over 1000
+        server = FakeServer(script=[{"content": "s"}])
+        CompactHistory().execute(with_server(make_state, server, settings=settings, history=history))
+        req = server.calls[0][1]
+        assert "left out of this transcript" in req.messages[1]["content"] or "cut to fit" in req.messages[1]["content"]
+        assert estimate_tokens(req.messages[0]["content"]) + estimate_result_tokens(req.messages[1]["content"]) + req.max_tokens <= 1000
+
+    def test_the_checkpoint_uses_its_own_target_and_the_request_bands(self, make_state):
+        settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192,
+                            tool_expiration=2, checkpoint_target=0.1)
+        server = FakeServer(script=[{"content": "c"}])
+        state = mid_turn(with_server(make_state, server, settings=settings), "hi", rounds=4)    # k=2: rounds 1, 2 stubbed in the request
+        CompactPendingTurn().execute(state)
+        req = server.calls[0][1]
+        assert req.max_tokens == int(16384 * 0.1)
+        sent = req.messages[1]["content"]
+        assert "result 1" not in sent and "result 2" not in sent and "result 3" in sent and "result 4" not in sent
