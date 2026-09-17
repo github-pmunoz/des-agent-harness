@@ -529,6 +529,20 @@ class PendingTurn:
                 sections.append(Section((r.transcript(), r.transcript(stubbed=True))))
         return fit_transcript(sections, budget_tokens, unit="rounds")
 
+    def digest(self, rounds: tuple[Round, ...], describe: Callable[[str, str], str] | None = None, budget_tokens: int | None = None) -> str:
+        """What stands in for a checkpoint when the model returns none: the previous checkpoint's
+        text, when `rounds` starts with one, and one line per folded round naming its calls
+        (Round.mentions) — what was done, never the results. Deterministic and cheap, so a turn
+        never folds into nothing; fitted to `budget_tokens` like a transcript."""
+        ordinal = {id(r): n for n, r in enumerate((r for r in self.rounds if not r.summary), start=1)}   # as the model counts rounds
+        sections = []
+        for r in rounds:
+            if r.summary:
+                sections.append(Section((r.assistant[len(CHECKPOINT_PREFIX):] if r.assistant.startswith(CHECKPOINT_PREFIX) else r.assistant,), fixed=True))
+            else:
+                sections.append(Section((f"round {ordinal.get(id(r), '?')}: {r.mentions(describe)}",)))
+        return fit_transcript(sections, budget_tokens, unit="rounds")
+
     def compact(self, summary: str, tokens: int = 0) -> PendingTurn:
         """Fold the view's rounds but the last into one checkpoint round: the summary as the model
         will read it, priced by `tokens` (0 -> heuristic). The last round is kept whole because it
@@ -717,6 +731,18 @@ class ChatHistory:
         sections = [Section((t.transcript(),), fixed=True) if t.summary
                     else Section((t.transcript(stubbed=True), t.transcript(rounds=False)))
                     for t in self.since_last_summary()]
+        return fit_transcript(sections, budget_tokens, unit="turns")
+
+    def digest(self, budget_tokens: int | None = None) -> str:
+        """What stands in for a summary when the model returns none: the previous summary's text,
+        when the window starts with one, and each turn's message and answer without its rounds.
+        Deterministic, so a window never folds into nothing; fitted to `budget_tokens`."""
+        sections = []
+        for t in self.since_last_summary():
+            if t.summary:
+                sections.append(Section((t.user[len(self.SUMMARY_PREFIX):] if t.user.startswith(self.SUMMARY_PREFIX) else t.user,), fixed=True))
+            else:
+                sections.append(Section((t.transcript(rounds=False),)))
         return fit_transcript(sections, budget_tokens, unit="turns")
 
     def last_non_summary(self) -> Turn | None:

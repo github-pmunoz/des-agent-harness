@@ -397,13 +397,20 @@ class CompactHistory(Event):
             stream=False
         )
         completion = state.inference.server.complete(req)
+        summary = completion.content.strip()
+        notes: list[Event] = []
+        if not summary:
+            # A model can answer a summary request with an immediate stop (seen at temperature 0).
+            # The window must not fold into nothing: the digest stands in, and the log says so.
+            summary = state.history.digest(target_tokens)
+            notes.append(Warn("The model returned no summary; the window is folded with a digest of its turns instead."))
         # The summary turn is a fresh prompt fragment, not the one this usage measured: only the
         # generated summary has a real count; the wrapper text around it is priced by heuristic.
         summary_tokens = 0
-        if completion.usage and completion.usage.get("completion_tokens"):
+        if notes == [] and completion.usage and completion.usage.get("completion_tokens"):
             summary_tokens = completion.usage["completion_tokens"] + estimate_tokens(ChatHistory.SUMMARY_PREFIX + ChatHistory.SUMMARY_ACK)
-        return replace(state, history=state.history.compact(completion.content, tokens=summary_tokens)), [
-            Info(f"{completion.content}"),
+        return replace(state, history=state.history.compact(summary, tokens=summary_tokens)), notes + [
+            Info(f"{summary}"),
             LogCompletion(request=req, completion=completion, port=state.inference.port)] + persist(state)
 
 
@@ -436,12 +443,19 @@ class CompactPendingTurn(Event):
             stream=False
         )
         completion = state.inference.server.complete(req)
+        summary = completion.content.strip()
+        notes: list[Event] = []
+        if not summary:
+            # Same guard as CompactHistory: the digest keeps the previous checkpoint and names what
+            # each folded round did, so the model keeps at least the shape of its own work.
+            summary = pending.digest(pending.since_last_summary()[:-1], describe=state.tools.target, budget_tokens=target_tokens)
+            notes.append(Warn("The model returned no checkpoint; the rounds are folded with a digest of their calls instead."))
         # As for a summary turn: the generated text has a real count, the prefix around it is heuristic.
         summary_tokens = 0
-        if completion.usage and completion.usage.get("completion_tokens"):
+        if notes == [] and completion.usage and completion.usage.get("completion_tokens"):
             summary_tokens = completion.usage["completion_tokens"] + estimate_tokens(CHECKPOINT_PREFIX)
-        return replace(state, pending=pending.compact(completion.content, tokens=summary_tokens)), [
-            Info(f"{completion.content}"),
+        return replace(state, pending=pending.compact(summary, tokens=summary_tokens)), notes + [
+            Info(f"{summary}"),
             LogCompletion(request=req, completion=completion, port=state.inference.port)]
 
 

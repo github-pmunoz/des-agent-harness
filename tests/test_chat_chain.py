@@ -720,3 +720,49 @@ class TestCompactionTranscriptBound:
         assert req.max_tokens == int(16384 * 0.1)
         sent = req.messages[1]["content"]
         assert "result 1" not in sent and "result 2" not in sent and "result 3" in sent and "result 4" not in sent
+
+
+# ---------------------
+# An empty summary never folds a window into nothing
+# ---------------------
+
+class TestEmptySummaryFallback:
+    """Seen in a 4k run: the model answered a checkpoint request with an immediate stop (one token,
+    empty content), and the rounds folded into a checkpoint that said nothing. Both compactions
+    now fold with a deterministic digest instead and say so in the log."""
+
+    def test_an_empty_checkpoint_folds_with_the_calls_digest(self, make_state):
+        from desh_chat.display import Warn
+        from desh_chat.state import CHECKPOINT_PREFIX
+        server = FakeServer(script=[{"content": ""}])
+        state = mid_turn(with_server(make_state, server), "hi", rounds=3)
+        new_state, events = CompactPendingTurn().execute(state)
+        assert [type(e) for e in events] == [Warn, Info, LogCompletion]
+        assert "returned no checkpoint" in events[0].text
+        checkpoint = new_state.pending.since_last_summary()[0]
+        assert checkpoint.summary and checkpoint.assistant == CHECKPOINT_PREFIX + "round 1: Read\nround 2: Read"
+        assert checkpoint.tokens > 0          # priced by estimate, not by the empty completion
+
+    def test_a_second_empty_checkpoint_keeps_the_first_ones_text(self, make_state):
+        from dataclasses import replace
+        server = FakeServer(script=[{"content": "what I know so far"}, {"content": "   "}])
+        state = mid_turn(with_server(make_state, server), "hi", rounds=3)
+        state, _ = CompactPendingTurn().execute(state)                       # a real checkpoint over rounds 1, 2
+        pend = state.pending
+        for n in (4, 5):
+            pend = pend.add_round(tool_round(n))
+        state, events = CompactPendingTurn().execute(replace(state, pending=pend))     # folds (checkpoint, 3, 4); model says nothing
+        text = state.pending.since_last_summary()[0].assistant
+        assert text.endswith("what I know so far\nround 3: Read\nround 4: Read")   # numbered as the model counts them
+        assert "returned no checkpoint" in events[0].text
+
+    def test_an_empty_history_summary_folds_with_the_turns_digest(self, make_state):
+        from desh_chat.display import Warn
+        server = FakeServer(script=[{"content": ""}])
+        history = ChatHistory().compact("earlier", tokens=20).append(Turn("q1", "a1", rounds=(tool_round(1),), tokens=30))
+        state = with_server(make_state, server, history=history)
+        new_state, events = CompactHistory().execute(state)
+        assert type(events[0]) is Warn and "returned no summary" in events[0].text
+        summary = new_state.history.turns[-1]
+        assert summary.summary and summary.user == ChatHistory.SUMMARY_PREFIX + "earlier\nUSER: q1\nASSISTANT: a1"
+        assert summary.tokens > 0

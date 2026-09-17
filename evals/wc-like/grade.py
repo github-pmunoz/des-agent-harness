@@ -324,6 +324,8 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
         "compactions": sum(1 for e in des_log if e.get("event") == "CompactHistory"),
         "checkpoints": sum(1 for e in des_log if e.get("event") == "CompactPendingTurn"),
         "calls_not_run": calls_not_run(des_log),
+        # compactions the model answered with nothing, folded with the harness's digest instead
+        "fallback_summaries": sum(1 for e in des_log if e.get("event") == "Warn" and "returned no" in str(e.get("payload", ""))),
         "wall_ms": (manifest or {}).get("elapsed_ms"),
         "exit_status": (manifest or {}).get("status"),
     }
