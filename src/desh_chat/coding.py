@@ -189,6 +189,30 @@ class Workspace:
         return rel
 
 
+WRITTEN_HEAD_CHARS = 120
+
+
+def fold_written(args: dict) -> dict:
+    """The echoed form of an answered Write (Tool.fold): the path, the head of the content and its
+    size — never the whole content. A call's arguments are echoed in every later request of the
+    turn and, unlike results, never expire; a round that wrote two files carried 4.8K chars of
+    them and could not be checkpointed at 4k. The file is on disk, one Read away."""
+    content = args.get("content")
+    if not isinstance(content, str) or len(content) <= WRITTEN_HEAD_CHARS:
+        return args
+    return {**args, "content": content[:WRITTEN_HEAD_CHARS] + f"... [{len(content)} characters written; Read the file to see it]"}
+
+
+def fold_edited(args: dict) -> dict:
+    """The echoed form of an answered Edit: the heads of old_string and new_string with their
+    sizes, once the pair is longer than a short excerpt. What was replaced is in the file."""
+    old, new = args.get("old_string"), args.get("new_string")
+    if not (isinstance(old, str) and isinstance(new, str)) or len(old) + len(new) <= 2 * WRITTEN_HEAD_CHARS:
+        return args
+    return {**args, "old_string": old[:WRITTEN_HEAD_CHARS] + f"... [{len(old)} characters]",
+                    "new_string": new[:WRITTEN_HEAD_CHARS] + f"... [{len(new)} characters]"}
+
+
 def edit_preview(args: dict) -> str:
     old = args.get("old_string")
     new = args.get("new_string")
@@ -214,6 +238,6 @@ def coding_registry(root: str = ".", result_chars: int = DEFAULT_RESULT_CHARS) -
     ws = Workspace(root, result_chars=result_chars)
     return (ToolRegistry(max_result_chars=result_chars)
             .add(ws.read, name="Read", confirm=False, target="file_path")
-            .add(ws.write, name="Write", target="file_path")
-            .add(ws.edit, name="Edit", preview=edit_preview, target="file_path")
+            .add(ws.write, name="Write", fold=fold_written, target="file_path")
+            .add(ws.edit, name="Edit", preview=edit_preview, fold=fold_edited, target="file_path")
             .add(ws.bash, name="Bash", identity=("command",), target="command"))

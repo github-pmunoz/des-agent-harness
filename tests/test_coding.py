@@ -345,3 +345,48 @@ class TestDescribeCall:
     def test_shorten_indents_lines_and_bounded(self):
         assert shorten("a\nb") == "    a\n    b"
         assert shorten("x" * 300) == "    " + "x" * 200 + " ... 300 chars"
+
+
+# ---------------------
+# What a round echoes of a Write or Edit once it ran (Tool.fold)
+# ---------------------
+
+class TestWrittenFold:
+    """A call's arguments are echoed in every later request and never expire: a Write carries the
+    whole file, and a round that wrote two files could not be checkpointed at 4k. Once the call
+    ran, the round records the path, a head and the size; the file is one Read away."""
+
+    def test_a_long_write_folds_to_its_head_and_size(self):
+        from desh_chat.coding import WRITTEN_HEAD_CHARS, fold_written
+        folded = fold_written({"file_path": "wc.py", "content": "x" * 3000})
+        assert folded["file_path"] == "wc.py" and folded["content"].startswith("x" * WRITTEN_HEAD_CHARS + "... [3000 characters written")
+        assert len(folded["content"]) < 200
+
+    def test_a_short_write_and_a_malformed_one_are_kept(self):
+        from desh_chat.coding import fold_written
+        assert fold_written({"file_path": "a", "content": "short"}) == {"file_path": "a", "content": "short"}
+        assert fold_written({"file_path": "a"}) == {"file_path": "a"}
+
+    def test_a_long_edit_folds_both_strings(self):
+        from desh_chat.coding import fold_edited
+        args = {"file_path": "a", "old_string": "o" * 500, "new_string": "n" * 500, "replace_all": False}
+        folded = fold_edited(args)
+        assert folded["old_string"].endswith("... [500 characters]") and folded["new_string"].endswith("... [500 characters]") and folded["replace_all"] is False
+        assert fold_edited({"file_path": "a", "old_string": "x", "new_string": "y"}) == {"file_path": "a", "old_string": "x", "new_string": "y"}
+
+    def test_the_round_records_the_fold_after_the_call_ran(self, tmp_path, make_state):
+        """The full arguments run; the round echoes the fold from then on (as a delegate brief does)."""
+        import json
+        from desh.llama.wire import ToolCall
+        from desh_chat.events import ExecuteToolCalls
+        from desh_chat.state import PendingTurn, Round, Settings
+        from conftest import MODELS
+        registry = coding_registry(str(tmp_path))
+        assert registry.get("Write").fold is not None and registry.get("Edit").fold is not None
+        tc = ToolCall(index=0, id="w_0", type="function", name="Write", arguments=json.dumps({"file_path": "big.py", "content": "y" * 2000}))
+        state = make_state(pending=PendingTurn("q").add_round(Round("", (tc,), tokens=10)), tools=registry,
+                           settings=Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, auto=True))
+        new_state, _ = ExecuteToolCalls(0).execute(state)
+        assert (tmp_path / "big.py").read_text() == "y" * 2000                       # the call ran whole
+        recorded = json.loads(new_state.pending.rounds[-1].tool_calls[0].arguments)
+        assert "2000 characters written" in recorded["content"] and len(recorded["content"]) < 200

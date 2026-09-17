@@ -22,7 +22,7 @@ from desh_chat.display import DisplayBanner
 from desh_chat.state import ChatHistory, Deadline, Settings, InferenceEngine
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
-from desh_chat.coding import Workspace, edit_preview
+from desh_chat.coding import Workspace, edit_preview, fold_edited, fold_written
 from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG, fold_brief
 from desh_chat import scratchpad
 from desh_chat.scratchpad import Scratchpad, SCRATCHPAD_SYSTEM_PROMPT
@@ -45,9 +45,9 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     if args.read:
         tools = tools.add(ws.read, name="Read", confirm=False, target="file_path")
     if args.write:
-        tools = tools.add(ws.write, name="Write", target="file_path")
+        tools = tools.add(ws.write, name="Write", fold=fold_written, target="file_path")
     if args.edit:
-        tools = tools.add(ws.edit, name="Edit", preview=edit_preview, target="file_path")
+        tools = tools.add(ws.edit, name="Edit", preview=edit_preview, fold=fold_edited, target="file_path")
     if args.bash:
         tools = tools.add(ws.bash, name="Bash", identity=("command",), target="command")
     if args.current_time:
@@ -55,8 +55,8 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     if args.delegate:
         delegate_tools = ToolRegistry(debug=args.debug, max_result_chars=max_result_chars)
         delegate_tools = (delegate_tools.add(ws.read, name="Read", confirm=False, target="file_path")
-                          .add(ws.write, name="Write", target="file_path")
-                          .add(ws.edit, name="Edit", preview=edit_preview, target="file_path")
+                          .add(ws.write, name="Write", fold=fold_written, target="file_path")
+                          .add(ws.edit, name="Edit", preview=edit_preview, fold=fold_edited, target="file_path")
                           .add(ws.bash, name="Bash", identity=("command",), target="command")
                           .add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, target="key")
                           .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False, target="key")

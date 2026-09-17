@@ -236,9 +236,10 @@ jq -n \
     finished: $finished
   }' > "$manifest"
 
-# Grade the run: result.json lands next to the manifest.
+# Grade the run: result.json lands next to the manifest, and what the grader printed lands in
+# grade.log — a run once finished clean and was excluded from its sweep with no trace of why.
 echo "grading..."
-"$(dirname "$0")/grade.py" "${run_dir}"
+"$(dirname "$0")/grade.py" "${run_dir}" 2>&1 | tee "${run_dir}/grade.log"
 
 echo "----------------------------------------"
 echo "chat-des exited with status $status (wall time: ${elapsed_ms} ms)"
