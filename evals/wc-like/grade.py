@@ -340,7 +340,11 @@ def grade(run_dir: str) -> dict:
     completions = read_jsonl(first_glob(run_dir, "completions*"))
     des_log = read_jsonl(first_glob(run_dir, "des*"))
     manifest = read_json(os.path.join(run_dir, "run_manifest.json"))
-    session = read_json(first_glob(run_dir, "session*") or os.path.join(run_dir, "session.json"))
+    # The main agent's session is session.json by contract; subagent sessions
+    # (session.delegate-*.json) sit beside it and are not graded.
+    session = read_json(os.path.join(run_dir, "session.json"))
+    if session is None:
+        raise FileNotFoundError(f"no session.json in {run_dir}")
     settings = read_json(os.path.join(run_dir, "run_settings.json")) or read_json(os.path.join(run_dir, ".eval_config.json"))
 
     result = {
