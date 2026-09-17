@@ -727,42 +727,55 @@ class TestCompactionTranscriptBound:
 # ---------------------
 
 class TestEmptySummaryFallback:
-    """Seen in a 4k run: the model answered a checkpoint request with an immediate stop (one token,
-    empty content), and the rounds folded into a checkpoint that said nothing. Both compactions
-    now fold with a deterministic digest instead and say so in the log."""
+    """Seen at 4k: the model answered a checkpoint request with an immediate stop (one token, empty
+    content) in about a quarter of the requests whose transcript began with an earlier checkpoint.
+    Both compactions ask once more, with a nudge and a little temperature; twice nothing folds
+    with a deterministic digest instead. Each step is a Warn the grader counts."""
 
-    def test_an_empty_checkpoint_folds_with_the_calls_digest(self, make_state):
+    def test_an_empty_checkpoint_is_asked_again_with_a_nudge(self, make_state):
         from desh_chat.display import Warn
+        from desh_chat.events import RETRY_NUDGE
         from desh_chat.state import CHECKPOINT_PREFIX
-        server = FakeServer(script=[{"content": ""}])
+        server = FakeServer(script=[{"content": ""}, {"content": "second try"}])
         state = mid_turn(with_server(make_state, server), "hi", rounds=3)
         new_state, events = CompactPendingTurn().execute(state)
-        assert [type(e) for e in events] == [Warn, Info, LogCompletion]
-        assert "returned no checkpoint" in events[0].text
+        assert [type(e) for e in events] == [Warn, Info, LogCompletion] and "asking again" in events[0].text
+        first, second = server.calls[0][1], server.calls[1][1]
+        assert first.temperature == 0.0 and second.temperature == 0.3
+        assert second.messages[-1]["content"] == first.messages[-1]["content"] + RETRY_NUDGE
+        assert new_state.pending.since_last_summary()[0].assistant == CHECKPOINT_PREFIX + "second try"
+        assert events[2].request is second                        # the log records the request that was answered
+
+    def test_twice_nothing_folds_with_the_calls_digest(self, make_state):
+        from desh_chat.display import Warn
+        from desh_chat.state import CHECKPOINT_PREFIX
+        server = FakeServer(script=[{"content": ""}, {"content": "  "}])
+        state = mid_turn(with_server(make_state, server), "hi", rounds=3)
+        new_state, events = CompactPendingTurn().execute(state)
+        assert [type(e) for e in events] == [Warn, Warn, Info, LogCompletion] and "digest" in events[1].text
         checkpoint = new_state.pending.since_last_summary()[0]
         assert checkpoint.summary and checkpoint.assistant == CHECKPOINT_PREFIX + "round 1: Read\nround 2: Read"
         assert checkpoint.tokens > 0          # priced by estimate, not by the empty completion
 
-    def test_a_second_empty_checkpoint_keeps_the_first_ones_text(self, make_state):
+    def test_the_digest_keeps_the_earlier_checkpoints_text(self, make_state):
         from dataclasses import replace
-        server = FakeServer(script=[{"content": "what I know so far"}, {"content": "   "}])
+        server = FakeServer(script=[{"content": "what I know so far"}, {"content": ""}, {"content": ""}])
         state = mid_turn(with_server(make_state, server), "hi", rounds=3)
         state, _ = CompactPendingTurn().execute(state)                       # a real checkpoint over rounds 1, 2
         pend = state.pending
         for n in (4, 5):
             pend = pend.add_round(tool_round(n))
-        state, events = CompactPendingTurn().execute(replace(state, pending=pend))     # folds (checkpoint, 3, 4); model says nothing
+        state, events = CompactPendingTurn().execute(replace(state, pending=pend))     # folds (checkpoint, 3, 4); model says nothing twice
         text = state.pending.since_last_summary()[0].assistant
         assert text.endswith("what I know so far\nround 3: Read\nround 4: Read")   # numbered as the model counts them
-        assert "returned no checkpoint" in events[0].text
+        assert "EARLIER CHECKPOINT: what I know so far" in server.calls[1][1].messages[-1]["content"]   # how the summariser saw it
 
-    def test_an_empty_history_summary_folds_with_the_turns_digest(self, make_state):
+    def test_an_empty_history_summary_is_asked_again_then_digested(self, make_state):
         from desh_chat.display import Warn
-        server = FakeServer(script=[{"content": ""}])
+        server = FakeServer(script=[{"content": ""}, {"content": ""}])
         history = ChatHistory().compact("earlier", tokens=20).append(Turn("q1", "a1", rounds=(tool_round(1),), tokens=30))
-        state = with_server(make_state, server, history=history)
-        new_state, events = CompactHistory().execute(state)
-        assert type(events[0]) is Warn and "returned no summary" in events[0].text
+        new_state, events = CompactHistory().execute(with_server(make_state, server, history=history))
+        assert [type(e) for e in events[:2]] == [Warn, Warn] and "asking again" in events[0].text and "digest" in events[1].text
         summary = new_state.history.turns[-1]
         assert summary.summary and summary.user == ChatHistory.SUMMARY_PREFIX + "earlier\nUSER: q1\nASSISTANT: a1"
         assert summary.tokens > 0

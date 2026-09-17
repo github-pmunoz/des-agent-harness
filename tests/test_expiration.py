@@ -280,7 +280,7 @@ class TestCheckpoint:
         assert [r.assistant for r in view] == [CHECKPOINT_PREFIX + "two", "round 5"]
         assert sum(1 for r in p.rounds if r.summary) == 2
         transcript = checkpointed(2, 3).transcript(checkpointed(2, 3).since_last_summary()[:-1])
-        assert f"USER: {CHECKPOINT_PREFIX}c" in transcript and "round 4" in transcript and "round 5" not in transcript
+        assert "EARLIER CHECKPOINT: c" in transcript and "round 4" in transcript and "round 5" not in transcript
 
     def test_compact_needs_two_model_rounds_in_the_view(self):
         import pytest
@@ -330,7 +330,7 @@ class TestCheckpoint:
         turn = pending(3).compact("c", tokens=100).finish("done", tokens=0, cancelled=False)
         assert len(turn.rounds) == 4
         assert [m["role"] for m in turn.messages()] == ["user", "user", "assistant", "tool", "assistant"]
-        assert "round 1" not in turn.transcript() and f"USER: {CHECKPOINT_PREFIX}c" in turn.transcript()
+        assert "round 1" not in turn.transcript() and "EARLIER CHECKPOINT: c" in turn.transcript()
         assert Round.from_dict(turn.rounds[2].to_dict()) == turn.rounds[2]       # the flag round-trips
 
 
@@ -432,7 +432,7 @@ class TestTranscriptFit:
 
     def test_a_checkpoint_in_the_transcript_is_fixed(self):
         p = checkpointed(2, 3)                                  # view: checkpoint, 3, 4, 5
-        want = "[2 earlier rounds left out of this transcript]\nUSER: q\nUSER: " + CHECKPOINT_PREFIX + "c"
+        want = "[2 earlier rounds left out of this transcript]\nUSER: q\nEARLIER CHECKPOINT: c"
         assert p.transcript(p.since_last_summary()[:-1], expire_after=1, budget_tokens=estimate_result_tokens(want) + 1) == want
 
     def test_the_history_transcript_stubs_rounds_and_reduces_oldest_turns_first(self):

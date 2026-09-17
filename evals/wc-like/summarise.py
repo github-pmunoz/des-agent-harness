@@ -31,6 +31,7 @@ METRICS = (
     ("turns", ("stats", "turns")),
     ("compactions", ("stats", "compactions")),
     ("checkpoints", ("stats", "checkpoints")),
+    ("summary_retries", ("stats", "summary_retries")),
     ("fallback_summaries", ("stats", "fallback_summaries")),
     ("cut_results", ("stats", "cut_results")),
     ("offset_reads", ("stats", "offset_reads")),

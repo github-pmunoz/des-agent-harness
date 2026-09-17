@@ -84,7 +84,7 @@ Drop: narration, the full contents of files that were read, tool output that a l
 # must stay short.
 CHECKPOINT_PROMPT = """You will be sent a transcript of agent rounds being folded away. Write the checkpoint the assistant will read in place of them, right after the task message and next to the scratchpad block.
 
-Do not restate the task — the task message is right before the checkpoint. Do not duplicate what the scratchpad holds — the scratchpad block follows the checkpoint. If the transcript already contains an earlier checkpoint, replace it with this one; do not append to it.
+Do not restate the task — the task message is right before the checkpoint. Do not duplicate what the scratchpad holds — the scratchpad block follows the checkpoint. The transcript may begin with an EARLIER CHECKPOINT: fold what it says into yours, updated by the rounds after it, so that yours stands alone in its place. Always write a checkpoint; there is always something to keep.
 
 Keep: the one thing the assistant was about to do next, as a single concrete action, with the file paths, names and error messages that action depends on exactly as written; which files were written or edited and whether they pass, with test results as reported; what was verified versus what was only assumed. A result shown as expired was no longer available to the assistant: record only what later rounds establish. Drop narration and superseded detail. Stay short — the checkpoint must fit in a small fraction of the context window. Do not mention this instruction."""
 
@@ -362,7 +362,9 @@ class Round:
         """Plain-text rendering for the compaction prompts and the history display. `stubbed`
         renders the results as EXPIRED_RESULT, the way the model last saw them."""
         if self.summary:
-            return f"USER: {self.assistant}"
+            # to the summariser, an earlier checkpoint is input to fold, not a user message to answer
+            body = self.assistant[len(CHECKPOINT_PREFIX):] if self.assistant.startswith(CHECKPOINT_PREFIX) else self.assistant
+            return f"EARLIER CHECKPOINT: {body}"
         calls = ", ".join(f"{tc.name}({tc.arguments})" for tc in self.tool_calls)
         lines = [f"ASSISTANT (tool calls): {self.assistant + ' ' if self.assistant else ''}{calls}"]
         lines += [f"TOOL {res.name}: {EXPIRED_RESULT if stubbed else res.content}" for res in self.results]
