@@ -153,6 +153,24 @@ class TestTools:
         assert "scratchpad" in content and "created" not in content
 
 
+class TestFold:
+    def test_the_echoed_write_keeps_key_and_kind_and_replaces_the_value_by_its_size(self):
+        folded = pad_tools.fold_write({"key": "task", "kind": "fact", "value": "x" * 541})
+        assert folded["key"] == "task" and folded["kind"] == "fact"
+        assert "541" in folded["value"] and len(folded["value"]) < 60
+        assert pad_tools.fold_write({"key": "k"}) == {"key": "k"}     # a rejected call has nothing to fold
+
+    def test_the_round_echoes_the_fold_after_the_call_ran(self, make_state):
+        """The value is in the block that ends the request: the round's copy is the fold."""
+        tools = ToolRegistry().add(pad_tools.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, fold=pad_tools.fold_write)
+        tc = call("scratchpad_write", key="k", kind="todo", value="v" * 300)
+        state = make_state(pending=PendingTurn("q").add_round(Round("", (tc,))), tools=tools, scratchpad=Scratchpad())
+        new_state, _ = ExecuteToolCalls(index=0).execute(state)
+        assert new_state.scratchpad == Scratchpad().with_entry("k", "todo", "v" * 300)
+        echoed = json.loads(new_state.pending.rounds[-1].tool_calls[0].arguments)
+        assert echoed["key"] == "k" and echoed["kind"] == "todo" and "300" in echoed["value"] and "vvv" not in echoed["value"]
+
+
 # ---------------------
 # ExecuteToolCalls: the call becomes a state transition
 # ---------------------

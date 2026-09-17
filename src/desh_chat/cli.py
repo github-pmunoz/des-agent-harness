@@ -58,7 +58,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
                           .add(ws.write, name="Write", fold=fold_written, target="file_path")
                           .add(ws.edit, name="Edit", preview=edit_preview, fold=fold_edited, target="file_path")
                           .add(ws.bash, name="Bash", identity=("command",), target="command")
-                          .add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, target="key")
+                          .add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, fold=scratchpad.fold_write, target="key")
                           .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False, target="key")
                           .add(scratchpad.clear, name="scratchpad_clear", inject=("scratchpad",), confirm=False))
         delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
@@ -66,8 +66,9 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         # the parent's CURRENT settings travel with every call; the child derives its own from them
         tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief, target="task")
     if args.scratchpad:
-        # the working memory itself lives on ChatState; the tools only get a dict for the call
-        tools = (tools.add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, target="key")
+        # the working memory itself lives on ChatState; the tools only get a dict for the call. A
+        # write's value is folded out of the round once it ran: the block shows it.
+        tools = (tools.add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, fold=scratchpad.fold_write, target="key")
                       .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False, target="key")
                       .add(scratchpad.clear, name="scratchpad_clear", inject=("scratchpad",), confirm=False))
     return tools

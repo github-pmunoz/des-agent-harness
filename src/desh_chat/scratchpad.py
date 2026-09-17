@@ -46,6 +46,15 @@ def write(key: str, kind: Kind, value: str, scratchpad: dict[str, dict]) -> str:
     old = before.get("kind") if isinstance(before, dict) else "fact"
     return f"overwrote {key!r} ({old} -> {kind})" if old != kind else f"overwrote {key!r} ({kind})"
 
+def fold_write(args: dict) -> dict:
+    """The echoed form of an answered scratchpad_write (Tool.fold): key and kind, the value
+    replaced by its size. Once the call ran, the value is in the block that ends every request;
+    echoing it in the round as well carried the same text twice, and at 4k that was an overflow."""
+    value = args.get("value")
+    if not isinstance(value, str):
+        return args
+    return {**args, "value": f"[{len(value)} characters, shown in the scratchpad block]"}
+
 def delete(key: str, scratchpad: dict[str, dict]) -> str:
     """Delete a value from the scratchpad
 
