@@ -739,12 +739,22 @@ class TestEmptySummaryFallback:
         server = FakeServer(script=[{"content": ""}, {"content": "second try"}])
         state = mid_turn(with_server(make_state, server), "hi", rounds=3)
         new_state, events = CompactPendingTurn().execute(state)
-        assert [type(e) for e in events] == [Warn, Info, LogCompletion] and "asking again" in events[0].text
+        assert [type(e) for e in events] == [Warn, Info, LogCompletion, LogCompletion] and "asking again" in events[0].text
         first, second = server.calls[0][1], server.calls[1][1]
-        assert first.temperature == 0.0 and second.temperature == 0.3
+        assert first.temperature == second.temperature == 0.0    # temperature was not the cause (replayed: 1 of 8); the wording is
         assert second.messages[-1]["content"] == first.messages[-1]["content"] + RETRY_NUDGE
         assert new_state.pending.since_last_summary()[0].assistant == CHECKPOINT_PREFIX + "second try"
-        assert events[2].request is second                        # the log records the request that was answered
+        assert [e.request for e in events[2:]] == [first, second]   # every attempt is logged, the empty one included
+
+    def test_a_summary_request_never_ends_with_the_transcript(self, make_state):
+        """A model reading raw tool output up to the last token takes it for the end of a document
+        and stops: the user message closes with the instruction to write."""
+        from desh_chat.events import CHECKPOINT_CLOSE, SUMMARY_CLOSE
+        server = FakeServer(script=[{"content": "c"}, {"content": "s"}])
+        CompactPendingTurn().execute(mid_turn(with_server(make_state, server), "hi", rounds=3))
+        assert server.calls[0][1].messages[-1]["content"].endswith(CHECKPOINT_CLOSE)
+        CompactHistory().execute(with_server(make_state, server, history=ChatHistory().append(Turn("q", "a", tokens=50))))
+        assert server.calls[1][1].messages[-1]["content"].endswith(SUMMARY_CLOSE)
 
     def test_twice_nothing_folds_with_the_calls_digest(self, make_state):
         from desh_chat.display import Warn
@@ -752,7 +762,7 @@ class TestEmptySummaryFallback:
         server = FakeServer(script=[{"content": ""}, {"content": "  "}])
         state = mid_turn(with_server(make_state, server), "hi", rounds=3)
         new_state, events = CompactPendingTurn().execute(state)
-        assert [type(e) for e in events] == [Warn, Warn, Info, LogCompletion] and "digest" in events[1].text
+        assert [type(e) for e in events] == [Warn, Warn, Info, LogCompletion, LogCompletion] and "digest" in events[1].text
         checkpoint = new_state.pending.since_last_summary()[0]
         assert checkpoint.summary and checkpoint.assistant == CHECKPOINT_PREFIX + "round 1: Read\nround 2: Read"
         assert checkpoint.tokens > 0          # priced by estimate, not by the empty completion

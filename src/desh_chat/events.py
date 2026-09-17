@@ -365,24 +365,31 @@ TRANSCRIPT_LEAD = "Conversation transcript:\n"
 TRANSCRIPT_MARGIN = 64      # tokens kept free in a compaction request for template overhead and estimate error
 
 
-RETRY_NUDGE = "\n\nWrite the summary now. An empty reply is not an answer."
+# The user message of a summary request must not END with the transcript: a model reading raw
+# tool output up to the last token takes it for the end of a document and stops at once
+# (replayed: 0 of 8 such requests answered at temperature 0, 0.1 or 0.3; 8 of 8 with a closing
+# line). So the transcript is followed by the instruction to write, and an empty answer is
+# asked once more with a firmer one.
+SUMMARY_CLOSE = "\n\nWrite the summary now."
+CHECKPOINT_CLOSE = "\n\nWrite the checkpoint now."
+RETRY_NUDGE = "\n\nAn empty reply is not an answer: write it now."
 
 
-def complete_summary(state: ChatState, req: Request) -> tuple[Request, Completion, str, list[Event]]:
-    """One summary request, asked a second time with a nudge and a little temperature when the
-    model answers with nothing — seen at temperature 0 in about a quarter of the checkpoint
-    requests whose transcript began with an earlier checkpoint. Returns the request actually
-    answered (for the log), its completion, the text, and the notes for the log."""
+def complete_summary(state: ChatState, req: Request) -> tuple[list[tuple[Request, Completion]], str, list[Event]]:
+    """One summary request, asked a second time with a nudge when the model answers with nothing.
+    Returns every attempt (request, completion) for the log, the text, and the notes for the log."""
     completion = state.inference.server.complete(req)
+    attempts = [(req, completion)]
     summary = completion.content.strip()
     notes: list[Event] = []
     if not summary:
         notes.append(Warn("The model returned no summary; asking again."))
         last = req.messages[-1]
-        req = replace(req, messages=req.messages[:-1] + [{**last, "content": last["content"] + RETRY_NUDGE}], temperature=0.3)
+        req = replace(req, messages=req.messages[:-1] + [{**last, "content": last["content"] + RETRY_NUDGE}])
         completion = state.inference.server.complete(req)
+        attempts.append((req, completion))
         summary = completion.content.strip()
-    return req, completion, summary, notes
+    return attempts, summary, notes
 
 
 def transcript_budget(context: int, instruction: str, target_tokens: int) -> int:
@@ -409,14 +416,15 @@ class CompactHistory(Event):
             print(c_out(Palette.WARNING, f"Compaction is tight on room ({gen_budget} tokens computed, context={s.context}) — forcing {s.min_compaction_tokens} and the summary may come out truncated."))
             gen_budget = s.min_compaction_tokens
         req = Request(
-            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"{TRANSCRIPT_LEAD}{transcript}" }],
+            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"{TRANSCRIPT_LEAD}{transcript}{SUMMARY_CLOSE}" }],
             model=state.settings.model,
             temperature=0.0,
             max_tokens=gen_budget,
             think=False,
             stream=False
         )
-        req, completion, summary, notes = complete_summary(state, req)
+        attempts, summary, notes = complete_summary(state, req)
+        completion = attempts[-1][1]
         digested = not summary
         if digested:
             # Twice nothing: the window must not fold into nothing, so the digest stands in.
@@ -427,9 +435,8 @@ class CompactHistory(Event):
         summary_tokens = 0
         if not digested and completion.usage and completion.usage.get("completion_tokens"):
             summary_tokens = completion.usage["completion_tokens"] + estimate_tokens(ChatHistory.SUMMARY_PREFIX + ChatHistory.SUMMARY_ACK)
-        return replace(state, history=state.history.compact(summary, tokens=summary_tokens)), notes + [
-            Info(f"{summary}"),
-            LogCompletion(request=req, completion=completion, port=state.inference.port)] + persist(state)
+        return replace(state, history=state.history.compact(summary, tokens=summary_tokens)), notes + [Info(f"{summary}")] + [
+            LogCompletion(request=r, completion=c, port=state.inference.port) for r, c in attempts] + persist(state)
 
 
 @dataclass(frozen=True)
@@ -453,14 +460,15 @@ class CompactPendingTurn(Event):
             print(c_out(Palette.WARNING, f"Checkpoint is tight on room ({gen_budget} tokens computed, context={s.context}) — forcing {s.min_compaction_tokens} and the summary may come out truncated."))
             gen_budget = s.min_compaction_tokens
         req = Request(
-            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"{TRANSCRIPT_LEAD}{transcript}"}],
+            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"{TRANSCRIPT_LEAD}{transcript}{CHECKPOINT_CLOSE}"}],
             model=s.model,
             temperature=0.0,
             max_tokens=gen_budget,
             think=False,
             stream=False
         )
-        req, completion, summary, notes = complete_summary(state, req)
+        attempts, summary, notes = complete_summary(state, req)
+        completion = attempts[-1][1]
         digested = not summary
         if digested:
             # Same guard as CompactHistory: the digest keeps the previous checkpoint and names what
@@ -471,9 +479,8 @@ class CompactPendingTurn(Event):
         summary_tokens = 0
         if not digested and completion.usage and completion.usage.get("completion_tokens"):
             summary_tokens = completion.usage["completion_tokens"] + estimate_tokens(CHECKPOINT_PREFIX)
-        return replace(state, pending=pending.compact(summary, tokens=summary_tokens)), notes + [
-            Info(f"{summary}"),
-            LogCompletion(request=req, completion=completion, port=state.inference.port)]
+        return replace(state, pending=pending.compact(summary, tokens=summary_tokens)), notes + [Info(f"{summary}")] + [
+            LogCompletion(request=r, completion=c, port=state.inference.port) for r, c in attempts]
 
 
 @dataclass(frozen=True)
