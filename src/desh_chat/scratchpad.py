@@ -13,9 +13,10 @@ Kind = Literal["todo", "done", "fact", "hypothesis", "block"]
 # round cap and re-gathering everything in the continuation. Formatted with the run's settings.
 SCRATCHPAD_SYSTEM_PROMPT = (
     "How your context works. Each reply of yours that calls tools is a round; the results come back "
-    "in the next request. A turn allows at most {max_tool_rounds} rounds. At the cap the turn ends, and "
-    "if the task is unfinished you are asked to continue in a new turn in which EVERY tool result of "
-    "the previous turn has been replaced by an expired stub. Within a turn, a tool result stays visible "
+    "in the next request. A turn allows at most {max_tool_rounds} rounds. At the cap the turn ends: the "
+    "scratchpad calls of that reply still run, its other calls do not. If the task is unfinished you are "
+    "asked to continue in a new turn in which EVERY tool result of the previous turn has been replaced "
+    "by an expired stub. Within a turn, a tool result stays visible "
     "for {tool_expiration} rounds and is then replaced by the same stub. The <scratchpad> block at the "
     "end of every request is the only working memory that survives both: it shows which round you are "
     "on and names the results that expire next. Use scratchpad_write for whatever you will still need "

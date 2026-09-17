@@ -28,6 +28,9 @@ from desh_chat.events import (
     StreamCompletion, TurnEnd, TurnStart,
 )
 from desh_chat.session import LoadSession, SaveSession
+from desh_chat import scratchpad as pad_tools
+from desh_chat.scratchpad import Scratchpad
+from desh.tools import ToolRegistry
 from desh_chat.state import EXPIRED_RESULT, ChatHistory, Deadline, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn
 
 
@@ -222,6 +225,55 @@ class TestAppendRound:
         assert isinstance(events[1], TurnEnd)
         assert events[1].assistant == "one more?" and events[1].tokens == 10 and events[1].cancelled is False
         assert events[1].stop == "cap"                          # recorded on the Turn, so a reader need not count rounds
+
+
+class TestAppendRoundCapScratchpad:
+    """At the cap the round is refused, except for its scratchpad calls: they are the persistence
+    the cap message asks for and touch nothing but the working memory, so they run, in order,
+    before the turn ends. The round is still not recorded; TurnEnd snapshots the value."""
+    PAD_TOOLS = (ToolRegistry()
+                 .add(pad_tools.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, target="key")
+                 .add(pad_tools.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False, target="key"))
+    CAPPED = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, max_tool_rounds=1)
+
+    def capped_state(self, make_state, scratchpad=Scratchpad()):
+        pending = PendingTurn("q").add_round(Round("", (WEATHER,), (result(WEATHER),), tokens=30))
+        return make_state(settings=self.CAPPED, pending=pending, tools=self.PAD_TOOLS, scratchpad=scratchpad)
+
+    def test_the_scratchpad_calls_run_and_the_others_are_named_as_not_run(self, make_state):
+        state = self.capped_state(make_state)
+        write = call(0, name="scratchpad_write", arguments='{"key": "next", "kind": "todo", "value": "run the tests"}')
+        new_state, events = AppendRound(assistant="so far", tool_calls=(write, TIME), tokens=10).execute(state)
+        assert new_state.scratchpad == Scratchpad().with_entry("next", "todo", "run the tests")
+        assert new_state.pending == state.pending                 # the capped round is not recorded
+        assert isinstance(events[0], Warn) and "get_time not run" in events[0].text and "scratchpad_write" not in events[0].text
+        assert isinstance(events[1], Info) and "scratchpad_write next" in events[1].text
+        assert isinstance(events[2], TurnEnd) and events[2].stop == "cap"
+        ended, _ = events[2].execute(new_state)
+        assert ended.history.turns[-1].scratchpad == new_state.scratchpad     # the snapshot carries it
+
+    def test_a_round_of_scratchpad_calls_only_names_nothing_as_not_run(self, make_state):
+        state = self.capped_state(make_state)
+        write = call(0, name="scratchpad_write", arguments='{"key": "k", "kind": "fact", "value": "v"}')
+        new_state, events = AppendRound(assistant="", tool_calls=(write,), tokens=10).execute(state)
+        assert new_state.scratchpad == Scratchpad().with_entry("k", "fact", "v")
+        assert isinstance(events[0], Warn) and "not run" not in events[0].text and "scratchpad_write k" in events[0].text
+        assert isinstance(events[1], TurnEnd) and events[1].stop == "cap"
+
+    def test_the_calls_run_in_order(self, make_state):
+        state = self.capped_state(make_state, Scratchpad().with_entry("old", "fact", "1"))
+        write = call(0, name="scratchpad_write", arguments='{"key": "k", "kind": "fact", "value": "v"}')
+        delete = call(1, name="scratchpad_delete", arguments='{"key": "k"}')
+        new_state, _ = AppendRound(assistant="", tool_calls=(write, delete), tokens=10).execute(state)
+        assert new_state.scratchpad == Scratchpad().with_entry("old", "fact", "1")
+
+    def test_without_a_working_memory_the_call_is_left_unrun(self, make_state):
+        state = self.capped_state(make_state, scratchpad=None)
+        write = call(0, name="scratchpad_write", arguments='{"key": "k", "kind": "fact", "value": "v"}')
+        new_state, events = AppendRound(assistant="", tool_calls=(write,), tokens=10).execute(state)
+        assert new_state.scratchpad is None
+        assert isinstance(events[0], Warn) and "scratchpad_write not run" in events[0].text
+        assert isinstance(events[1], TurnEnd)
 
 
 class TestAppendRoundDeadline:

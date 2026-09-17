@@ -332,6 +332,10 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
         "compactions": sum(1 for e in des_log if e.get("event") == "CompactHistory"),
         "checkpoints": sum(1 for e in des_log if e.get("event") == "CompactPendingTurn"),
         "calls_not_run": calls_not_run(des_log),
+        # scratchpad calls of a round that hit the cap: run before the turn ended, named in an Info or the Warn
+        "cap_scratchpad_calls": sum(len(re.findall(r"scratchpad_\w+", str(e.get("payload", ""))))
+                                    for e in des_log if e.get("event") in ("Info", "Warn")
+                                    and ("at the round cap" in str(e.get("payload", "")) or "only the scratchpad calls ran" in str(e.get("payload", "")))),
         # compactions the model first answered with nothing (asked again), and those folded with the harness's digest after two
         "summary_retries": sum(1 for e in des_log if e.get("event") == "Warn" and "asking again" in str(e.get("payload", ""))),
         "fallback_summaries": sum(1 for e in des_log if e.get("event") == "Warn" and "digest" in str(e.get("payload", ""))),

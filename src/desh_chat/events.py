@@ -235,8 +235,20 @@ class AppendRound(Event):
         if state.pending.non_summary_rounds() >= state.settings.max_tool_rounds:
             # This event only knows the cap was hit and the calls were not run. Whether the turn is
             # over or a checkpoint is the idle event's business (Continue says so when it goes on).
-            return state, [Warn(f"Tool-call round cap reached ({state.settings.max_tool_rounds}); {names} not run."),
-                           TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False, stop="cap")]
+            # The round's scratchpad calls are the exception: they are the persistence the cap
+            # message asks for, side-effect free on the workspace, so they run before the turn
+            # ends. The round itself is still not recorded — its acks would be read by nobody; the
+            # next turn's block shows the entries — and TurnEnd snapshots the value onto the Turn.
+            state, kept, rest = run_scratchpad_calls(state, self.tool_calls)
+            cap = state.settings.max_tool_rounds
+            shown: list[Event] = []
+            if rest:
+                shown.append(Warn(f"Tool-call round cap reached ({cap}); {', '.join(tc.name for tc in rest)} not run."))
+                if kept:
+                    shown.append(Info("Ran at the round cap: " + ", ".join(kept)))
+            else:
+                shown.append(Warn(f"Tool-call round cap reached ({cap}); only the scratchpad calls ran: {', '.join(kept)}."))
+            return state, shown + [TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False, stop="cap")]
 
         # A model that asks for the same calls a third time, having twice seen the same results, is
         # looping: the third round is not recorded and the turn ends the way the round cap ends it.
@@ -342,23 +354,9 @@ class ExecuteToolCalls(Event):
                      DisplayStats(colour=Palette.TOOL_STATS),
                      NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
-        # What the harness supplies to tools that declared it (Tool.inject):
-        # - the settings, so a subagent inherits the parent's CURRENT settings, not the ones captured when the registry
-        # was built
-        # - the deadline, so a subagent stops when the run that spawned it must
-        # - the scratchpad as a dict built from the state value for this one call.
-        provided: dict[str, Any] = {"settings": state.settings, "deadline": state.deadline}
-        if state.scratchpad is not None:
-            provided["scratchpad"] = state.scratchpad.to_dict()
-        result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments, **provided))
+        content, scratchpad = run_call(state, tc)
+        result = ToolResult(tc.id, tc.name, content)
         pending = state.pending.add_results(result)
-
-        # A tool that asked for the scratchpad may have changed it: the dict it wrote to is read
-        # back into a value here, the only place a call becomes a state transition. Nothing mutable
-        # survives the step, so a step the engine rolls back leaves the working memory untouched.
-        scratchpad = state.scratchpad
-        if tool is not None and "scratchpad" in tool.inject and scratchpad is not None:
-            scratchpad = Scratchpad.from_dict(provided["scratchpad"])
 
         # The call ran with its full arguments; what the round echoes back from now on is the tool's
         # folded form of them (a delegate brief shrinks to its head once the answer supersedes it).
@@ -371,6 +369,45 @@ class ExecuteToolCalls(Event):
                 [Info(shorten(result.content), colour=Palette.TOOL_RESULT),
                  DisplayStats(colour=Palette.TOOL_STATS),
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])
+
+
+def run_call(state: ChatState, tc: ToolCall) -> tuple[str, Scratchpad | None]:
+    """Run one call through the registry: the text that answers it, and the scratchpad value after
+    it. What the harness supplies to tools that declared it (Tool.inject):
+    - the settings, so a subagent inherits the parent's CURRENT settings, not the ones captured
+      when the registry was built
+    - the deadline, so a subagent stops when the run that spawned it must
+    - the scratchpad as a dict built from the state value for this one call.
+    A tool that asked for the scratchpad may have changed it: the dict it wrote to is read back
+    into a value here, the one way a call becomes a state transition. Nothing mutable survives
+    the step, so a step the engine rolls back leaves the working memory untouched."""
+    tool = state.tools.get(tc.name)
+    provided: dict[str, Any] = {"settings": state.settings, "deadline": state.deadline}
+    if state.scratchpad is not None:
+        provided["scratchpad"] = state.scratchpad.to_dict()
+    content = state.tools.invoke(tc.name, tc.arguments, **provided)
+    scratchpad = state.scratchpad
+    if tool is not None and "scratchpad" in tool.inject and scratchpad is not None:
+        scratchpad = Scratchpad.from_dict(provided["scratchpad"])
+    return content, scratchpad
+
+
+def run_scratchpad_calls(state: ChatState, calls: tuple[ToolCall, ...]) -> tuple[ChatState, list[str], list[ToolCall]]:
+    """Run the calls that only touch the scratchpad, in order, and return the state after them,
+    a mention of each one that ran (name and key), and the calls left unrun. A scratchpad tool is
+    one that declared the injection; without a working memory on the state, its calls are left
+    unrun like any other, rather than answered with an error nobody reads."""
+    kept: list[str] = []
+    rest: list[ToolCall] = []
+    for tc in calls:
+        tool = state.tools.get(tc.name)
+        if tool is None or "scratchpad" not in tool.inject or state.scratchpad is None:
+            rest.append(tc)
+            continue
+        _, scratchpad = run_call(state, tc)
+        state = replace(state, scratchpad=scratchpad)
+        kept.append(f"{tc.name} {state.tools.target(tc.name, tc.arguments)}".strip())
+    return state, kept, rest
 
 
 def folded_arguments(tool: Tool, arguments: str) -> str:
