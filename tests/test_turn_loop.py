@@ -150,8 +150,8 @@ class TestTurnSerialization:
         assert back == turn
         assert isinstance(back.rounds, tuple) and isinstance(back.rounds[0].tool_calls, tuple)
 
-    def test_history_writes_format_4_and_still_reads_formats_1_and_2(self):
-        assert ChatHistory().to_dict()["version"] == 4
+    def test_history_writes_the_current_format_and_still_reads_formats_1_and_2(self):
+        assert ChatHistory().to_dict()["version"] == ChatHistory.SESSION_FORMAT == 5
         v1 = {"version": 1, "turns": [{"user": "q", "assistant": "a", "tokens": 5}]}
         assert ChatHistory.from_dict(v1).turns == (Turn("q", "a", tokens=5),)
         v2 = {"version": 2, "turns": [{"user": "q", "assistant": "a", "tokens": 5, "rounds": [ROUND.to_dict()]}]}

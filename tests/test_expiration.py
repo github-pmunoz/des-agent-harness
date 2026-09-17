@@ -169,7 +169,7 @@ class TestRequest:
         assert results_in(ev.request.messages) == [EXPIRED_RESULT, EXPIRED_RESULT, "result 3", "result 4"]
 
     def test_the_expiring_line_is_in_the_scratchpad_block(self, make_state):
-        ev = self.stream_event(make_state, pending(4), k=2, scratchpad=Scratchpad().with_entry("k", "v"))
+        ev = self.stream_event(make_state, pending(4), k=2, scratchpad=Scratchpad().with_entry("k", "fact", "v"))
         block = ev.request.messages[-1]["content"]
         assert block.startswith("<scratchpad>") and "Expiring next round" in block and "round 3: Read" in block
         assert not any("Expiring" in m["content"] for m in ev.request.messages[:-1])

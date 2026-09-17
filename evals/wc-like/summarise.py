@@ -37,6 +37,7 @@ METRICS = (
     ("rereads_refused", ("stats", "rereads_refused")),
     ("offset_reads", ("stats", "offset_reads")),
     ("spill_reads", ("stats", "spill_reads")),
+    ("scratchpad_writes", ("stats", "scratchpad_writes")),
     ("first_green_round", ("stats", "first_green_round")),
 )
 

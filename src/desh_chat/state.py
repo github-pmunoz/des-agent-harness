@@ -648,8 +648,8 @@ class Turn:
 class ChatHistory:
     turns: tuple[Turn, ...] = ()
 
-    SESSION_FORMAT = 4              # written
-    SESSION_FORMATS = (1, 2, 3, 4)  # readable: 1 = plain turns only; 2 = turns may carry tool rounds; 3 = turns may carry a scratchpad; 4 = the document carries the settings, and turns may be settings turns
+    SESSION_FORMAT = 5                 # written
+    SESSION_FORMATS = (1, 2, 3, 4, 5)  # readable: 1 = plain turns only; 2 = turns may carry tool rounds; 3 = turns may carry a scratchpad; 4 = the document carries the settings, and turns may be settings turns; 5 = scratchpad entries carry a kind (a format-4 string entry loads as a fact)
 
     def last_scratchpad(self) -> Scratchpad | None:
         """The working memory as it stood at the end of the newest turn that recorded one; None

@@ -290,6 +290,7 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
     timings = [((r.get("response") or {}).get("timings") or {}) for r in completions]
     tools = {}
     offset_reads = spill_reads = 0      # did the model follow a cut's pointer: a Read by range, a Read of a Bash spill
+    kinds: dict[str, int] = {}          # what the model wrote to the scratchpad, by kind
     for r in completions:
         for call in tool_calls_of(r):
             tools[call["name"]] = tools.get(call["name"], 0) + 1
@@ -297,6 +298,9 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
                 args = call["args"]
                 offset_reads += int((args.get("offset") or 1) > 1)
                 spill_reads += int(str(args.get("file_path", "")).startswith(SPILL_DIR))
+            if call["name"] == "scratchpad_write":
+                kind = str(call["args"].get("kind"))
+                kinds[kind] = kinds.get(kind, 0) + 1
     finish = {}
     for r in completions:
         reason = (((r.get("response") or {}).get("choices") or [{}])[0]).get("finish_reason")
@@ -311,6 +315,8 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
         "tool_mix": tools,
         "offset_reads": offset_reads,
         "spill_reads": spill_reads,
+        "scratchpad_writes": sum(kinds.values()),
+        "scratchpad_kinds": kinds,
         "finish_reasons": finish,
         "prompt_tokens": sum(u.get("prompt_tokens", 0) for u in usage),
         "prompt_tokens_cached": sum(t.get("cache_n", 0) for t in timings),
@@ -381,6 +387,7 @@ def summary(r: dict) -> str:
         f" stop={s['stop']!r} final answer: {s['final_answer']}",
         f"  {s['completions']} completions, {s['tool_calls']} tool calls {s['tool_mix']}   not run: {s['calls_not_run']}",
         f"  cut results {s['cut_results']}, reads by offset {s['offset_reads']}, reads of a spill {s['spill_reads']}",
+        f"  scratchpad writes {s['scratchpad_writes']} {s['scratchpad_kinds']}",
         f"  tokens: prompt {s['prompt_tokens']} (cached {s['prompt_tokens_cached']}, peak {s['prompt_tokens_peak']}),"
         f" completion {s['completion_tokens']}",
         f"  time: wall {s['wall_ms']} ms, prompt {s['prompt_ms']} ms, generation {s['generation_ms']} ms,"

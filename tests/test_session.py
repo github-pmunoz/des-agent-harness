@@ -13,6 +13,7 @@ from desh_chat.display import Error, Info, Warn
 from desh_chat.events import CompactHistory, TurnEnd
 from desh_chat.session import LoadSession, SaveSession
 from desh_chat.state import COMPACTION_PROMPT, ChatHistory, InferenceEngine, PendingTurn, Settings, Turn
+from desh_chat.scratchpad import Scratchpad
 
 
 def with_server(make_state, server, **overrides):
@@ -171,6 +172,14 @@ class TestLoadSession:
         new_state, _ = LoadSession().execute(state)
         assert new_state.history == sample_history()
         assert new_state.settings == state.settings
+
+    def test_a_v4_scratchpad_of_plain_strings_loads_as_facts(self, make_state, tmp_path):
+        # a format-4 turn stores the scratchpad as {key: value}; format 5 stores {key: {kind, value}}
+        path = tmp_path / "s.json"
+        turns = [{"user": "q", "assistant": "a", "tokens": 1, "scratchpad": {"path": "src/x.py"}}]
+        path.write_text(json.dumps({"version": 4, "turns": turns}))
+        new_state, _ = LoadSession().execute(make_state(session_file=str(path), scratchpad=Scratchpad()))
+        assert new_state.scratchpad == Scratchpad().with_entry("path", "fact", "src/x.py")
 
     def test_load_restores_settings_from_a_v4_document(self, make_state, tmp_path):
         doc_settings = Settings(model="model-b", temperature=0.9, think=True, context=8192,
