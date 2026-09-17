@@ -455,3 +455,84 @@ class TestFullLoop:
         restored, _ = LoadSession().execute(make_state(session_file=path))
         assert restored.history == final.history
         assert restored.history.turns[0].rounds[0].tool_calls[0].name == "get_weather"
+
+
+# ---------------------
+# The re-read guard: a loop of any period
+# ---------------------
+
+class TestRereadGuard:
+    """A read-only call answered twice this turn, with nothing written, edited or run since, is
+    answered a third time with a notice instead of running. The two-round repeat guard sees a
+    loop of period one; this one sees a model cycling through the same reads whatever the period
+    (at 4k: two 30-round turns of the same three reads, re-read after every checkpoint)."""
+
+    def registry(self):
+        from desh.tools import ToolRegistry
+        seen = []
+        def read(file_path: str, offset: int = 1) -> str:
+            seen.append((file_path, offset)); return f"contents of {file_path}@{offset}"
+        def edit(file_path: str, old_string: str, new_string: str) -> str:
+            return "edited"
+        def bash(reason: str, command: str) -> str:
+            return "1 failed"
+        reg = (ToolRegistry().add(read, name="Read", confirm=False, target="file_path")
+                             .add(edit, name="Edit", target="file_path")
+                             .add(bash, name="Bash", identity=("command",), target="command"))
+        return reg, seen
+
+    @staticmethod
+    def rd(path: str, n: int, offset: int = 1) -> ToolCall:
+        return call(0, name="Read", arguments=f'{{"file_path": "{path}", "offset": {offset}}}', id=f"r{n}_0")
+
+    def answered(self, *calls: ToolCall) -> PendingTurn:
+        p = PendingTurn("q")
+        for i, tc in enumerate(calls):
+            p = p.add_round(Round("", (tc,), (result(tc, f"contents of {tc.arguments}"),), tokens=10 * (i + 1)))
+        return p
+
+    def test_the_third_read_of_the_same_thing_is_answered_with_the_notice(self, make_state):
+        reg, seen = self.registry()
+        pending = self.answered(self.rd("a.py", 1), self.rd("b.py", 2), self.rd("a.py", 3), self.rd("b.py", 4)).add_round(Round("", (self.rd("a.py", 5),), tokens=50))
+        state = make_state(pending=pending, tools=reg, settings=Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, auto=True))
+        new_state, events = ExecuteToolCalls(0).execute(state)
+        answer = new_state.pending.rounds[-1].results[0].content
+        assert answer.startswith("Not run: Read a.py has already been answered 2 times") and "scratchpad" in answer
+        assert seen == []                                            # the tool did not run
+        assert [type(e) for e in events] == [Warn, DisplayStats, NextRound]   # the turn goes on
+
+    def test_two_reads_are_allowed_and_a_different_range_is_a_different_read(self, make_state):
+        reg, seen = self.registry()
+        pending = self.answered(self.rd("a.py", 1), self.rd("a.py", 2)).add_round(Round("", (self.rd("a.py", 3, offset=60),), tokens=30))
+        state = make_state(pending=pending, tools=reg, settings=Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, auto=True))
+        new_state, _ = ExecuteToolCalls(0).execute(state)
+        assert seen == [("a.py", 60)] and new_state.pending.rounds[-1].results[0].content == "contents of a.py@60"
+
+    def test_acting_in_between_resets_the_count(self, make_state):
+        reg, seen = self.registry()
+        edit = call(0, name="Edit", arguments='{"file_path": "a.py", "old_string": "x", "new_string": "y"}', id="e_0")
+        pending = (self.answered(self.rd("a.py", 1), self.rd("a.py", 2))
+                   .add_round(Round("", (edit,), (result(edit, "edited"),), tokens=30))
+                   .add_round(Round("", (self.rd("a.py", 4),), tokens=40)))
+        state = make_state(pending=pending, tools=reg, settings=Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, auto=True))
+        ExecuteToolCalls(0).execute(state)
+        assert seen == [("a.py", 1)]                                  # the third read after an edit is a fresh look
+
+    def test_a_confirming_tool_is_never_counted(self, make_state):
+        """Re-running the tests is polling, and a Bash round is itself where the count stops."""
+        reg, _ = self.registry()
+        def pytest_call(n: int) -> ToolCall:
+            return call(0, name="Bash", arguments=f'{{"reason": "try {n}", "command": "pytest -q"}}', id=f"b{n}_0")
+        pending = self.answered(pytest_call(1), pytest_call(2)).add_round(Round("", (pytest_call(3),), tokens=30))
+        state = make_state(pending=pending, tools=reg, settings=Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, auto=True))
+        new_state, _ = ExecuteToolCalls(0).execute(state)
+        assert new_state.pending.rounds[-1].results[0].content == "1 failed"
+
+    def test_folded_rounds_still_count(self, make_state):
+        """The reads a checkpoint folded are on the record: the loop the guard is for is the one
+        where every re-read follows a checkpoint."""
+        reg, seen = self.registry()
+        pending = self.answered(self.rd("a.py", 1), self.rd("b.py", 2), self.rd("a.py", 3)).compact("c").add_round(Round("", (self.rd("a.py", 4),), tokens=40))
+        state = make_state(pending=pending, tools=reg, settings=Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, auto=True))
+        new_state, _ = ExecuteToolCalls(0).execute(state)
+        assert seen == [] and new_state.pending.rounds[-1].results[0].content.startswith("Not run: Read a.py")

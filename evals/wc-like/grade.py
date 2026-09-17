@@ -263,6 +263,8 @@ def session_stats(session: dict | None) -> dict:
         "summary_turns": len(turns) - len(real),
         # results the cap cut: the registry's blind cut, Read's line cut, Bash's spill
         "cut_results": sum(1 for c in results if any(m in c for m in CUT_MARKERS)),
+        # read-only calls answered with the re-read notice instead of running (a loop the harness caught)
+        "rereads_refused": sum(1 for c in results if c.startswith("Not run: ") and "already been answered" in c),
         "stop": last.get("stop", "") if real else None,      # how the run ended; "" is an answer
         "final_answer": bool(last.get("assistant")) and not last.get("stop"),
     }

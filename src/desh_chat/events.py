@@ -260,6 +260,36 @@ class AppendRound(Event):
         return replace(state, pending=pending), [ExecuteToolCalls()]
 
 
+# A read-only call answered this many times in a turn, with nothing written, edited or run
+# since, is a loop whatever its period: the model is re-reading what it already had and lost
+# (to expiry, or to a checkpoint that dropped file contents). Seen at 4k: two 30-round turns of
+# nothing but the same three reads, which the two-round repeat guard could not see.
+REREAD_LIMIT = 2
+REREAD_TEXT = ("Not run: {call} has already been answered {n} times this turn with nothing written, edited or run since, "
+               "and its result has not changed. Save what you need from it to the scratchpad, or act on it.")
+
+
+def rereads(state: ChatState, tc: ToolCall) -> int:
+    """How many times this turn has already answered the same read-only call — same registry
+    identity — since the model last acted. A round with a confirming call (Write, Edit, Bash, a
+    delegate) is where the count stops: what was read before it was acted on. A confirming tool,
+    or an unknown one, is never counted: re-running a test is polling, not a loop."""
+    assert state.pending is not None
+    tools = state.tools
+    tool = tools.get(tc.name)
+    if tool is None or tool.confirm:
+        return 0
+    key = tools.identity(tc.name, tc.arguments)
+    n = 0
+    for round in reversed(state.pending.rounds):
+        if round.summary:
+            continue
+        if any((t := tools.get(c.name)) is not None and t.confirm for c in round.tool_calls):
+            break
+        n += sum(1 for c, _ in zip(round.tool_calls, round.results) if tools.identity(c.name, c.arguments) == key)
+    return n
+
+
 @dataclass(frozen=True)
 class ExecuteToolCalls(Event):
     """Answer the latest round's calls one per step, in order. This step handles call `index`:
@@ -301,6 +331,17 @@ class ExecuteToolCalls(Event):
                 shown.append(Warn(f"  {len(skipped)} later call(s) not run: {', '.join(r.name for r in skipped)}"))
             return replace(state, pending=state.pending.add_results(denied, *skipped)), shown + [DisplayStats(colour=Palette.TOOL_STATS), NextRound()]
 
+        last = self.index + 1 == len(round.tool_calls)
+        if (n := rereads(state, tc)) >= REREAD_LIMIT:
+            # answered with the notice instead of the result: the turn goes on, and the model reads
+            # why. Two such notices and a third identical round are the repeat guard's business.
+            what = f"{tc.name} {state.tools.target(tc.name, tc.arguments)}".strip()
+            refused = ToolResult(tc.id, tc.name, REREAD_TEXT.format(call=what, n=n))
+            return (replace(state, pending=state.pending.add_results(refused)),
+                    [Warn(f"✗ {what} not run: answered {n} times already with nothing acted on since"),
+                     DisplayStats(colour=Palette.TOOL_STATS),
+                     NextRound() if last else ExecuteToolCalls(self.index + 1)])
+
         # What the harness supplies to tools that declared it (Tool.inject):
         # - the settings, so a subagent inherits the parent's CURRENT settings, not the ones captured when the registry
         # was built
@@ -310,7 +351,6 @@ class ExecuteToolCalls(Event):
         if state.scratchpad is not None:
             provided["scratchpad"] = state.scratchpad.to_dict()
         result = ToolResult(tc.id, tc.name, state.tools.invoke(tc.name, tc.arguments, **provided))
-        last = self.index + 1 == len(round.tool_calls)
         pending = state.pending.add_results(result)
 
         # A tool that asked for the scratchpad may have changed it: the dict it wrote to is read

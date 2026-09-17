@@ -34,6 +34,7 @@ METRICS = (
     ("summary_retries", ("stats", "summary_retries")),
     ("fallback_summaries", ("stats", "fallback_summaries")),
     ("cut_results", ("stats", "cut_results")),
+    ("rereads_refused", ("stats", "rereads_refused")),
     ("offset_reads", ("stats", "offset_reads")),
     ("spill_reads", ("stats", "spill_reads")),
     ("first_green_round", ("stats", "first_green_round")),
