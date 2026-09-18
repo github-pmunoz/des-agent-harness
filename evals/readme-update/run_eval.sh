@@ -81,7 +81,8 @@ if git -C "$workspace" cat-file -e "$ANSWER_COMMIT" 2>/dev/null; then
   echo "error: $ANSWER_COMMIT is reachable in the workspace; the fixture leaks the answer" >&2
   exit 2
 fi
-cp task.txt "${workspace}/task.txt"
+# Nothing else goes into the workspace: the orchestrator has no file tools of its own (as under
+# coding.sh, it has delegate and the scratchpad), so the task text is the "task" setting itself.
 
 # Set up telemetry files
 session_file="${run_dir}/session.json"

@@ -49,12 +49,13 @@ CUT_MARKERS = ("characters truncated", "[showing lines", "the whole of it is sav
 SPILL_DIR = ".desh/out"
 FOLD_EVENTS = ("CompactHistory", "CompactPendingTurn")
 
-# Fact groups that are reported and not scored: bonus is what the committed update itself missed,
-# and hygiene holds only `absent` patterns, which a README nobody touched passes in full.
-UNSCORED_GROUPS = ("bonus", "hygiene")
+# Fact groups that are reported and not scored: bonus is what the committed update itself missed;
+# hygiene (only `absent` patterns) and kept (true before, true still) are groups a README nobody
+# touched passes in full.
+UNSCORED_GROUPS = ("bonus", "hygiene", "kept")
 
 # What a run may leave in the workspace besides README.md.
-ALLOWED_PATHS = ("README.md", "task.txt", ".desh/")
+ALLOWED_PATHS = ("README.md", ".desh/")
 
 
 # --- helpers -------------------------------------------------------------------
@@ -231,9 +232,13 @@ def usage_stats(completions: list[dict], first_fold_ts: float | None = None) -> 
     tools: dict[str, int] = {}
     kinds: dict[str, int] = {}          # what the model wrote to the scratchpad, by kind
     offset_reads = spill_reads = early_writes = 0
+    issued: dict[str, int] = {}         # identical calls (name and arguments), over the agent's whole run
     for r in completions:
         for call in tool_calls_of(r):
             tools[call["name"]] = tools.get(call["name"], 0) + 1
+            if not call["name"].startswith("scratchpad_"):
+                identity = call["name"] + " " + json.dumps(call["args"], sort_keys=True)
+                issued[identity] = issued.get(identity, 0) + 1
             if call["name"] == "Read":
                 offset_reads += int((call["args"].get("offset") or 1) > 1)
                 spill_reads += int(str(call["args"].get("file_path", "")).startswith(SPILL_DIR))
@@ -249,7 +254,11 @@ def usage_stats(completions: list[dict], first_fold_ts: float | None = None) -> 
         "completions": len(completions),
         "tool_calls": sum(tools.values()),
         "tool_mix": tools,
-        "offset_reads": offset_reads,       # did the model follow a cut's pointer: a Read by range,
+        # A call issued again with the same arguments. The re-read guard sees one turn's visible
+        # rounds; this counts across checkpoints and cap-continues, where a loop actually lives.
+        "repeated_calls": sum(n - 1 for n in issued.values()),
+        "most_repeated_call": max(issued.values(), default=0),
+        "offset_reads": offset_reads,      # did the model follow a cut's pointer: a Read by range,
         "spill_reads": spill_reads,         # a Read of a Bash spill
         "scratchpad_writes": sum(kinds.values()),
         "scratchpad_kinds": kinds,
@@ -329,19 +338,29 @@ def agent_stats(completions: list[dict], rows: list[dict], session: dict | None)
     return usage_stats(completions, min(folds) if folds else None) | engine_stats(rows) | session_stats(session)
 
 
-def check_exit_of(answer: str, main_session: dict | None) -> int | None:
-    """The exit code of the delegation's check, read from the tool result the orchestrator got:
-    the subagent's answer followed by '[check `cmd`: exit N]'. None when there was no check or the
-    result is no longer in the session."""
+def delivered(answer: str, main_session: dict | None) -> str | None:
+    """The tool result the orchestrator got for this subagent's answer: the answer, the check
+    block after it, and the registry's cut over both. None when it is no longer in the session."""
     head = answer[:200]
     for t in (main_session or {}).get("turns") or []:
         for r in t.get("rounds", []):
             for res in r.get("results", []):
-                content = res.get("content", "")
-                if res.get("name") == "delegate" and head and content.startswith(head):
-                    found = re.search(r"\[check `.*?`: exit (-?\d+)\]", content, re.S)
-                    return int(found.group(1)) if found else None
+                if res.get("name") == "delegate" and head and res.get("content", "").startswith(head):
+                    return res["content"]
     return None
+
+
+def check_exit_of(result: str | None) -> int | None:
+    """The exit code in '[check `cmd`: exit N]'; None when there was no check."""
+    found = re.search(r"\[check `.*?`: exit (-?\d+)\]", result or "", re.S)
+    return int(found.group(1)) if found else None
+
+
+def chars_lost_of(result: str | None) -> int:
+    """What the registry's cut dropped from the middle of the answer. A delegate answer has no
+    pointer to the rest and no spill: what is cut here never reaches the orchestrator."""
+    found = re.search(r"\[\.\.\. (\d+) characters truncated \.\.\.\]", result or "")
+    return int(found.group(1)) if found else 0
 
 
 def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifest: dict | None,
@@ -357,11 +376,15 @@ def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifes
         turns = (session or {}).get("turns") or []
         real = [t for t in turns if not t.get("summary")]
         s = agent_stats(rows, child["rows"], session)
+        answer = real[-1].get("assistant", "") if real else ""
+        result = delivered(answer, main_session)
         delegations.append({
             "session": os.path.basename(child["session"] or ""),
             "brief": " ".join((turns[0].get("user") or "").split())[:120] if turns else "",
             "wall_ms": round((child["end"] - child["start"]) * 1000) if child["end"] else None,
-            "check_exit": check_exit_of(real[-1].get("assistant", "") if real else "", main_session),
+            "check_exit": check_exit_of(result),
+            "answer_chars": len(answer),
+            "answer_chars_lost": chars_lost_of(result),
             **s,
         })
 
@@ -376,6 +399,8 @@ def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifes
         "salvaged": total("salvaged_turns"),
         "answered": sum(1 for d in delegations if d["final_answer"]),
         "checks_failed": sum(1 for d in delegations if d["check_exit"] not in (None, 0)),
+        "answers_cut": sum(1 for d in delegations if d["answer_chars_lost"]),
+        "answer_chars_lost": total("answer_chars_lost"),
         "prompt_tokens_peak": max((d["prompt_tokens_peak"] for d in delegations), default=0),
         "rounds_mean": round(total("rounds") / len(delegations), 1) if delegations else None,
         "compactions": total("compactions"),
@@ -446,14 +471,15 @@ def summary(r: dict) -> str:
         f"  subagents: {sub['count']} runs, {sub['answered']} answered, {sub['overflows']} overflow, {sub['capped']} cap,"
         f" {sub['deadlines']} deadline, {sub['errors']} error, {sub['salvaged']} salvaged, {sub['checks_failed']} checks failed,"
         f" peak {sub['prompt_tokens_peak']}",
-        f"  {'#':>3} {'stop':<9}{'rnds':>5}{'peak':>7}{'cmp':>4}{'ckp':>4}{'slv':>4}{'cut':>4}{'rrd':>4}{'pad':>4}{'chk':>5}{'s':>6}  brief",
+        f"  {'#':>3} {'stop':<9}{'rnds':>5}{'peak':>7}{'cmp':>4}{'ckp':>4}{'slv':>4}{'cut':>4}{'rep':>4}{'rrd':>4}{'pad':>4}{'chk':>5}{'ans':>7}{'lost':>6}{'s':>6}  brief",
     ]
     for i, x in enumerate(s["delegations"]):
         check = "-" if x["check_exit"] is None else str(x["check_exit"])
         wall = "-" if x["wall_ms"] is None else f"{x['wall_ms'] / 1000:.0f}"
         lines.append(f"  {i:>3} {(x['stop'] or 'done'):<9}{x['rounds']:>5}{x['prompt_tokens_peak']:>7}{x['compactions']:>4}"
-                     f"{x['checkpoints']:>4}{x['salvaged_turns']:>4}{x['cut_results']:>4}{x['rereads_refused']:>4}"
-                     f"{x['scratchpad_writes']:>4}{check:>5}{wall:>6}  {x['brief'][:70]}")
+                     f"{x['checkpoints']:>4}{x['salvaged_turns']:>4}{x['cut_results']:>4}{x['repeated_calls']:>4}{x['rereads_refused']:>4}"
+                     f"{x['scratchpad_writes']:>4}{check:>5}{x['answer_chars']:>7}{x['answer_chars_lost']:>6}{wall:>6}"
+                     f"  {x['brief'][:60]}")
     if s["unattributed_completions"]:
         lines.append(f"  {s['unattributed_completions']} subagent completions matched no engine run")
     for f in h["failures"]:

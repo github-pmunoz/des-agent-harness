@@ -35,7 +35,7 @@ usage() {
 }
 
 here="$(cd "$(dirname "$0")" && pwd)"
-cd "$here"   # run_eval.sh resolves ./runs and task.txt against the cwd
+cd "$here"   # run_eval.sh resolves ./runs against the cwd
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq is required" >&2

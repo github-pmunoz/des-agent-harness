@@ -40,6 +40,8 @@ METRICS = (
     ("sub_capped", ("stats", "sub", "capped")),
     ("sub_salvaged", ("stats", "sub", "salvaged")),
     ("sub_checks_failed", ("stats", "sub", "checks_failed")),
+    ("sub_answers_cut", ("stats", "sub", "answers_cut")),
+    ("sub_answer_chars_lost", ("stats", "sub", "answer_chars_lost")),
     ("sub_compactions", ("stats", "sub", "compactions")),
     ("sub_checkpoints", ("stats", "sub", "checkpoints")),
     # over every agent of the run

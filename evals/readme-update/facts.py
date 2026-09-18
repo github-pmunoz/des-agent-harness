@@ -79,9 +79,11 @@ FACTS = [
     {"id": "scratchpad-kinds", "group": "features",
      "present": [r"(?i)\bkind\b", r"\bhypothesis\b", r"\bblock\b"]},
     # The second rung: when history is already folded, the pending turn is checkpointed mid-turn.
-    # The stale README says "compaction mid-turn" of the first rung, so only a checkpoint counts.
+    # The stale README says "compaction mid-turn" of the first rung, so only a checkpoint counts;
+    # and not in a table row, where the --checkpoint-target flag alone would pass for the mechanism.
     {"id": "compaction-ladder", "group": "features",
-     "present": [r"CompactPendingTurn|(?i:mid-turn|pending turn|within a turn).*(?i:checkpoint)|(?i:checkpoint).*(?i:mid-turn|pending turn|within a turn)"]},
+     "present": [r"CompactPendingTurn|^(?!\|).*(?i:mid-turn|pending turn|within a turn).*(?i:checkpoint)"
+                 r"|^(?!\|).*(?i:checkpoint).*(?i:mid-turn|pending turn|within a turn)"]},
     # A turn ended by overflow, deadline or error keeps its record as the answer.
     {"id": "salvage", "group": "features",
      "present": [r"(?i)salvag.*\b(overflow|deadline|error)|\b(overflow|deadline|error).*salvag"]},
@@ -96,6 +98,14 @@ FACTS = [
     # an abbreviated or full commit hash: 7-40 hex characters holding both a digit and a letter
     {"id": "no-commit-hashes", "group": "hygiene",
      "absent": [r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"]},
+
+    # --- kept: true in the stale README and still true; an update must not talk itself out of it. Never
+    # scored, since a README nobody touched passes. A subagent's tools are fixed (cli.build_tools gives
+    # it Read, Write, Edit, Bash and the scratchpad whatever the parent was launched with); a run
+    # once rewrote this as "the parent's tool registry minus delegate", after delegate.py's docstring.
+    {"id": "subagent-tools-fixed", "group": "kept",
+     "present": [r"(?i)always gets `?Read`?, `?Write`?, `?Edit`? and `?Bash`?"],
+     "absent": [r"(?i)parent'?s tool (registry|set|s\b)"]},
 
     # --- bonus: stale statements the committed update itself left in place; never scored ---------------
     # The prose under the turn diagram says one compaction is all a turn gets; the ladder has two rungs.
