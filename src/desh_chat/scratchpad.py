@@ -22,7 +22,8 @@ SCRATCHPAD_SYSTEM_PROMPT = (
     "on and names the results that expire next. Use scratchpad_write for whatever you will still need "
     "(paths, line numbers, ids, constraints, conclusions), condensed, never raw dumps. Write it in the "
     "same reply as your other tool calls: a scratchpad call costs no round of its own. Persist as you "
-    "go; do not wait for the expiry notice or the cap.\n"
+    "go; do not wait for the expiry notice or the cap. Your earlier calls are echoed with their long "
+    "arguments removed and a `folded` note in their place; that is the record, not a form to write.\n"
     "Every entry has a kind: todo, a step still to do; done, a finished step and its outcome; fact, "
     "something established from a file or a result; hypothesis, something you believe but have not "
     "verified; block, what stops progress and what it needs. An item keeps its key for life: when a "
@@ -48,13 +49,16 @@ def write(key: str, kind: Kind, value: str, scratchpad: dict[str, dict]) -> str:
     return f"overwrote {key!r} ({old} -> {kind})" if old != kind else f"overwrote {key!r} ({kind})"
 
 def fold_write(args: dict) -> dict:
-    """The echoed form of an answered scratchpad_write (Tool.fold): key and kind, the value
-    replaced by its size. Once the call ran, the value is in the block that ends every request;
-    echoing it in the round as well carried the same text twice, and at 4k that was an overflow."""
+    """The echoed form of an answered scratchpad_write (Tool.fold): key and kind, the value gone
+    and its size noted under `folded`. Once the call ran, the value is in the block that ends every
+    request; echoing it in the round as well carried the same text twice, and at 4k that was an
+    overflow. The value is removed rather than replaced: echoed as "[415 characters, shown in the
+    scratchpad block]" it was copied by the model as the value of its next seven writes."""
     value = args.get("value")
     if not isinstance(value, str):
         return args
-    return {**args, "value": f"[{len(value)} characters, shown in the scratchpad block]"}
+    folded = {k: v for k, v in args.items() if k != "value"}
+    return {**folded, "folded": f"{len(value)} characters, shown in the scratchpad block"}
 
 def delete(key: str, scratchpad: dict[str, dict]) -> str:
     """Delete a value from the scratchpad

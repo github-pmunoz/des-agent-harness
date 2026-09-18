@@ -154,11 +154,19 @@ class TestTools:
 
 
 class TestFold:
-    def test_the_echoed_write_keeps_key_and_kind_and_replaces_the_value_by_its_size(self):
+    def test_the_echoed_write_keeps_key_and_kind_and_drops_the_value_noting_its_size(self):
         folded = pad_tools.fold_write({"key": "task", "kind": "fact", "value": "x" * 541})
-        assert folded["key"] == "task" and folded["kind"] == "fact"
-        assert "541" in folded["value"] and len(folded["value"]) < 60
+        assert folded == {"key": "task", "kind": "fact", "folded": "541 characters, shown in the scratchpad block"}
         assert pad_tools.fold_write({"key": "k"}) == {"key": "k"}     # a rejected call has nothing to fold
+
+    def test_a_copied_fold_is_a_rejected_call_not_a_note_written_as_a_value(self):
+        """Seen in a run: the value echoed as "[415 characters, shown in the scratchpad block]" was
+        copied by the model as the value of its next writes. The folded shape has no value at all,
+        so a copy is refused and the dict is untouched."""
+        d: dict[str, dict] = {}
+        folded = pad_tools.fold_write({"key": "k", "kind": "fact", "value": "x" * 415})
+        answer = TOOLS.invoke("scratchpad_write", json.dumps(folded), scratchpad=d)
+        assert "rejected" in answer and "value" in answer and d == {}
 
     def test_the_round_echoes_the_fold_after_the_call_ran(self, make_state):
         """The value is in the block that ends the request: the round's copy is the fold."""
@@ -168,7 +176,7 @@ class TestFold:
         new_state, _ = ExecuteToolCalls(index=0).execute(state)
         assert new_state.scratchpad == Scratchpad().with_entry("k", "todo", "v" * 300)
         echoed = json.loads(new_state.pending.rounds[-1].tool_calls[0].arguments)
-        assert echoed["key"] == "k" and echoed["kind"] == "todo" and "300" in echoed["value"] and "vvv" not in echoed["value"]
+        assert echoed == {"key": "k", "kind": "todo", "folded": "300 characters, shown in the scratchpad block"}
 
 
 # ---------------------

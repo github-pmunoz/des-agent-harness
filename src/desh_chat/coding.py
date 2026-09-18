@@ -189,28 +189,37 @@ class Workspace:
         return rel
 
 
-WRITTEN_HEAD_CHARS = 120
+FOLD_CHARS = 120    # an argument up to this long is echoed whole; a longer one is folded
 
+
+# A fold must never leave a plausible value in the argument's place. The model reads its own
+# earlier calls in their echoed form and copies the shape: with the content folded to a head and
+# "... [3000 characters written]" it can emit that string as a Write's content, and with the
+# strings of an Edit folded the same way it did emit "proc = subproc... [272 characters]" as an
+# old_string. So a fold REMOVES the long argument and says what it was under `folded`, a key the
+# schema does not have: a copied shape is then a rejected call with an error the model reads,
+# never a truncated file or a note written as a value.
 
 def fold_written(args: dict) -> dict:
-    """The echoed form of an answered Write (Tool.fold): the path, the head of the content and its
-    size — never the whole content. A call's arguments are echoed in every later request of the
-    turn and, unlike results, never expire; a round that wrote two files carried 4.8K chars of
-    them and could not be checkpointed at 4k. The file is on disk, one Read away."""
+    """The echoed form of an answered Write (Tool.fold): the path and the content's size, never
+    the content. A call's arguments are echoed in every later request of the turn and, unlike
+    results, never expire; a round that wrote two files carried 4.8K chars of them and could not
+    be checkpointed at 4k. The file is on disk, one Read away."""
     content = args.get("content")
-    if not isinstance(content, str) or len(content) <= WRITTEN_HEAD_CHARS:
+    if not isinstance(content, str) or len(content) <= FOLD_CHARS:
         return args
-    return {**args, "content": content[:WRITTEN_HEAD_CHARS] + f"... [{len(content)} characters written; Read the file to see it]"}
+    folded = {k: v for k, v in args.items() if k != "content"}
+    return {**folded, "folded": f"{len(content)} characters written; Read the file to see it"}
 
 
 def fold_edited(args: dict) -> dict:
-    """The echoed form of an answered Edit: the heads of old_string and new_string with their
-    sizes, once the pair is longer than a short excerpt. What was replaced is in the file."""
+    """The echoed form of an answered Edit: the path and the sizes of old_string and new_string,
+    once the pair is longer than a short excerpt. What was replaced is in the file."""
     old, new = args.get("old_string"), args.get("new_string")
-    if not (isinstance(old, str) and isinstance(new, str)) or len(old) + len(new) <= 2 * WRITTEN_HEAD_CHARS:
+    if not (isinstance(old, str) and isinstance(new, str)) or len(old) + len(new) <= 2 * FOLD_CHARS:
         return args
-    return {**args, "old_string": old[:WRITTEN_HEAD_CHARS] + f"... [{len(old)} characters]",
-                    "new_string": new[:WRITTEN_HEAD_CHARS] + f"... [{len(new)} characters]"}
+    folded = {k: v for k, v in args.items() if k not in ("old_string", "new_string")}
+    return {**folded, "folded": f"old_string of {len(old)} and new_string of {len(new)} characters; the file holds the new text"}
 
 
 def edit_preview(args: dict) -> str:

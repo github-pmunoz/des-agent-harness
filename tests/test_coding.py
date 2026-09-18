@@ -354,13 +354,15 @@ class TestDescribeCall:
 class TestWrittenFold:
     """A call's arguments are echoed in every later request and never expire: a Write carries the
     whole file, and a round that wrote two files could not be checkpointed at 4k. Once the call
-    ran, the round records the path, a head and the size; the file is one Read away."""
+    ran, the round records the path and the size under `folded`, a key the schema does not have,
+    and the long argument is gone: a model that copies the echoed shape gets a rejected call, not
+    a file written with a marker in it. The file is one Read away."""
 
-    def test_a_long_write_folds_to_its_head_and_size(self):
-        from desh_chat.coding import WRITTEN_HEAD_CHARS, fold_written
+    def test_a_long_write_folds_to_its_path_and_size_with_no_content_left(self):
+        from desh_chat.coding import fold_written
         folded = fold_written({"file_path": "wc.py", "content": "x" * 3000})
-        assert folded["file_path"] == "wc.py" and folded["content"].startswith("x" * WRITTEN_HEAD_CHARS + "... [3000 characters written")
-        assert len(folded["content"]) < 200
+        assert folded == {"file_path": "wc.py", "folded": "3000 characters written; Read the file to see it"}
+        assert "content" not in folded
 
     def test_a_short_write_and_a_malformed_one_are_kept(self):
         from desh_chat.coding import fold_written
@@ -371,7 +373,7 @@ class TestWrittenFold:
         from desh_chat.coding import fold_edited
         args = {"file_path": "a", "old_string": "o" * 500, "new_string": "n" * 500, "replace_all": False}
         folded = fold_edited(args)
-        assert folded["old_string"].endswith("... [500 characters]") and folded["new_string"].endswith("... [500 characters]") and folded["replace_all"] is False
+        assert folded == {"file_path": "a", "replace_all": False, "folded": "old_string of 500 and new_string of 500 characters; the file holds the new text"}
         assert fold_edited({"file_path": "a", "old_string": "x", "new_string": "y"}) == {"file_path": "a", "old_string": "x", "new_string": "y"}
 
     def test_the_round_records_the_fold_after_the_call_ran(self, tmp_path, make_state):
@@ -389,4 +391,15 @@ class TestWrittenFold:
         new_state, _ = ExecuteToolCalls(0).execute(state)
         assert (tmp_path / "big.py").read_text() == "y" * 2000                       # the call ran whole
         recorded = json.loads(new_state.pending.rounds[-1].tool_calls[0].arguments)
-        assert "2000 characters written" in recorded["content"] and len(recorded["content"]) < 200
+        assert "content" not in recorded and "2000 characters written" in recorded["folded"]
+
+    def test_a_copied_fold_is_a_rejected_call_not_a_write(self, tmp_path):
+        """The shape the model reads back must not be a shape it can run: the folded form of a
+        Write, sent as a call, is refused by the registry and touches no file."""
+        import json
+        from desh_chat.coding import fold_written
+        registry = coding_registry(str(tmp_path))
+        folded = fold_written({"file_path": "big.py", "content": "y" * 2000})
+        answer = registry.invoke("Write", json.dumps(folded))
+        assert "rejected" in answer and "content" in answer
+        assert not (tmp_path / "big.py").exists()
