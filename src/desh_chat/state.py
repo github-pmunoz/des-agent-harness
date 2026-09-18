@@ -537,7 +537,12 @@ class PendingTurn:
                 sections.append(Section((r.transcript(stubbed=True),)))
             else:
                 sections.append(Section((r.transcript(), r.transcript(stubbed=True))))
-        return fit_transcript(sections, budget_tokens, unit="rounds")
+        # The budget is the rounds': the checkpoint was written to its own share and the scratchpad
+        # is paid for in every request, so both stand whole, and the head cut that a compaction
+        # request needs to fit the window never fires here — history compaction and a parent's
+        # result cap bound the record later, each in its own way.
+        fixed = estimate_result_tokens("\n".join(s.renderings[0] for s in sections if s.fixed))
+        return fit_transcript(sections, budget_tokens + fixed if budget_tokens is not None else None, unit="rounds")
 
     def digest(self, rounds: tuple[Round, ...], describe: Callable[[str, str], str] | None = None, budget_tokens: int | None = None) -> str:
         """What stands in for a checkpoint when the model returns none: the previous checkpoint's

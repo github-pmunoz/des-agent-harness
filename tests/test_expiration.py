@@ -427,7 +427,7 @@ class TestTranscriptFit:
         assert lines[0] == "USER: q"
         assert lines[2] == f"TOOL Read: {EXPIRED_RESULT}" and lines[4] == f"TOOL Read: {EXPIRED_RESULT}" and lines[6].startswith("TOOL Read: result 3 x")
         fitted = p.transcript(folded, expire_after=2, budget_tokens=estimate_result_tokens(whole) - 1)
-        assert fitted.splitlines()[6] == f"TOOL Read: {EXPIRED_RESULT}"
+        assert fitted.splitlines()[4] == f"TOOL Read: {EXPIRED_RESULT}"
         assert p.transcript(folded, expire_after=None).splitlines()[2].startswith("TOOL Read: result 1 x")
 
     def test_a_checkpoint_in_the_transcript_is_fixed(self):
