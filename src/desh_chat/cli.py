@@ -104,7 +104,7 @@ def main():
     ap.add_argument("-a",   "--auto",    action="store_true", help="enable auto mode")
     ap.add_argument("-co",   "--cont",    action="store_true", help="enable auto-continue prompt on tool round cap of orchestrator")
     ap.add_argument("-p",   "--port",           type=int, default=8012)
-    ap.add_argument("-m",   "--model",          default="Qwen3.8-27B-UD-Q4_K_M_64K", help="model id (router mode)")
+    ap.add_argument("-m",   "--model",          default="Qwen3.8-27B-UD-Q4_K_M-64K", help="model id (router mode)")
     ap.add_argument("-t",   "--temperature",    type=float, default=0.3)
     ap.add_argument("-c",   "--context",        type=int, default=65536, help="context window size")
     ap.add_argument("-mt",  "--max-turn-tokens",type=int, default=65536, help="max tokens per turn")
