@@ -309,6 +309,11 @@ class ToolResult:
 # What a tool message says once its result has expired from the context. Constant on purpose: the
 # stubbed prefix of a request must not change from one round to the next, or the server re-prefills it.
 EXPIRED_RESULT = "[expired: this result is no longer in context]"
+# The stops a turn can end by without an answer, where the record is the answer (PendingTurn.salvage):
+# the window overflowed, the run's deadline passed, an error cut the turn. A capped turn is not one —
+# the cap message continues it — and an interrupt is the operator's, who wants no answer.
+SALVAGE_STOPS = ("overflow", "deadline", "error")
+
 CHECKPOINT_PREFIX = "Checkpoint of this turn so far, in place of the rounds before it: "
 
 # How much of a call's target the expiring line shows: enough to recognise a path or a command,
@@ -363,12 +368,15 @@ class Round:
         renders the results as EXPIRED_RESULT, the way the model last saw them."""
         if self.summary:
             # to the summariser, an earlier checkpoint is input to fold, not a user message to answer
-            body = self.assistant[len(CHECKPOINT_PREFIX):] if self.assistant.startswith(CHECKPOINT_PREFIX) else self.assistant
-            return f"EARLIER CHECKPOINT: {body}"
+            return f"EARLIER CHECKPOINT: {self.checkpoint_body()}"
         calls = ", ".join(f"{tc.name}({tc.arguments})" for tc in self.tool_calls)
         lines = [f"ASSISTANT (tool calls): {self.assistant + ' ' if self.assistant else ''}{calls}"]
         lines += [f"TOOL {res.name}: {EXPIRED_RESULT if stubbed else res.content}" for res in self.results]
         return "\n".join(lines)
+
+    def checkpoint_body(self) -> str:
+        """A checkpoint round's text without the prefix the model reads it under."""
+        return self.assistant[len(CHECKPOINT_PREFIX):] if self.assistant.startswith(CHECKPOINT_PREFIX) else self.assistant
 
     def own_text(self) -> str:
         """The round's own text — the assistant message and its calls, never the results."""
@@ -540,10 +548,42 @@ class PendingTurn:
         sections = []
         for r in rounds:
             if r.summary:
-                sections.append(Section((r.assistant[len(CHECKPOINT_PREFIX):] if r.assistant.startswith(CHECKPOINT_PREFIX) else r.assistant,), fixed=True))
+                sections.append(Section((r.checkpoint_body(),), fixed=True))
             else:
                 sections.append(Section((f"round {ordinal.get(id(r), '?')}: {r.mentions(describe)}",)))
         return fit_transcript(sections, budget_tokens, unit="rounds")
+
+    def salvage(self, stop: str, scratchpad: Scratchpad | None, budget_tokens: int | None = None) -> str:
+        """The answer of a turn that ended without one (SALVAGE_STOPS): everything the turn got
+        down, assembled from the record rather than asked of the model — at an overflow there is
+        no room to ask, at the deadline no time, after an error maybe no server. The sources are
+        the view's checkpoint (the model's own summary of the folded rounds), the scratchpad as it
+        stands, and the rounds after the checkpoint with their results, fitted to `budget_tokens`
+        the way a compaction transcript is (fit_transcript): the oldest results are stubbed first,
+        then the oldest rounds left out. Read by the operator, by the next turn as history, and by
+        a delegating agent as the subagent's result, which cannot see any of these sources."""
+        view = self.since_last_summary()
+        checkpoint = view[0].checkpoint_body() if view and view[0].summary else None
+        rounds = [r for r in view if not r.summary]
+        scratch = scratchpad.entries_text() if scratchpad is not None and scratchpad.memory else None
+        # Oldest first, because fit_transcript reduces from the front: the lead line and the
+        # checkpoint are the oldest and most important, and the rounds run in order after them.
+        # The parent agent reads this as a tool result, head and tail first: the lead line tells
+        # every reader why there is a record instead of an answer, and the newest round — the
+        # turn's last work — stands at the tail.
+        sections = [Section((f"TURN ENDED: {stop}",), fixed=True)]
+        if checkpoint is not None:
+            sections.append(Section((f"CHECKPOINT: {checkpoint}",), fixed=True))
+        if scratch is not None:
+            sections.append(Section((f"SCRATCHPAD:\n{scratch}",), fixed=True))
+        for r in rounds:
+            sections.append(Section((r.transcript(), r.transcript(stubbed=True))))
+        # The budget is the rounds': the checkpoint was written to its own share and the scratchpad
+        # is paid for in every request, so both stand whole, and the head cut that a compaction
+        # request needs to fit the window never fires here — history compaction and a parent's
+        # result cap bound the record later, each in its own way.
+        fixed = estimate_result_tokens("\n".join(s.renderings[0] for s in sections if s.fixed))
+        return fit_transcript(sections, budget_tokens + fixed if budget_tokens is not None else None, unit="rounds")
 
     def compact(self, summary: str, tokens: int = 0) -> PendingTurn:
         """Fold the view's rounds but the last into one checkpoint round: the summary as the model

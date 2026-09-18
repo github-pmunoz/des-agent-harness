@@ -33,6 +33,7 @@ METRICS = (
     ("checkpoints", ("stats", "checkpoints")),
     ("summary_retries", ("stats", "summary_retries")),
     ("fallback_summaries", ("stats", "fallback_summaries")),
+    ("salvaged_turns", ("stats", "salvaged_turns")),
     ("cut_results", ("stats", "cut_results")),
     ("rereads_refused", ("stats", "rereads_refused")),
     ("offset_reads", ("stats", "offset_reads")),

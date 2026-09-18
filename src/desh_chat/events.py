@@ -20,7 +20,7 @@ from desh.llama.wire import Completion, Request, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_result_tokens, estimate_tokens, turn_tokens
 from desh.tools import Tool
-from desh_chat.state import CHECKPOINT_PREFIX, ChatState, ChatHistory, PendingTurn, Round, ToolResult
+from desh_chat.state import CHECKPOINT_PREFIX, SALVAGE_STOPS, ChatState, ChatHistory, PendingTurn, Round, ToolResult
 from desh_chat.scratchpad import Scratchpad
 from desh_chat.display import DisplayStats, Error, Info, Warn
 from desh_chat.session import persist
@@ -433,9 +433,19 @@ class TurnEnd(Event):
     stop: str = ""      # recorded on the Turn: "cap" | "overflow" | "interrupt" | "error" | "" (see Turn.stop)
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         assert state.pending is not None
-        turn = state.pending.finish(self.assistant, self.tokens, self.cancelled, self.stop, scratchpad=state.scratchpad)
+        assistant, shown = self.assistant, []
+        if self.stop in SALVAGE_STOPS:
+            # The turn ends without an answer: what it got down stands as the answer, below any
+            # text the model did produce (a deadline keeps the model's text so far). Bounded like
+            # a checkpoint — it is one, written by the harness — so history and a parent's tool
+            # result stay within their shares.
+            budget = int(state.settings.checkpoint_target * state.settings.context)
+            salvaged = state.pending.salvage(self.stop, state.scratchpad, budget_tokens=budget)
+            assistant = f"{assistant.rstrip()}\n\n{salvaged}" if assistant.strip() else salvaged
+            shown = [Warn(f"Turn ended by {self.stop}; its record stands as the answer ({len(salvaged)} chars salvaged).")]
+        turn = state.pending.finish(assistant, self.tokens, self.cancelled, self.stop, scratchpad=state.scratchpad)
         new_state = replace(state, history=state.history.append(turn), pending=None)
-        return new_state, persist(state) + [MaybeRegenerate()]
+        return new_state, shown + persist(state) + [MaybeRegenerate()]
 
 
 TRANSCRIPT_LEAD = "Conversation transcript:\n"

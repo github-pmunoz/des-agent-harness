@@ -145,9 +145,14 @@ class TestAnswer:
         limit answered, and the parent must not be told otherwise."""
         assert answer(child_of(make_state, turn("42", rounds=SETTINGS.max_tool_rounds))) == "42"
 
-    def test_overflow_is_reported_as_overflow_not_as_a_cancel(self, make_state):
-        text = answer(child_of(make_state, turn("", rounds=2, cancelled=True, stop="overflow")))
-        assert text == "The subagent ran out of context window before finishing."
+    def test_overflow_passes_the_salvaged_record_on_with_a_note_not_as_a_cancel(self, make_state):
+        """TurnEnd salvaged the record into the turn's text: the parent reads it, and the note."""
+        text = answer(child_of(make_state, turn("what it got down", rounds=2, cancelled=True, stop="overflow")))
+        assert text == "what it got down\n[Subagent ran out of context window]"
+
+    def test_an_error_turn_is_named_as_an_error_not_as_a_cancel(self, make_state):
+        text = answer(child_of(make_state, turn("record", rounds=1, cancelled=True, stop="error")))
+        assert text == "record\n[Subagent hit an error]"
 
     def test_the_last_non_summary_turn_is_the_answer_after_a_checkpoint(self, make_state):
         """A child that checkpointed leaves capped turn, summary, final turn: the final turn answers."""
@@ -330,7 +335,8 @@ class TestChildTurnStart:
         assert [(t.stop, t.cancelled, t.summary) for t in final.history.turns] == [
             ("cap", False, False), ("", False, True), ("overflow", True, False)]
         assert final.pending is None
-        assert answer(final) == "The subagent ran out of context window before finishing."
+        # the overflowed turn had no rounds and no checkpoint: its record is the lead line alone
+        assert answer(final) == "TURN ENDED: overflow\n[Subagent ran out of context window]"
 
     def test_a_continuation_that_fits_after_compaction_goes_on(self, make_state, no_esc_watcher):
         """Same window, an auto prompt that fits once the capped turn is a summary: one compaction,

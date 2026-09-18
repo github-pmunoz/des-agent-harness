@@ -339,6 +339,8 @@ def stats_of(completions: list[dict], des_log: list[dict], manifest: dict | None
         # compactions the model first answered with nothing (asked again), and those folded with the harness's digest after two
         "summary_retries": sum(1 for e in des_log if e.get("event") == "Warn" and "asking again" in str(e.get("payload", ""))),
         "fallback_summaries": sum(1 for e in des_log if e.get("event") == "Warn" and "digest" in str(e.get("payload", ""))),
+        # turns that ended by overflow, deadline or error and had their record stand as the answer
+        "salvaged_turns": sum(1 for e in des_log if e.get("event") == "Warn" and "salvaged" in str(e.get("payload", ""))),
         "wall_ms": (manifest or {}).get("elapsed_ms"),
         "exit_status": (manifest or {}).get("status"),
     }

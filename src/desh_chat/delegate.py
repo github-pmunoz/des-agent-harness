@@ -198,21 +198,22 @@ def answer(state: ChatState) -> str:
       stop == "deadline"   the run's wall-clock budget ran out; the model's text so far is the answer
       neither              the answer, verbatim ("(no answer)" when the model said nothing)
     Every case must come back as text the parent can act on — it cannot see the child's history.
-    The texts the parent reads: "The subagent ran out of context window before finishing.",
-    "The operator cancelled the request.", and for a capped or timed-out turn the answer followed
-    by "\\n[Subagent hit the tool round cap]" or "\\n[Subagent hit the task deadline]".
+    A turn that ended by overflow, deadline or error carries what it got down as its answer
+    (TurnEnd salvages it from the checkpoint, the scratchpad and the rounds), so the parent
+    reads that, followed by a note naming how the turn ended: "[Subagent ran out of context
+    window]", "[Subagent hit the task deadline]", "[Subagent hit an error]"; a capped turn's
+    answer is followed by "[Subagent hit the tool round cap]". An operator's cancel passes
+    nothing on: "The operator cancelled the request."
     """
     assert state.pending is None
     turn = state.history.last_non_summary()
     if turn is None:
         return "The request didn't fit the context window."
     child_msg = turn.assistant or "(no answer)"
-    if turn.stop == "overflow":
-        return "The subagent ran out of context window before finishing."
+    notes = {"overflow": "[Subagent ran out of context window]", "deadline": "[Subagent hit the task deadline]",
+             "error": "[Subagent hit an error]", "cap": "[Subagent hit the tool round cap]"}
+    if turn.stop in notes:
+        return f"{child_msg}\n{notes[turn.stop]}"
     if turn.cancelled:
         return "The operator cancelled the request."
-    if turn.stop == "cap":
-        return f"{child_msg}\n[Subagent hit the tool round cap]"
-    if turn.stop == "deadline":
-        return f"{child_msg}\n[Subagent hit the task deadline]"
     return child_msg

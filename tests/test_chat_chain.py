@@ -28,7 +28,11 @@ from desh.engine import Engine
 from desh.llama.logger import Logger
 from desh.llama.wire import Request
 from desh.llama.tokens import estimate_tokens
-from desh_chat.display import DisplayStats, Error, Info
+from dataclasses import replace
+
+from desh.llama.wire import ToolCall
+from desh_chat.display import DisplayStats, Error, Info, Warn
+from desh_chat.scratchpad import Scratchpad
 from desh_chat.events import (
     CompactHistory, CompactPendingTurn, Exit, LogCompletion, MaybeRegenerate,
     NextRound, PromptUser, StreamCompletion, TurnEnd, TurnStart, UserMessage,
@@ -336,6 +340,61 @@ class TestTurnEnd:
         TurnEnd(assistant="a", cancelled=False).execute(state)
         assert len(state.history) == 0
         assert state.pending == PendingTurn("q")
+
+    def salvage_state(self, make_state, **overrides):
+        """A turn with a checkpoint, one round after it with a result, and a scratchpad entry."""
+        tc = ToolCall(index=0, id="c0", type="function", name="Bash", arguments='{"command": "pytest -q"}')
+        pending = (PendingTurn("fix the bug")
+                   .add_round(Round("", (tc,), (ToolResult("c0", "Bash", "3 failed"),), tokens=40))
+                   .add_round(Round("", (tc,), (ToolResult("c0", "Bash", "1 failed, 2 passed"),), tokens=40))
+                   .compact("edited wc.py; next: rerun the tests")
+                   .add_round(Round("", (tc,), (ToolResult("c0", "Bash", "35 passed"),), tokens=40)))
+        pad = Scratchpad().with_entry("cause", "fact", "off-by-one in count_lines")
+        return make_state(pending=pending, scratchpad=pad, **overrides)
+
+    def test_an_overflow_turn_answers_with_what_it_got_down(self, make_state):
+        """No answer arrived: the record is the answer — the checkpoint, the scratchpad and the
+        rounds after the checkpoint with their results — and the Warn says so."""
+        state = self.salvage_state(make_state)
+        new_state, events = TurnEnd(assistant="", tokens=0, cancelled=True, stop="overflow").execute(state)
+        turn = new_state.history.turns[-1]
+        assert turn.stop == "overflow" and turn.cancelled is True
+        assert "overflow" in turn.assistant
+        assert "edited wc.py; next: rerun the tests" in turn.assistant       # the checkpoint
+        assert "cause: off-by-one in count_lines" in turn.assistant          # the scratchpad
+        assert "35 passed" in turn.assistant and "pytest -q" in turn.assistant     # the round after the checkpoint
+        assert "3 failed" not in turn.assistant                              # folded rounds are the checkpoint's
+        assert isinstance(events[0], Warn) and "salvaged" in events[0].text
+
+    def test_a_deadline_keeps_the_models_text_and_adds_the_record_below(self, make_state):
+        state = self.salvage_state(make_state)
+        new_state, _ = TurnEnd(assistant="so far: nearly there", tokens=10, cancelled=False, stop="deadline").execute(state)
+        text = new_state.history.turns[-1].assistant
+        assert text.startswith("so far: nearly there\n\n") and "35 passed" in text and "deadline" in text
+
+    def test_an_error_turn_is_salvaged_too_and_a_capped_one_is_not(self, make_state):
+        state = self.salvage_state(make_state)
+        errored, _ = TurnEnd(assistant="", cancelled=True, stop="error").execute(state)
+        assert "35 passed" in errored.history.turns[-1].assistant
+        capped, events = TurnEnd(assistant="so far", tokens=5, stop="cap").execute(state)
+        assert capped.history.turns[-1].assistant == "so far" and events == [MaybeRegenerate()]
+        plain, _ = TurnEnd(assistant="done").execute(state)
+        assert plain.history.turns[-1].assistant == "done"
+
+    def test_the_rounds_are_bounded_like_a_checkpoint_and_the_fixed_pieces_stand_whole(self, make_state):
+        """Results are stubbed oldest first before rounds are dropped; the checkpoint and the
+        scratchpad are fixed, survive whole, and do not count against the rounds' budget."""
+        settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=1000, max_turn_tokens=500, checkpoint_target=0.15)
+        state = self.salvage_state(make_state, settings=settings)
+        tc = ToolCall(index=0, id="c1", type="function", name="Read", arguments='{"file_path": "wc.py"}')
+        big = state.pending.add_round(Round("", (tc,), (ToolResult("c1", "Read", "x" * 3000),), tokens=800))
+        state = replace(state, pending=big)
+        new_state, _ = TurnEnd(assistant="", cancelled=True, stop="overflow").execute(state)
+        text = new_state.history.turns[-1].assistant
+        fixed = "\n".join(l for l in text.splitlines() if not l.startswith(("ASSISTANT", "TOOL", "[")))
+        assert estimate_tokens(text) <= 150 + estimate_tokens(fixed) + 40
+        assert "edited wc.py; next: rerun the tests" in text and "cause: off-by-one" in text
+        assert "xxxx" not in text and not text.startswith("[transcript cut")
 
     def test_cancelled_flag_lands_on_the_turn_not_on_tokens(self, make_state):
         """Regression: Turn(user, assistant, self.cancelled) once landed the
