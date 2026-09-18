@@ -34,10 +34,10 @@ pip install -e .
 Start a chat using a model name exposed by your llama-server:
 
 ```bash
-chat-des --model Qwen3.8-27B-UD-Q4_K_M
+chat-des --model Qwen3.8-27B-UD-Q4_K_M-64K
 ```
 
-Use `chat-des --help` to see the complete, current argument options.
+Use `chat-des --help` to see the complete, current argument options. `chat-des.sh` is a thin wrapper that `cd`s to its own directory, creates `.sessions/`, and runs `chat-des -sf .sessions -cl .completions.log -dl .des.log "$@"`. `examples/desh-fibonacci.py` demonstrates the minimal engine contract: a frozen state, an event that re-queues itself, run via `engine.iter()`.
 
 
 ### CLI options
@@ -51,11 +51,11 @@ chat-des \
   --completions-log logs/completions.jsonl \
   --session sessions/project.json \
   --port 8012 \
-  --model Qwen3.8-27B-UD-Q4_K_M \
+  --model Qwen3.8-27B-UD-Q4_K_M-64K \
   --temperature 0.5 \
-  --context 16384 \
-  --max-turn-tokens 8192 \
-  --max-tool-rounds 10 \
+  --context 65536 \
+  --max-turn-tokens 65536 \
+  --max-tool-rounds 30 \
   --read --write --edit --bash --delegate \
   --workspace . \
   --think
@@ -66,12 +66,14 @@ The most useful options are:
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--port` | `8012` | Local llama-server port. |
-| `--model` | `Qwen3.8-27B-UD-Q4_K_M` | Model ID, which must match the server/router configuration. |
+| `--model` | `Qwen3.8-27B-UD-Q4_K_M-64K` | Model ID, which must match the server/router configuration. |
 | `--temperature` | `0.3` | Sampling temperature. |
-| `--context` | `16384` | Context-window size used for budgeting and compaction. |
-| `--max-turn-tokens` | `8192` | Completion-token limit for one turn. |
-| `--max-tool-rounds` | `10` | Maximum number of tool-call rounds in a single turn. |
-| `--tool-expiration` | `6` | Rounds after which a tool result is replaced by an expired stub in the context. |
+| `--context` | `65536` | Context-window size used for budgeting and compaction. |
+| `--max-turn-tokens` | `65536` | Completion-token limit for one turn. |
+| `--max-tool-rounds` | `30` | Maximum number of tool-call rounds in a single turn. |
+| `--tool-expiration` | `10` | Rounds after which a tool result is replaced by an expired stub in the context. |
+| `--tool-cap` | `10.0` | Cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read. |
+| `--checkpoint-target` | `0.15` | Share of the context a mid-turn checkpoint summary may take. |
 | `--scratchpad` | off | Offer the scratchpad tools and append the context-mechanics prompt. |
 | `--think` | off | Ask the server to enable reasoning/thinking. |
 | `--read` | off | Offer the `Read` tool. Toolset flags are additive; none of them means no tools. |
@@ -80,14 +82,18 @@ The most useful options are:
 | `--bash` | off | Offer the `Bash` tool. |
 | `--current_time` | off | Offer the current time. |
 | `--delegate` | off | Offer `delegate`: subagents with the same tools and settings, minus `delegate` itself. |
+| `--task` | none | Run a task non-interactively. |
+| `--task-timeout` | `0` | Wall-clock budget in seconds for a `--task` run, 0 = none; checked before each tool round, so a run overshoots by at most one completion. |
 | `--workspace` | `.` | Root directory available to the coding tools. |
 | `--session PATH` | none | Load an existing session or save the current session to `PATH`. |
 | `--sessions-folder DIR` | none | Create a uniquely named session file in `DIR`; ignored when `--session` is supplied. |
 | `--completions-log PATH` | none | Append successful model requests and completions as JSONL. |
 | `--des-log PATH` | none | Append engine run/step records as JSONL. |
 | `--debug` | off | Print event execution records to stderr, including queue depth and duration. |
+| `--auto` | off | Enable auto mode for the session. |
+| `--cont` | off | Enable auto-continue prompt on tool round cap of orchestrator. |
 | `--timeout SECONDS` | derived from context | Per-request HTTP timeout; `0` derives one from `--context`. |
-| `--system-prompt TEXT` | toolset-specific | Override the default system prompt. |
+| `--system-prompt TEXT` | `You are a helpful assistant. Reply concisely.` | Override the default system prompt. |
 
 With `--read`, the model can `Read` without confirmation. `Write`, `Edit`, and `Bash` are shown for approval before they run, one call at a time. File paths are confined to `--workspace` (no escaping the root, no symlinks); `Bash` runs with the workspace as its working directory and must state a `reason` alongside the command. An `Edit` is shown as a diff.
 
@@ -95,22 +101,40 @@ At the approval prompt one key decides: `y` runs the call, `n` declines it, `m` 
 
 Auto mode turns the confirmation gate off: confirmed tools run without asking. It is on for the rest of the session — `Ctrl+C` turns it off (in auto mode `Ctrl+C` does not exit; it turns auto mode off and returns to the prompt), and `/noauto` does the same. Delegate subagents inherit it, so their confirmed tools run unconfirmed too.
 
-With `--delegate`, the model can hand a self-contained task to a subagent and read back only its final answer, which keeps the reads and tool rounds of a subtask out of the main context window. The subagent is a nested engine run: it has its own system prompt, always gets `Read`, `Write`, `Edit` and `Bash` (never `delegate` itself, so there is no nesting), and takes the main agent's settings as they are at the moment of the call, so a `/model`, `/temperature` or auto-mode change reaches the next subagent. It streams to the terminal between two banner lines, and its confirmed tools ask for approval exactly as the main agent's do. Each delegation asks for approval, with the task and context shown. ESC or cancel inside the subagent ends only the subagent, and the main agent reads that it was cancelled; a subagent that hits the round cap or runs out of context window reports that instead, so the main agent can tell the three apart. When a session file is set, every subagent run keeps its own beside it, named `<session stem>.delegate-<timestamp>_<hash>.json`. The delegate's `root` attribute (set from `--workspace`) is the working directory for the subagent's tools and for any `check` command the orchestrator supplies, so validation runs in the project root rather than the harness's own directory. Subagents always get the scratchpad tools and start with an empty scratchpad, whether or not the main run was launched with `--scratchpad`; a subagent's scratchpad is its own and is never handed back to the main agent.
+With `--delegate`, the model can hand a self-contained task to a subagent and read back only its final answer, which keeps the reads and tool rounds of a subtask out of the main context window. The subagent is a nested engine run: it has its own system prompt, always gets `Read`, `Write`, `Edit` and `Bash` (never `delegate` itself, so there is no nesting), and takes the main agent's settings as they are at the moment of the call, so a `/model`, `/temperature` or auto-mode change reaches the next subagent. It streams to the terminal between two banner lines, and its confirmed tools ask for approval exactly as the main agent's do. Each delegation asks for approval, with the task and context shown. ESC or cancel inside the subagent ends only the subagent, and the main agent reads that it was cancelled; a subagent that hits the round cap or runs out of context window reports that instead, so the main agent can tell the three apart. When a session file is set, every subagent run keeps its own beside it, named `<session stem>.delegate-<timestamp>_<hash>.json`. The delegate's `root` attribute (set from `--workspace`) is the working directory for the subagent's tools and for any `check` command the orchestrator supplies, so validation runs in the project root rather than the harness's own directory. Subagents always get the scratchpad tools and start with an empty scratchpad, whether or not the main run was launched with `--scratchpad`; a subagent's scratchpad is its own and is never handed back to the main agent. The `delegate` tool takes a `check` parameter — a shell command the harness runs in the project root *after* the child finishes (60s timeout); its exit code and last 20 output lines (capped at 2000 chars) are appended to the answer as `[check <cmd>: exit N]`, so the child never sees it. A brief over 400 chars is echoed as the 400-char task head + "..." with the note "context, gate and check omitted; see the result". A subagent that hits the round cap is continued with a checkpoint message rather than returned, and its stop reason maps to a note the parent reads: overflow → "[Subagent ran out of context window]", deadline → "[Subagent hit the task deadline]", error → "[Subagent hit an error]", cap → "[Subagent hit the tool round cap]", cancelled → "The operator cancelled the request.", no turn → "The request didn't fit the context window."
 
-Tool results do not accumulate forever. Within a turn, a result stays in the context for `--tool-expiration` rounds and is then replaced by an expired stub; when a turn ends at the round cap and the task continues in a new turn, every result of the previous turn is stubbed. History turns are always stubbed. The `<scratchpad>` block, appended to the end of every request, is the only working memory that survives both: it shows which round the run is on and names the calls whose results expire next, each with what it was about (`Read tests/conftest.py`, `Bash grep -n "def answer"`), so the model can decide what to persist without recalling what an earlier round read. With `--scratchpad`, the model gets `scratchpad_write`, `scratchpad_delete` and `scratchpad_clear` (all unconfirmed, the state lives on the chat state and is restored with the session), and the system prompt is extended with the mechanics of rounds, expiration and the scratchpad, formatted with the run's own settings.
+Tool results do not accumulate forever. Within a turn, a result stays in the context for `--tool-expiration` rounds and is then replaced by an expired stub; when a turn ends at the round cap and the task continues in a new turn, every result of the previous turn is stubbed. History turns are always stubbed. The `<scratchpad>` block, appended to the end of every request, is the only working memory that survives both: it shows which round the run is on and names the calls whose results expire next, each with what it was about (`Read tests/conftest.py`, `Bash grep -n "def answer"`), so the model can decide what to persist without recalling what an earlier round read. With `--scratchpad`, the model gets `scratchpad_write`, `scratchpad_delete` and `scratchpad_clear` (all unconfirmed, the state lives on the chat state and is restored with the session), and the system prompt is extended with the mechanics of rounds, expiration and the scratchpad, formatted with the run's own settings. Entries carry a `kind` field (`todo`, `done`, `fact`, `hypothesis`, `block`), and the `<scratchpad>` block renders them grouped by kind in the order DONE, FACTS, HYPOTHESES, BLOCKS, TO DO. At the tool-round cap, scratchpad calls still run before the turn ends; other tool calls in the same reply are not run.
+
+### Context management
+
+- **Two-rung compaction ladder.** When generation room drops below the minimum, `CompactHistory` summarizes history into a synthetic summary turn. When history is already all summaries but the pending turn has ≥2 non-summary rounds, `CompactPendingTurn` (the dedicated checkpoint) folds all pending rounds except the last into one summary round. Transcripts are fitted to a budget via `fit_transcript` against `transcript_budget(context, instruction, target_tokens)`.
+- **Empty-summary retry / fallback digest.** If the model returns an empty summary, it is asked once more with a nudge; if still empty, a deterministic digest of the previous summary/checkpoint text plus one line per turn/round naming the tool calls is used instead.
+- **Salvage.** A turn that ends by overflow, deadline, or error has its record salvaged — "TURN ENDED: {stop}" + checkpoint body + scratchpad entries + remaining rounds, fitted to `checkpoint_target * context` tokens — so the model still gets what it wrote down.
+- **Re-read guard.** A read-only (non-confirming) call answered 2+ times in a turn with nothing written/edited/run since gets a corrective notice instead of the result. The count resets at any confirming call.
+- **Tool result cap** (`--tool-cap`). Default 10% of the context window (chars, 4 chars/token). Read and Bash cut to it and emit a continuation pointer (Read: `[showing lines X-Y of Z (cap N chars); continue with offset=M]`; Bash: `[output is N characters, cut to M; the whole of it is saved at .desh/out/bash-...txt — Read it with offset and limit]`).
+- **Fold functions.** Once a call ran, the round echoes it with its long argument removed and a `folded` note in its place, a key the schema does not have: a Write's content over 120 chars becomes `folded: "N characters written; Read the file to see it"`, an Edit's old and new strings over 240 chars together become their sizes, a `scratchpad_write` value becomes `folded: "N characters, shown in the scratchpad block"`, and a delegate brief over 400 chars keeps the head of its task. The argument is removed rather than replaced because the model copies the shape of its own echoed calls: a copied fold is a rejected call, never a marker written as a value.
 
 ### Orchestrator mode (`coding.sh`)
 
 `coding.sh` is a ready-made orchestrator entry point that wraps `chat-des` with a delegation-focused system prompt. It launches the agent with `--delegate` and a dynamically generated project file tree appended to the system prompt, so the orchestrator always has an up-to-date map of the codebase.
 
 ```bash
-./coding.sh [MODEL] [extra chat-des args...]
+./coding.sh [extra chat-des args...]
 ```
 
-- **`MODEL`** (optional, first positional argument): overrides the default model (`Qwen3.8-27B-UD-Q4_K_M-64K`). All remaining positional arguments are passed through to `chat-des`.
+- `coding.sh` no longer takes a `MODEL` positional argument: it runs `./src/desh_chat/cli.py` with `-sf .sessions -cl .completions.log -dl .des.log -sp <orchestrator system prompt> --delegate --scratchpad --auto --cont "$@"`, and the CLI default model applies. All remaining positional arguments are passed through to the CLI.
 - The orchestrator prompt instructs the agent to decompose work into gated stages (investigation → tests → implementation) and to delegate each stage to a subagent.
-- The file tree is generated at launch via `find`, excluding `venv`, `.git`, `sandbox`, `.sessions`, `__pycache__`, `*.egg-info`, `.pytest_cache`, and log/JSON files.
+- The file tree is generated at launch via `find`, excluding `venv`, `evals`, `.git`, `sandbox`, `.sessions`, `__pycache__`, `*.egg-info`, `.pytest_cache`, and `.log`/`.jsonl`/`.json`/`.bad` files.
 - `README.md` and `INDEX.md` are **not** included in the orchestrator's prompt; they are available to subagents on demand.
+
+### Evals: wc-like harness
+
+`evals/wc-like/` is a repeatable eval that has chat-des implement a `wc`-like CLI from `task.txt` + `train/` samples, then grades it against held-out goldens in `test/` that the run never sees.
+
+- `./run_eval.sh <EVAL_SETTINGS.json>` — one run. The settings is flat JSON whose keys map 1:1 to chat-des flags (underscores); unknown keys are refused. It erases the llama-server KV cache for a cold start, runs in its own `runs/run-<ts>-<hash6>/` (workspace, session, des/completions logs, stdout/stderr, manifest), then auto-grades.
+- `./sweep.sh <SWEEP.json>` or `./sweep.sh <SETTINGS.json> <REPEATS> [NAME]` — repeated runs. A sweep set names a baseline plus named sweeps (reps + override, validated before any inference is spent); results land in `sweeps/<name>-<ts>/` with `settings.json`, `manifest.json`, `summary.json` (per-metric mean/min/max/stdev over 18 metrics incl. compactions, checkpoints, salvaged_turns, rereads_refused, cut_results, first_green_round) and, for a set, `compare.json` across sweeps.
+- `grade.py <run dir>` — checks: held-out scores, CLI contract, the agent's own pytest suite, stdlib-only imports, no tool call touching `test/` or `../`, and run stats → `result.json`.
+- `summarise.py <SWEEP_DIR>` / `compare.py <SET_DIR>` — pure functions of the graded files; rerunnable on any old sweep.
 
 ### In-chat commands
 
@@ -145,7 +169,10 @@ The repository structure is described in more detail in [INDEX.md](INDEX.md).
 | `desh.tools` | Tool definitions, schema derivation from Python signatures/docstrings, confirmation policy, bounded results, and tool-side errors returned as text. |
 | `desh.render` | Terminal colour palette and readline-safe prompts. |
 | `desh.llama` | llama-server HTTP/SSE protocol (`wire`, `server`), completions logging, token accounting, ESC watcher, and streaming render stages. |
+| `desh.llama.send_direct` | Standalone CLI for direct llama-server requests (python port of an earlier bash prototype). |
+| `desh.llama.pyscan` | Streaming Python syntax scanner for the renderer; classifies fence-body text into coloured spans while fragments are still arriving. |
 | `desh_chat` | CLI, immutable chat state, turn events, commands, sessions, terminal display, confirmation gate, and toolsets. |
+| `desh_chat.handlers` | Error/interrupt handlers for the chat loop: `AutoOff` event, `on_error` (mid-turn error closes the turn as cancelled with `stop="error"`), `on_interrupt` (in auto mode Ctrl+C turns auto off and cancels the in-flight turn; in manual mode it prints "~ Interrupted" and exits). |
 
 A normal turn is an event loop, rather than a single blocking completion:
 
