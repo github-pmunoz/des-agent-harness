@@ -25,8 +25,9 @@ SCRATCHPAD_SYSTEM_PROMPT = (
     "go; do not wait for the expiry notice or the cap.\n"
     "Every entry has a kind: todo, a step still to do; done, a finished step and its outcome; fact, "
     "something established from a file or a result; hypothesis, something you believe but have not "
-    "verified; block, what stops progress and what it needs. Write a key again to change its kind or "
-    "its value: a todo becomes done, a hypothesis becomes a fact once checked."
+    "verified; block, what stops progress and what it needs. An item keeps its key for life: when a "
+    "todo is done, write the SAME key again as done with the outcome; when a hypothesis is checked, "
+    "write it again as a fact. Never add a second key for an item that already has one."
 )
 
 def write(key: str, kind: Kind, value: str, scratchpad: dict[str, dict]) -> str:

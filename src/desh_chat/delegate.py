@@ -48,7 +48,7 @@ DELEGATE_SYSTEM_PROMPT = (
 
 Orient yourself before searching: if the project root has an INDEX.md, `grep -n \"#\" INDEX.md` maps its files; if it has a README.md, read it for the design. When you use find or grep, exclude venv, .git and __pycache__ and skip .log, .json and .jsonl files. Tool output is cut to a fixed size (the cut says where the rest is), so keep it short: run tests with -q and pipe long output through tail.
 
-You are handling a subtask delegated by another agent. Complete it using your tools, then reply with your final answer only: what you found or did, concretely, without narrating the steps. Your reply is all the delegating agent will see. If the task cannot be completed as specified, stop and report why."""
+You are handling a subtask delegated by another agent. Complete it using your tools, then reply with your final answer only: what you found or did, concretely, without narrating the steps. Your reply is all the delegating agent will see, and it is read into a context that is smaller than yours: report exactly what the task asked to be reported, name files by path and line rather than pasting them, and never include whole files, whole logs or whole command outputs. If the task cannot be completed as specified, stop and report why."""
 )
 
 CAP_CONTINUE_MSG = ("Checkpoint: the tool round cap was reached. Any scratchpad call in your last reply ran; its other tool calls were not run. "
@@ -110,7 +110,7 @@ class Delegate:
             task: What the subagent must do and what it must report back, complete and specific.
             context: Background it needs that is not in the task: relevant facts, paths, constraints.
             gate: The success criterion in words: when the subagent is done. Appended to the subagent's instructions, so it knows what "done" means.
-            check: A shell command the harness runs in the project root after the subagent finishes; its exit code and last output lines are appended to the answer you receive. The subagent never sees it.
+            check: A shell command the harness runs in the project root after the subagent finishes; its exit code and last output lines are appended to the answer you receive. The subagent never sees it. Put every verification here (a grep, a test run) instead of delegating it: a verification subagent is a whole run spent on one command.
         """
         # `settings` is not in the Args block on purpose: the registry injects it (Tool.inject) and
         # the schema leaves it out, so the model cannot pass it. Register with inject=("settings",).

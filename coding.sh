@@ -4,12 +4,6 @@ DESH_HOME=$(dirname $0)
 SESSIONS_DIR="$DESH_HOME/.sessions"
 COMPLETIONS_LOG="$DESH_HOME/.completions.log"
 DES_LOG="$DESH_HOME/.des.log"
-MODEL="Qwen3.8-27B-UD-Q4_K_M-64K" # default, override with first positional argument
-MODEL="${1:-$MODEL}"
-[ -n "$1" ] && shift
-CONTEXT=65536
-TURN_TOKENS=65536
-MAX_TURN_ROUNDS=8
 SYSTEM_PROMPT=$(cat <<'EOF'
 You are the orchestrating agent for one project directory. Your role is to coordinate with the operator on the work that needs to be done. You receive the operator's request, disambiguate it, understand it, and delegate the work to subagents. To perform your role you only need to understand the essence of a requirement, not the details. When actual details are needed from the codesource, that's where you delegate a subagent to do an investigation. Having the details at hand, you can then make a plan for implementation. Prefer planning the work in gated stages based on Test Driven Develepment. A typical task will be decomposed in at least three delegated stages: (1) investigation of the codesource to gather the implementation details and blast radius, (2) implementation of the unit tests that establish the new contract required by the task, and (3) implementation of the actual code until the gate and unit tests pass.
 
@@ -23,7 +17,7 @@ Authoring specs for the subagents is your main job. The subagent sees nothing bu
 Operating rules:
 - The file tree appended to this prompt is your map of the project. Use it to name exact file paths in your briefs; never ask a subagent to find files you could have named yourself.
 - Batch your questions. One investigation brief per stage, covering everything that stage needs, beats a stream of one-fact lookups. Each delegation is a full child run; spend them on substance, not trivia.
-- Verify with the check parameter, not with a follow-up delegation. A shell command in check is your own eyes on the result; a separate subagent to confirm it is a wasted run.
+- Verify with the check parameter, never with a delegation. Every delegation that changes files carries a check: the test run or the grep that proves the change, on the same call. A shell command in check is your own eyes on the result; a subagent whose task is to run a command or confirm a phrase is a wasted run, and you must not author one. When a check fails, read its output before acting: a grep that misses because of formatting is not a missing change.
 
 Project description: DES agent harness
 A pure-state discrete-event machine architecture: `event.execute(state)->(state, events)` returns a new state and future events. State is frozen, and every step is transactional: a step that raises leaves the last committed state in place. 
@@ -40,7 +34,7 @@ EOF
 
 # The orchestrator's map of the project is the file tree, generated at launch so it cannot go
 # stale. README.md and INDEX.md are for the subagents, which read them on demand.
-PROJECT_TREE=$(cd "$DESH_HOME" && find . -path ./venv -prune -o evals -prune -o -path ./.git -prune -o -path ./sandbox -prune \
+PROJECT_TREE=$(cd "$DESH_HOME" && find . -path ./venv -prune -o -path ./evals -prune -o -path ./.git -prune -o -path ./sandbox -prune \
     -o -path ./.sessions -prune -o -name __pycache__ -prune -o -name '*.egg-info' -prune -o -name '.pytest_cache' -prune \
     -o -type f ! -name '*.log' ! -name '*.jsonl' ! -name '*.json' ! -name '*.bad' -print | sort)
 SYSTEM_PROMPT="$SYSTEM_PROMPT"$'\n\n'"Project file tree (paths relative to the project root):"$'\n'"$PROJECT_TREE"
@@ -52,9 +46,8 @@ $BIN \
     -cl "$COMPLETIONS_LOG" \
     -dl "$DES_LOG" \
     -sp "$SYSTEM_PROMPT" \
-    -m "$MODEL"\
-    -c $CONTEXT\
-    -mtr $MAX_TURN_ROUNDS \
-    -mt $TURN_TOKENS \
     --delegate \
+    --scratchpad \
+    --auto \
+    --cont \
     "$@"
