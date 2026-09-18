@@ -14,4 +14,8 @@ evals/wc-like/test/
 evals/wc-like/runs/
 !evals/wc-like/baseline.json
 evals/wc-like/sweeps/
+evals/readme-update/runs/
+evals/readme-update/sweeps/
+!evals/readme-update/baseline.json
+!evals/readme-update/contexts.json
 .desh/

@@ -1,0 +1,8 @@
+{
+  "baseline": "baseline.json",
+  "sweeps": [
+    {"name": "32k", "reps": 3, "override": {"context": 32768, "max_turn_tokens": 32768}},
+    {"name": "16k", "reps": 3, "override": {}},
+    {"name": "8k",  "reps": 3, "override": {"context": 8192, "max_turn_tokens": 8192}}
+  ]
+}
