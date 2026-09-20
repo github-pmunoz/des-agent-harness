@@ -38,6 +38,7 @@ METRICS = (
     ("sub_answered", ("stats", "sub", "answered")),
     ("sub_overflows", ("stats", "sub", "overflows")),
     ("sub_capped", ("stats", "sub", "capped")),
+    ("sub_repeat_stops", ("stats", "sub", "repeat_stops")),
     ("sub_salvaged", ("stats", "sub", "salvaged")),
     ("sub_checks_failed", ("stats", "sub", "checks_failed")),
     ("sub_answers_cut", ("stats", "sub", "answers_cut")),

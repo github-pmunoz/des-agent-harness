@@ -48,6 +48,8 @@ DELEGATE_PROMPT_HEAD = "You are a coding agent working inside one project direct
 CUT_MARKERS = ("characters truncated", "[showing lines", "the whole of it is saved at")
 SPILL_DIR = ".desh/out"
 FOLD_EVENTS = ("CompactHistory", "CompactPendingTurn")
+# The answer the repeated-round guard leaves (desh_chat.events.AppendRound).
+REPEAT_STOP = re.compile(r"\[stopped: .* repeated three times with identical results\]\s*$")
 
 # Fact groups that are reported and not scored: bonus is what the committed update itself missed;
 # hygiene (only `absent` patterns) and kept (true before, true still) are groups a README nobody
@@ -313,6 +315,12 @@ def session_stats(session: dict | None) -> dict:
     last = real[-1] if real else {}
     results = [res.get("content", "") for t in turns for r in t.get("rounds", []) for res in r.get("results", [])]
     pad = (turns[-1].get("scratchpad") if turns else None) or {}
+    # The repeated-round guard ends a turn without a stop reason: the session records an answered
+    # turn whose answer is the guard's own note, and nothing of the turn is salvaged. It is told
+    # apart here by that note, so a run of work thrown away does not count as an answer.
+    stop = last.get("stop", "") if real else None
+    if stop == "" and REPEAT_STOP.search(last.get("assistant") or ""):
+        stop = "repeat"
     final_kinds: dict[str, int] = {}
     for entry in pad.values():
         kind = entry.get("kind", "fact") if isinstance(entry, dict) else "fact"
@@ -328,8 +336,8 @@ def session_stats(session: dict | None) -> dict:
         "rereads_refused": sum(1 for c in results if c.startswith("Not run: ") and "already been answered" in c),
         "scratchpad_final": final_kinds,
         "open_todos": final_kinds.get("todo", 0),
-        "stop": last.get("stop", "") if real else None,
-        "final_answer": bool(last.get("assistant")) and not last.get("stop"),
+        "stop": stop,
+        "final_answer": bool(last.get("assistant")) and not stop,
     }
 
 
@@ -396,6 +404,7 @@ def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifes
         "deadlines": sum(1 for d in delegations if d["stop"] == "deadline"),
         "errors": sum(1 for d in delegations if d["stop"] == "error"),
         "capped": sum(1 for d in delegations if d["stop"] == "cap"),
+        "repeat_stops": sum(1 for d in delegations if d["stop"] == "repeat"),
         "salvaged": total("salvaged_turns"),
         "answered": sum(1 for d in delegations if d["final_answer"]),
         "checks_failed": sum(1 for d in delegations if d["check_exit"] not in (None, 0)),
@@ -468,7 +477,7 @@ def summary(r: dict) -> str:
         f" {m['salvaged_turns']} salvaged, tools {m['tool_mix']}   not run: {m['calls_not_run']}",
         f"  main scratchpad: writes {m['scratchpad_kinds']} (before first fold: {m['scratchpad_writes_before_first_fold']}),"
         f" at the end {m['scratchpad_final']}",
-        f"  subagents: {sub['count']} runs, {sub['answered']} answered, {sub['overflows']} overflow, {sub['capped']} cap,"
+        f"  subagents: {sub['count']} runs, {sub['answered']} answered, {sub['overflows']} overflow, {sub['capped']} cap, {sub['repeat_stops']} repeat-stop,"
         f" {sub['deadlines']} deadline, {sub['errors']} error, {sub['salvaged']} salvaged, {sub['checks_failed']} checks failed,"
         f" peak {sub['prompt_tokens_peak']}",
         f"  {'#':>3} {'stop':<9}{'rnds':>5}{'peak':>7}{'cmp':>4}{'ckp':>4}{'slv':>4}{'cut':>4}{'rep':>4}{'rrd':>4}{'pad':>4}{'chk':>5}{'ans':>7}{'lost':>6}{'s':>6}  brief",
