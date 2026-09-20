@@ -79,11 +79,11 @@ class TestValue:
         p = Scratchpad.from_dict({"path": "src/x.py", "step": {"kind": "todo", "value": "run it"}})
         assert p.memory == (Entry("path", "fact", "src/x.py"), Entry("step", "todo", "run it"))
 
-    def test_message_names_the_expiration_and_lists_the_entries_or_says_empty(self):
-        empty = Scratchpad().message(tool_expiration=4)
+    def test_message_says_results_do_not_survive_and_lists_the_entries_or_says_empty(self):
+        empty = Scratchpad().message()
         assert empty.startswith("<scratchpad>") and empty.endswith("</scratchpad>")
-        assert "4 rounds" in empty and "(empty)" in empty
-        full = Scratchpad().with_entry("path", "fact", "src/x.py").with_entry("id", "fact", "42").message(tool_expiration=4)
+        assert "do not survive the turn" in empty and "(empty)" in empty
+        full = Scratchpad().with_entry("path", "fact", "src/x.py").with_entry("id", "fact", "42").message()
         assert "path: src/x.py\nid: 42\n" in full and "(empty)" not in full
 
     def test_the_block_groups_the_entries_by_kind_and_leaves_empty_kinds_out(self):
@@ -98,11 +98,11 @@ class TestValue:
         headers = [l for l in lines if l not in ("a: 1", "b: 2", "c: 3", "d: 4")]
         assert len(headers) == 3                                    # todo, fact, block; no done, no hypothesis
         assert not any("done" in h or "hypothesis" in h for h in headers)
-        assert text in pad.message(6)
+        assert text in pad.message()
 
     def test_to_context_is_a_user_message(self):
         pad = Scratchpad().with_entry("k", "fact", "v")
-        assert pad.to_context(tool_expiration=6) == {"role": "user", "content": pad.message(6)}
+        assert pad.to_context() == {"role": "user", "content": pad.message()}
 
 
 # ---------------------
@@ -259,7 +259,7 @@ class TestRequest:
         later = make_state(pending=PendingTurn("hello").add_round(Round("", (tc,))).add_round(Round("", (tc,))),
                            settings=settings, scratchpad=Scratchpad()).scratchpad_block()
         assert "Round 3 of 8 in this turn." in later["content"]
-        assert "Round" not in Scratchpad().message(6)     # the pure form carries no counter
+        assert "Round" not in Scratchpad().message()     # the pure form carries no counter
 
     def test_no_scratchpad_means_no_block(self, make_state):
         ev = self.stream_event(make_state)
@@ -274,11 +274,6 @@ class TestRequest:
         assert with_pad.prior_tokens - plain.prior_tokens == estimate_tokens(block["content"])
         assert with_pad.unpriced == "hello" and plain.unpriced == "hello"
 
-    def test_the_block_uses_the_configured_expiration(self, make_state):
-        settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, tool_expiration=3)
-        ev = self.stream_event(make_state, settings=settings, scratchpad=Scratchpad())
-        assert "after 3 rounds" in ev.request.messages[-1]["content"]
-
     def test_the_block_takes_room_from_the_prompt_not_the_budget(self, make_state):
         pad = Scratchpad().with_entry("k", "fact", "v" * 4000)
         state = make_state(pending=PendingTurn("hello"), scratchpad=pad)
@@ -291,7 +286,7 @@ class TestRequest:
         """A usage frame without a prompt count: turn_tokens falls back to estimating the new
         prompt text, which must be the user message, not the block that came last."""
         pad = Scratchpad().with_entry("k", "fact", "v" * 2000)
-        req = Request(messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "hello"}, pad.to_context(6)],
+        req = Request(messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "hello"}, pad.to_context()],
                       model=MODELS[0], temperature=0.3, max_tokens=100, think=False, stream=True)
         server = FakeServer(script=[{"content": "hi", "usage": {"completion_tokens": 5}}])
         state = with_server(make_state, server, pending=PendingTurn("hello"), scratchpad=pad)

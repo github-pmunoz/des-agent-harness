@@ -273,7 +273,7 @@ class AppendRound(Event):
 
 # A read-only call answered this many times in a turn, with nothing written, edited or run
 # since, is a loop whatever its period: the model is re-reading what it already had and lost
-# (to expiry, or to a checkpoint that dropped file contents). Seen at 4k: two 30-round turns of
+# (to a checkpoint that dropped file contents). Seen at 4k: two 30-round turns of
 # nothing but the same three reads, which the two-round repeat guard could not see.
 REREAD_LIMIT = 2
 REREAD_TEXT = ("Not run: {call} has already been answered {n} times this turn with nothing written, edited or run since, "
@@ -537,9 +537,9 @@ class CompactPendingTurn(Event):
         s = state.settings
         instruction = s.checkpoint_prompt      # its own instruction and share of the context (see CHECKPOINT_PROMPT)
         target_tokens = int(s.context * s.checkpoint_target)
-        # The rounds render as the model last saw them (the request's bands) and are fitted to what
-        # the window leaves next to the instruction and the summary (PendingTurn.transcript).
-        transcript = pending.transcript(pending.since_last_summary()[:-1], state.expire_after(),
+        # The rounds render whole, as the model saw them, and are fitted to what the window leaves
+        # next to the instruction and the summary (PendingTurn.transcript).
+        transcript = pending.transcript(pending.since_last_summary()[:-1],
                                         transcript_budget(s.context, instruction, target_tokens))
         gen_budget = int(min(target_tokens, s.context - estimate_tokens(instruction) - estimate_result_tokens(transcript), s.turn_token_cap * s.context))
         if gen_budget < s.min_compaction_tokens:
@@ -617,13 +617,12 @@ class NextRound(Event):
         # it is a stable prefix the server can keep cached. It is not part of the turn — pending
         # and history never hold it — so it is priced here as the current value and counted as
         # prior, the way the system prompt is, and never as the round's own text. It also carries
-        # the expiring line: the block is re-sent every request anyway, so announcing there which
-        # rounds lose their results next costs no cache, where a note inside the round would.
+        # the line that says the cap is one round away: the block is re-sent every request anyway,
+        # so announcing it there costs no cache, where a note inside the round would.
         #
-        # Tool results expire by round distance (PendingTurn.stubbed): the pending turn renders its
-        # bands for this request, history turns are always stubbed (Turn.messages). The pending
-        # turn is never left out of the request, however many rounds it holds — only its results age.
-        k = state.expire_after()
+        # The pending turn renders whole, so each request appends to the last one; history turns
+        # are always stubbed (Turn.messages). The pending turn is never left out of the request,
+        # however many rounds it holds — a checkpoint is what makes room inside it.
         block = state.scratchpad_block()
         scratchpad_tokens = state.scratchpad_tokens()
         prior = sys_prompt_tokens + state.tools_tokens() + scratchpad_tokens     # re-sent whole every request, never a round's own text
@@ -633,7 +632,7 @@ class NextRound(Event):
             request=Request(
                 messages=([{"role": "system", "content": state.system_prompt}]
                           + [m for t in view for m in t.messages()]
-                          + pending.messages(expire_after=k)
+                          + pending.messages()
                           + ([block] if block is not None else [])),
                 model=state.settings.model,
                 temperature=state.settings.temperature,
@@ -642,6 +641,6 @@ class NextRound(Event):
                 stream=True,
                 tools=state.tools.schemas(),
                 ),
-            prior_tokens=prior + sum(t.tokens for t in view) + pending.priced_tokens(k),
+            prior_tokens=prior + sum(t.tokens for t in view) + pending.priced_tokens(),
             unpriced=pending.unpriced_text(),
         )]

@@ -37,7 +37,8 @@ from typing import TextIO
 from desh.engine import Engine
 from desh.llama.logger import Logger
 from desh.render import Gutter, Palette, c_out
-from desh.tools import ToolRegistry
+from desh.tools import DEFAULT_RESULT_CHARS, ToolRegistry
+from desh_chat.coding import spill
 from desh_chat.state import ChatHistory, ChatState, Deadline, InferenceEngine, Settings, StopReason
 from desh_chat.events import TurnStart
 from desh_chat.scratchpad import SCRATCHPAD_SYSTEM_PROMPT, Scratchpad
@@ -96,6 +97,9 @@ class Delegate:
     completions_log: Logger | None = field(default=None, repr=False)
     des_log: TextIO | None = field(default=None, repr=False)
     debug: bool = False
+    # The cap on one result, the registry's bound made known to the tool (as Workspace.result_chars
+    # is): an answer over it is saved whole where the parent can Read it, and says so.
+    result_chars: int = DEFAULT_RESULT_CHARS
 
     def delegate(self, task: str, context: str = "", gate: str = "", check: str = "", *,
                  settings: Settings | None = None, deadline: Deadline | None = None) -> str:
@@ -121,8 +125,7 @@ class Delegate:
         scratchpad = Scratchpad() if self.offers_scratchpad() else None
         system_prompt = DELEGATE_SYSTEM_PROMPT
         if scratchpad is not None:
-            system_prompt += "\n\n" + SCRATCHPAD_SYSTEM_PROMPT.format(tool_expiration=child_config.tool_expiration,
-                                                                     max_tool_rounds=child_config.max_tool_rounds)
+            system_prompt += "\n\n" + SCRATCHPAD_SYSTEM_PROMPT.format(max_tool_rounds=child_config.max_tool_rounds)
         if context:
             system_prompt += "\n\nContext from the delegating agent:\n" + context
         if gate:
@@ -155,7 +158,16 @@ class Delegate:
         last = final.history.last_non_summary()
         has_answer = last is not None and last.visible and last.assistant != ""
         text = answer(final)
-        return self._checked(text, check) if has_answer else text
+        return self._spilled(self._checked(text, check) if has_answer else text, task)
+
+    def _spilled(self, text: str, task: str) -> str:
+        """An answer over the cap goes whole to a file the parent can Read by range, and its last
+        line says so. The registry's cut keeps the tail, so the pointer survives whatever it drops:
+        the middle of a long answer, or of a salvaged record, is no longer lost to the parent."""
+        if len(text) <= self.result_chars:
+            return text
+        path = spill(self.root, "delegate", task, text)
+        return text + f"\n[answer is {len(text)} characters, cut to {self.result_chars}; the whole of it is saved at {path} — Read it with offset and limit]"
 
     def offers_scratchpad(self) -> bool:
         """Whether the subagent's registry holds a tool that works on the scratchpad (Tool.inject)."""

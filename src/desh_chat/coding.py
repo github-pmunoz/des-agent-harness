@@ -32,6 +32,19 @@ from desh.tools import DEFAULT_RESULT_CHARS, ToolRegistry
 SPILL_DIR = ".desh/out"     # under the root, so Read can reach it; ignored by git
 
 
+def spill(root: str, prefix: str, key: str, text: str) -> str:
+    """Save a result too long for the context whole under SPILL_DIR and return the path relative
+    to the root, for the pointer line that ends the result. Named by `prefix` (the tool), the time
+    and a hash of `key` (what the call was about), so two runs of one call do not collide."""
+    stamp = time.strftime("%H%M%S") + "-" + hashlib.sha1(f"{time.time_ns()}{key}".encode()).hexdigest()[:6]
+    rel = os.path.join(SPILL_DIR, f"{prefix}-{stamp}.txt")
+    full = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "w", encoding="utf-8") as f:
+        f.write(text)
+    return rel
+
+
 @dataclass(frozen=True)
 class Workspace:
     """One project root. The tool methods below are what the model calls.
@@ -178,15 +191,8 @@ class Workspace:
         return output + f"\n[output is {len(output)} characters, cut to {self.result_chars}; the whole of it is saved at {spill} — Read it with offset and limit]"
 
     def spill(self, command: str, output: str) -> str:
-        """Save a command's whole output under SPILL_DIR and return the path relative to the root.
-        Named by time and a hash of the command, so two runs of one command do not collide."""
-        stamp = time.strftime("%H%M%S") + "-" + hashlib.sha1(f"{time.time_ns()}{command}".encode()).hexdigest()[:6]
-        rel = os.path.join(SPILL_DIR, f"bash-{stamp}.txt")
-        full = os.path.join(self.root, rel)
-        os.makedirs(os.path.dirname(full), exist_ok=True)
-        with open(full, "w", encoding="utf-8") as f:
-            f.write(output)
-        return rel
+        """Save a command's whole output under SPILL_DIR and return the path relative to the root."""
+        return spill(self.root, "bash", command, output)
 
 
 FOLD_CHARS = 120    # an argument up to this long is echoed whole; a longer one is folded

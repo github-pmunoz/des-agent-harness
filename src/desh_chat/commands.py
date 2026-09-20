@@ -88,12 +88,6 @@ class Command(Event):
         value = self._int(lo=1)
         return state.record_setting_change("max_tool_rounds", value), [Info(f"↪ max_tool_rounds set to: {value}"), MaybeRegenerate()] + persist(state)
 
-    def _cmd_tool_expiration(self, state: ChatState) -> tuple[ChatState, list[Event]]:
-        if not self.args:
-            return state, [Info(f"tool_expiration: {state.settings.tool_expiration}"), MaybeRegenerate()]
-        value = self._int(lo=1, hi=state.settings.max_tool_rounds)
-        return state.record_setting_change("tool_expiration", value), [Info(f"↪ tool_expiration set to: {value}"), MaybeRegenerate()] + persist(state)
-
     def _cmd_models(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         self._no_args()
         return state, [Info("\n".join(state.inference.models)), MaybeRegenerate()]
@@ -174,7 +168,6 @@ COMMANDS: dict[str, CommandSpec] = {
     "history":         CommandSpec("show the conversation history",         Command._cmd_history),
     "max_turn_tokens": CommandSpec("set the max number of tokens per turn", Command._cmd_max_turn_tokens),
     "max_tool_rounds": CommandSpec("set the max number of tool rounds",     Command._cmd_max_tool_rounds),
-    "tool_expiration": CommandSpec("set tool_expiration (1..max_tool_rounds)", Command._cmd_tool_expiration),
     "models":          CommandSpec("list available models",                 Command._cmd_models),
     "model":           CommandSpec("set the model to use",                  Command._cmd_model),
     "temperature":     CommandSpec("set the temperature",                   Command._cmd_temperature),

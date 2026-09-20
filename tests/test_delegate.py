@@ -110,6 +110,7 @@ class TestCliWiring:
             assert [t.name for t in tools.tools] == ["Read", "delegate"]
             # the parent's settings go in untouched; the child derives its own per call (item below)
             assert delegate.settings == SETTINGS
+            assert delegate.result_chars == tools.max_result_chars == int(SETTINGS.context * 4 * 12.5 / 100.0)   # one cap, known to the tool
             assert tools.get("delegate").inject == ("settings", "deadline")
             assert tools.get("delegate").fold is fold_brief
 
@@ -236,19 +237,19 @@ class TestChildSetup:
     def test_a_registry_with_scratchpad_tools_gives_the_child_a_fresh_memory_and_the_prompt(self, make_state, monkeypatch, capsys):
         """The child has a scratchpad when its registry offers the tools — the same inject
         declaration ExecuteToolCalls commits on — and starts empty: none of the parent's
-        conversation, none of its memory. The prompt names the child's own expiration setting."""
+        conversation, none of its memory. The prompt names the child's own round cap."""
         from desh_chat import scratchpad as pad_tools
         from desh_chat.scratchpad import SCRATCHPAD_SYSTEM_PROMPT, Scratchpad
         monkeypatch.setattr("desh_chat.delegate.Engine", RecordingEngine)
         RecordingEngine.states.clear()
         inference, _ = with_server(make_state, FakeServer())
         tools = ToolRegistry().add(pad_tools.write, name="scratchpad_write", inject=("scratchpad",), confirm=False)
-        current = replace(SETTINGS, tool_expiration=3, max_tool_rounds=5)
+        current = replace(SETTINGS, max_tool_rounds=5)
         Delegate(root=".", inference=inference, settings=SETTINGS, tools=tools).delegate("task", context="ctx", settings=current)
         child, = RecordingEngine.states
         assert child.scratchpad == Scratchpad()
-        assert SCRATCHPAD_SYSTEM_PROMPT.format(tool_expiration=3, max_tool_rounds=5) in child.system_prompt
-        assert "at most 5 rounds" in child.system_prompt and "visible for 3 rounds" in child.system_prompt
+        assert SCRATCHPAD_SYSTEM_PROMPT.format(max_tool_rounds=5) in child.system_prompt
+        assert "at most 5 rounds" in child.system_prompt and "visible for" not in child.system_prompt
         assert child.system_prompt.index("How your context works") < child.system_prompt.index("Context from the delegating agent")
 
     def test_a_registry_without_scratchpad_tools_gives_the_child_none(self, make_state, monkeypatch, capsys):
@@ -570,3 +571,45 @@ class TestGateAndCheck:
         child_req = server.calls[1][1]
         blob = child_req.messages[0]["content"] + "".join(m["content"] for m in child_req.messages[1:])
         assert "secret-check" not in blob
+
+
+# ---------------------
+# An answer over the result cap is saved whole, and says where
+# ---------------------
+
+class LongAnswerEngine(RecordingEngine):
+    """RecordingEngine whose child answers with a long text: a head, a middle and a tail."""
+    ANSWER = "HEAD " + "m" * 3000 + " MIDDLE-FACT " + "m" * 3000 + " TAIL"
+
+    def run(self, state, seed, **kwargs):
+        return replace(state, history=ChatHistory((Turn("t", self.ANSWER, stop=StopReason.ANSWER),)))
+
+
+class TestAnswerSpill:
+    def test_an_answer_over_the_cap_is_saved_whole_and_the_pointer_survives_the_cut(self, make_state, monkeypatch, capsys, tmp_path):
+        from desh_chat.coding import SPILL_DIR
+        monkeypatch.setattr("desh_chat.delegate.Engine", LongAnswerEngine)
+        inference, _ = with_server(make_state, FakeServer())
+        d = Delegate(root=str(tmp_path), inference=inference, settings=SETTINGS, result_chars=1000)
+        result = d.delegate("task")
+        (saved,) = (tmp_path / SPILL_DIR).iterdir()
+        assert saved.name.startswith("delegate-") and saved.read_text() == LongAnswerEngine.ANSWER
+        assert result.startswith(LongAnswerEngine.ANSWER)       # the cut is the registry's, as for Bash
+        bounded = ToolRegistry(max_result_chars=1000).bound(result)
+        assert "MIDDLE-FACT" not in bounded
+        assert f"saved at {SPILL_DIR}/{saved.name}" in bounded and bounded.rstrip().endswith("Read it with offset and limit]")
+
+    def test_the_check_block_is_part_of_what_is_saved(self, make_state, monkeypatch, capsys, tmp_path):
+        from desh_chat.coding import SPILL_DIR
+        monkeypatch.setattr("desh_chat.delegate.Engine", LongAnswerEngine)
+        inference, _ = with_server(make_state, FakeServer())
+        Delegate(root=str(tmp_path), inference=inference, settings=SETTINGS, result_chars=1000).delegate("task", check="echo checked")
+        (saved,) = (tmp_path / SPILL_DIR).iterdir()
+        assert "[check `echo checked`: exit 0]\nchecked" in saved.read_text()
+
+    def test_an_answer_within_the_cap_is_not_saved(self, make_state, monkeypatch, capsys, tmp_path):
+        from desh_chat.coding import SPILL_DIR
+        monkeypatch.setattr("desh_chat.delegate.Engine", RecordingEngine)
+        inference, _ = with_server(make_state, FakeServer())
+        assert Delegate(root=str(tmp_path), inference=inference, settings=SETTINGS, result_chars=1000).delegate("task") == "42"
+        assert not (tmp_path / SPILL_DIR).exists()

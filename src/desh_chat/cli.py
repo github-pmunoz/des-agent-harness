@@ -39,8 +39,8 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     max_result_chars = int(settings.context * 4 * args.tool_cap / 100.0)
     ws = Workspace(args.workspace, result_chars=max_result_chars)
     tools = ToolRegistry(debug=args.debug, max_result_chars=max_result_chars)
-    # `target` is the argument a one-line mention of the call shows (the expiring line of the
-    # scratchpad block): a file tool is about its path, Bash about its command, a delegate about
+    # `target` is the argument a one-line mention of the call shows (a digest line, in place of
+    # a folded round): a file tool is about its path, Bash about its command, a delegate about
     # its task, a scratchpad tool about its key.
     if args.read:
         tools = tools.add(ws.read, name="Read", confirm=False, target="file_path")
@@ -62,7 +62,8 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
                           .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False, target="key")
                           .add(scratchpad.clear, name="scratchpad_clear", inject=("scratchpad",), confirm=False))
         delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
-                            session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug)
+                            session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug,
+                            result_chars=max_result_chars)
         # the parent's CURRENT settings travel with every call; the child derives its own from them
         tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief, target="task")
     if args.scratchpad:
@@ -108,8 +109,7 @@ def main():
     ap.add_argument("-t",   "--temperature",    type=float, default=0.3)
     ap.add_argument("-c",   "--context",        type=int, default=65536, help="context window size")
     ap.add_argument("-mt",  "--max-turn-tokens",type=int, default=65536, help="max tokens per turn")
-    ap.add_argument("-mtr", "--max-tool-rounds",type=int, default=30, help="max tool rounds per turn")
-    ap.add_argument("-te",  "--tool-expiration",type=int, default=10, help="rounds after which tool results expire from context")
+    ap.add_argument("-mtr", "--max-tool-rounds",type=int, default=10, help="max tool rounds per turn")
     ap.add_argument("-sp",  "--system-prompt",  default="You are a helpful assistant. Reply concisely.", help="default: a plain assistant prompt, or the coding-agent prompt with --coding")
     ap.add_argument("-th",  "--think",          action="store_true", help="enable thinking")
     ap.add_argument("-cl",  "--completions-log", default="", help="JSONL telemetry file")
@@ -137,7 +137,7 @@ def main():
     session_file = resolve_session_file(args.session, args.sessions_folder, run_id)
     system_prompt = args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely."
     if args.scratchpad:
-        system_prompt += "\n\n" + SCRATCHPAD_SYSTEM_PROMPT.format(tool_expiration=args.tool_expiration, max_tool_rounds=args.max_tool_rounds)
+        system_prompt += "\n\n" + SCRATCHPAD_SYSTEM_PROMPT.format(max_tool_rounds=args.max_tool_rounds)
     # Setup logging
     if args.des_log:
         if(d := os.path.dirname(args.des_log)):
@@ -157,7 +157,6 @@ def main():
         context=args.context,
         max_turn_tokens=args.max_turn_tokens,
         max_tool_rounds=args.max_tool_rounds,
-        tool_expiration=args.tool_expiration,
         auto=args.auto,
         checkpoint_target=args.checkpoint_target,
     )

@@ -92,7 +92,7 @@ class TestSerialization:
 class TestSettingsSerialization:
     def test_to_dict_is_plain_json_and_round_trips_all_fields(self):
         s = Settings(model="model-b", temperature=0.9, think=True, context=8192, max_turn_tokens=4096,
-                     max_tool_rounds=7, tool_expiration=3, compaction_threshold=0.5,
+                     max_tool_rounds=7, compaction_threshold=0.5,
                      compaction_target=0.2, turn_token_cap=0.3, min_compaction_tokens=128,
                      auto=True, compaction_prompt="summarise it", checkpoint_target=0.1, checkpoint_prompt="checkpoint it")
         assert Settings.from_dict(s.to_dict()) == s
@@ -182,7 +182,7 @@ class TestLoadSession:
 
     def test_load_restores_settings_from_a_v4_document(self, make_state, tmp_path):
         doc_settings = Settings(model="model-b", temperature=0.9, think=True, context=8192,
-                                max_turn_tokens=4096, max_tool_rounds=7, tool_expiration=3,
+                                max_turn_tokens=4096, max_tool_rounds=7,
                                 compaction_threshold=0.5, compaction_target=0.2,
                                 turn_token_cap=0.3, min_compaction_tokens=128, auto=True,
                                 compaction_prompt="summarise it")
@@ -194,7 +194,7 @@ class TestLoadSession:
 
     def test_load_replays_settings_turns(self, make_state, tmp_path):
         doc_settings = Settings(model="model-a", temperature=0.3, think=False, context=16384,
-                                max_turn_tokens=8192, max_tool_rounds=7, tool_expiration=3)
+                                max_turn_tokens=8192, max_tool_rounds=7)
         turns = [
             {"user": "", "assistant": "", "tokens": 1, "stop": "setting", "type": "settings", "delta": {"model": "model-a", "max_tool_rounds": 5}},
             {"user": "", "assistant": "", "tokens": 1, "stop": "setting", "type": "settings", "delta": {"model": "model-b"}},
@@ -204,15 +204,25 @@ class TestLoadSession:
         new_state, _ = LoadSession().execute(make_state(session_file=str(path)))
         assert new_state.settings.model == "model-b"       # the last settings turn wins
         assert new_state.settings.max_tool_rounds == 5     # an earlier delta still applies
-        assert new_state.settings.tool_expiration == 3     # untouched by any turn: the doc-seed value
-        assert new_state.settings.temperature == 0.3       # likewise the doc-seed value
+        assert new_state.settings.temperature == 0.3       # untouched by any turn: the doc-seed value
+
+    def test_load_ignores_a_setting_that_no_longer_exists(self, make_state, tmp_path):
+        """A file written when tool_expiration was a setting carries it in the seed and may carry
+        it in a settings turn: both load, neither has an effect, the other deltas still apply."""
+        seed = {**Settings(model="model-a", temperature=0.3, think=False, context=16384, max_turn_tokens=8192).to_dict(), "tool_expiration": 3}
+        turns = [{"user": "", "assistant": "", "tokens": 1, "stop": "setting", "type": "settings", "delta": {"tool_expiration": 4, "max_tool_rounds": 5}}]
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({"version": ChatHistory.SESSION_FORMAT, "turns": turns, "settings": seed}))
+        new_state, _ = LoadSession().execute(make_state(session_file=str(path)))
+        assert new_state.settings.max_tool_rounds == 5 and not hasattr(new_state.settings, "tool_expiration")
+        assert len(new_state.history) == 1                 # the turn stays on the record
 
     def test_load_replays_settings_turns_on_top_of_the_seed(self, make_state, tmp_path):
         # end-to-end: the seed holds the settings in force when the file was created; the settings
         # turns replay in order on top of it (last change wins), and every field no turn touched
         # comes from the seed — not from the CLI settings
         seed = Settings(model="model-a", temperature=0.5, think=True, context=8192, max_turn_tokens=4096,
-                        max_tool_rounds=7, tool_expiration=3)
+                        max_tool_rounds=7)
         cli = Settings(model="model-cli", temperature=0.1, think=False, context=32768, max_turn_tokens=16384)
         turns = [
             {"user": "", "assistant": "", "tokens": 1, "stop": "setting", "type": "settings", "delta": {"model": "model-b"}},
@@ -227,7 +237,6 @@ class TestLoadSession:
         assert new_state.settings.context == 8192          # likewise the seed value
         assert new_state.settings.max_turn_tokens == 4096  # likewise the seed value
         assert new_state.settings.max_tool_rounds == 7     # likewise the seed value
-        assert new_state.settings.tool_expiration == 3     # likewise the seed value
 
     def test_load_does_not_touch_settings(self, make_state, tmp_path):
         path = tmp_path / "s.json"

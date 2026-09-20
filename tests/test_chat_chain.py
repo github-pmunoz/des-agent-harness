@@ -787,16 +787,16 @@ class TestCompactionTranscriptBound:
         assert "left out of this transcript" in req.messages[1]["content"] or "cut to fit" in req.messages[1]["content"]
         assert estimate_tokens(req.messages[0]["content"]) + estimate_result_tokens(req.messages[1]["content"]) + req.max_tokens <= 1000
 
-    def test_the_checkpoint_uses_its_own_target_and_the_request_bands(self, make_state):
+    def test_the_checkpoint_uses_its_own_target_and_sees_the_folded_rounds_whole(self, make_state):
         settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192,
-                            tool_expiration=2, checkpoint_target=0.1)
+                            checkpoint_target=0.1)
         server = FakeServer(script=[{"content": "c"}])
-        state = mid_turn(with_server(make_state, server, settings=settings), "hi", rounds=4)    # k=2: rounds 1, 2 stubbed in the request
+        state = mid_turn(with_server(make_state, server, settings=settings), "hi", rounds=4)    # rounds 1..3 fold, round 4 is kept
         CompactPendingTurn().execute(state)
         req = server.calls[0][1]
         assert req.max_tokens == int(16384 * 0.1)
         sent = req.messages[1]["content"]
-        assert "result 1" not in sent and "result 2" not in sent and "result 3" in sent and "result 4" not in sent
+        assert "result 1" in sent and "result 2" in sent and "result 3" in sent and "result 4" not in sent
 
 
 # ---------------------

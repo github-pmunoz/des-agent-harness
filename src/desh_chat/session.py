@@ -7,7 +7,7 @@ import json
 import os
 import readline
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 
 from desh.engine import Event, Priority
 from desh.render import Palette, c_out
@@ -54,12 +54,15 @@ class LoadSession(Event):
                 scratchpad = loaded_scratchpad
         # format 4: the session_file_contentument's settings seed the restored settings (v1-3 files carry no
         # "settings" key and load unchanged); settings turns then replay in order on top, so
-        # the last change wins.
+        # the last change wins. A delta naming a setting that no longer exists (a file written
+        # by an older version) is left out: the turn stays on the record, the setting has no effect.
         settings = Settings.from_dict(session_file_content["settings"]) if "settings" in session_file_content else state.settings
+        known = {f.name for f in fields(Settings)}
         for turn in history.turns:
             if turn.type == "settings" and turn.delta is not None:
                 for setting, value in turn.delta.items():
-                    settings = replace(settings, **{setting: value})
+                    if setting in known:
+                        settings = replace(settings, **{setting: value})
         return replace(state, history=history, scratchpad=scratchpad, settings=settings), [Info(c_out(Palette.DIM_CHROME, f"Restored {len(history)} turns from {path}")), DisplayStats()]
 
 

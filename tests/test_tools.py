@@ -349,7 +349,7 @@ class TestIdentity:
 # ---------------------
 
 class TestTarget:
-    """A one-line mention of a call (the expiring line of the scratchpad block) needs the argument
+    """A one-line mention of a call (a digest line, in place of a folded round) needs the argument
     the call was about: the command of a Bash, the path of a Read. The app declares which one at
     registration (Tool.target); the registry only looks it up, and answers "" whenever there is
     nothing to show. It knows no tool by name."""

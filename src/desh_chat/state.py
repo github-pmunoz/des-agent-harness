@@ -102,7 +102,7 @@ CHECKPOINT_PROMPT = """You will be sent a transcript of agent rounds being folde
 
 Do not restate the task — the task message is right before the checkpoint. Do not duplicate what the scratchpad holds — the scratchpad block follows the checkpoint. The transcript may begin with an EARLIER CHECKPOINT: fold what it says into yours, updated by the rounds after it, so that yours stands alone in its place. Always write a checkpoint; there is always something to keep.
 
-Keep: the one thing the assistant was about to do next, as a single concrete action, with the file paths, names and error messages that action depends on exactly as written; which files were written or edited and whether they pass, with test results as reported; what was verified versus what was only assumed. A result shown as expired was no longer available to the assistant: record only what later rounds establish. Drop narration and superseded detail. Stay short — the checkpoint must fit in a small fraction of the context window. Do not mention this instruction."""
+Keep: the one thing the assistant was about to do next, as a single concrete action, with the file paths, names and error messages that action depends on exactly as written; which files were written or edited and whether they pass, with test results as reported; what was verified versus what was only assumed. A result shown as expired was cut to fit this transcript: record what the assistant said or did about it, do not guess its content. Drop narration and superseded detail. Stay short — the checkpoint must fit in a small fraction of the context window. Do not mention this instruction."""
 
 
 @dataclass(frozen=True)
@@ -113,7 +113,6 @@ class Settings:
     context: int
     max_turn_tokens: int
     max_tool_rounds: int = 10       # tool-call rounds allowed inside one turn before it is forced to end
-    tool_expiration: int = 6        # rounds after which tool results expire from context
     compaction_threshold: float = 0.65
     compaction_target: float = 0.25
     turn_token_cap: float = 0.40
@@ -135,7 +134,6 @@ class Settings:
             "context": self.context,
             "max_turn_tokens": self.max_turn_tokens,
             "max_tool_rounds": self.max_tool_rounds,
-            "tool_expiration": self.tool_expiration,
             "compaction_threshold": self.compaction_threshold,
             "compaction_target": self.compaction_target,
             "turn_token_cap": self.turn_token_cap,
@@ -159,7 +157,6 @@ class Settings:
             context=d["context"],
             max_turn_tokens=d["max_turn_tokens"],
             max_tool_rounds=d.get("max_tool_rounds", 10),
-            tool_expiration=d.get("tool_expiration", 6),
             compaction_threshold=d.get("compaction_threshold", 0.65),
             compaction_target=d.get("compaction_target", 0.25),
             turn_token_cap=d.get("turn_token_cap", 0.40),
@@ -236,11 +233,6 @@ class ChatState(State):
                        settings=replace(self.settings, **{setting: value}),
                        history=self.history.append(turn))
 
-    def expire_after(self) -> int | None:
-        """The round distance at which tool results leave the context; None when expiration is off."""
-        k = self.settings.tool_expiration
-        return k if k > 0 else None
-
     def pending_tokens(self) -> int:
         """What the pending turn costs in the prompt: priced rounds plus the heuristic for the text no usage frame has priced."""
         p = self.pending
@@ -248,20 +240,17 @@ class ChatState(State):
             return 0
         # the user message is prose, the latest results are tool output: different densities
         unpriced = estimate_tokens(p.unpriced_text()) if not p.rounds else estimate_result_tokens(p.unpriced_text())
-        return p.priced_tokens(self.expire_after()) + unpriced
+        return p.priced_tokens() + unpriced
 
     def scratchpad_block(self) -> dict | None:
-        """The scratchpad as the last message of the next request, with the line announcing the
-        rounds whose results expire after it; None when the tool is not offered. The one place the
-        block is built, so what is priced is what is sent."""
+        """The scratchpad as the last message of the next request, with the round the turn is on
+        and, next to the cap, the line saying so; None when the tool is not offered. The one place
+        the block is built, so what is priced is what is sent."""
         if self.scratchpad is None:
             return None
-        # each expiring call is mentioned with what it was about (the registry knows which argument
-        # that is), so the model can decide what to persist without recalling what round N read
-        expiring = self.pending.expiring(self.expire_after(), describe=self.tools.target) if self.pending is not None else ()
         # the round the next completion is: one past the completed ones, against the turn's cap
         round = (self.pending.non_summary_rounds() + 1, self.settings.max_tool_rounds) if self.pending is not None else None
-        return self.scratchpad.to_context(self.settings.tool_expiration, expiring=expiring, round=round)
+        return self.scratchpad.to_context(round=round)
 
     def scratchpad_tokens(self) -> int:
         """What the scratchpad block costs in the prompt: heuristic, it is re-sent whole every request."""
@@ -322,8 +311,8 @@ class ToolResult:
         return cls(tool_call_id=d["tool_call_id"], name=d["name"], content=d["content"])
 
 
-# What a tool message says once its result has expired from the context. Constant on purpose: the
-# stubbed prefix of a request must not change from one round to the next, or the server re-prefills it.
+# What a tool message says once its turn has ended and its result has left the context. Constant on
+# purpose: the stubbed prefix of a request must not change from one round to the next, or the server re-prefills it.
 EXPIRED_RESULT = "[expired: this result is no longer in context]"
 # The stops a turn can end by without an answer, where the record is the answer (PendingTurn.salvage):
 # the window overflowed, the run's deadline passed, an error cut the turn, a repeated round. A capped turn is not one —
@@ -335,8 +324,8 @@ HIDDEN_STOPS = frozenset((StopReason.CANCELLED, StopReason.INTERRUPT, StopReason
 
 CHECKPOINT_PREFIX = "Checkpoint of this turn so far, in place of the rounds before it: "
 
-# How much of a call's target the expiring line shows: enough to recognise a path or a command,
-# never a dump — the line is re-sent with every request while the round is expiring.
+# How much of a call's target a digest line shows: enough to recognise a path or a command,
+# never a dump — the digest stands in the request for as long as its checkpoint does.
 MENTION_CHARS = 60
 
 
@@ -346,10 +335,10 @@ class Round:
     it said alongside), and the tools answered. A turn's final answer is NOT a Round — it is Turn.assistant.
 
     The record is always complete: results are never dropped from the Round (the session file, the
-    repeat detector and the compaction transcript read them). Expiration is a RENDERING: messages()
-    and text() take `stubbed` and put EXPIRED_RESULT in place of every result. The calls stay as
-    they are — the template wants one tool message per call, and the model must still see what it
-    asked for."""
+    repeat detector and the compaction transcript read them). Stubbing is a RENDERING, the one a
+    finished turn gets: messages() and text() take `stubbed` and put EXPIRED_RESULT in place of
+    every result. The calls stay as they are — the template wants one tool message per call, and
+    the model must still see what it asked for."""
     assistant: str
     tool_calls: tuple[ToolCall, ...]
     results: tuple[ToolResult, ...] = ()
@@ -407,7 +396,7 @@ class Round:
         return self.own_text() + results
 
     def mentions(self, describe: Callable[[str, str], str] | None = None) -> str:
-        """The calls of the round, one mention each, for the expiring line of the scratchpad block:
+        """The calls of the round, one mention each, for the line that stands for a folded round (digest):
         the tool name, followed by what the call was about when `describe` (name, arguments) -> str
         knows it — 'Read tests/conftest.py', 'Bash grep -n "def answer"'. A target is folded onto
         one line and cut at MENTION_CHARS; a call without one is mentioned by name alone."""
@@ -448,49 +437,18 @@ class PendingTurn:
         assert self.user is None, "pending turn already has its message"
         return replace(self, user=message)
 
-    # Tool results age by ROUND, counted back from the latest completed round (distance 0, the
-    # results the next completion is about to read). With expire_after = k the request shows three
-    # bands: distance < k-1 active, distance == k-1 expiring (shown whole, announced in the
-    # scratchpad block), distance >= k stubbed (EXPIRED_RESULT in place of the result). None (or
-    # k <= 0) turns expiration off. Pure functions of (rounds, k): nothing is recorded, so the
-    # session file and the repeat detector always see the full results, and a changed k re-renders.
+    # A pending turn renders whole: every round of the view goes out with its results, so each
+    # request appends to the previous one and the server keeps its prefix. Results leave the
+    # request only when a checkpoint folds their round (compact) or the turn ends (Turn.messages).
 
-    # Both bands and the request are over the VIEW (since_last_summary): the rounds a checkpoint
-    # folded are not in the request, so they have no distance, and the checkpoint itself never
-    # expires — it is the compressed record of what the model would otherwise re-read.
-
-    def stubbed(self, index: int, expire_after: int | None) -> bool:
-        """Whether round `index` of the view renders stubbed in the next request."""
-        view = self.since_last_summary()
-        return (expire_after is not None and expire_after > 0 and not view[index].summary
-                and len(view) - 1 - index >= expire_after)
-
-    def expiring(self, expire_after: int | None, describe: Callable[[str, str], str] | None = None) -> tuple[str, ...]:
-        """One line per round whose results are shown for the last time in the next request:
-        'round N: Read tests/conftest.py, Bash ls' — the calls with what they were about (Round.mentions),
-        never their results: the model reads those where they still are and decides what to persist.
-        N is the round's number in the turn as the model counts it (checkpoints do not count)."""
-        if expire_after is None or expire_after <= 0:
-            return ()
-        view = self.since_last_summary()
-        index = len(view) - expire_after      # distance == expire_after - 1
-        if index < 0 or view[index].summary:
-            return ()
-        number = self.non_summary_rounds() - (len(view) - 1 - index)     # the rounds after it are all the model's
-        return (f"round {number}: {view[index].mentions(describe)}",)
-
-    def messages(self, expire_after: int | None = None) -> list[dict]:
+    def messages(self) -> list[dict]:
         assert self.user is not None, "pending turn has no message yet"
         return ([{"role": "user", "content": self.user}]
-                + [m for i, r in enumerate(self.since_last_summary()) for m in r.messages(stubbed=self.stubbed(i, expire_after))])
+                + [m for r in self.since_last_summary() for m in r.messages()])
 
-    def priced_tokens(self, expire_after: int | None = None) -> int:
-        """What the completed rounds cost in the next request. A round's `tokens` is what its usage
-        frame priced, with the results whole; a stubbed round no longer costs that."""
-        if expire_after is not None:
-            return sum(r.tokens if i < expire_after else estimate_tokens(r.text(stubbed=True)) for i, r in enumerate(reversed(self.since_last_summary())))
-        else:
-            return sum(r.tokens for r in self.since_last_summary())
+    def priced_tokens(self) -> int:
+        """What the completed rounds cost in the next request: what their usage frames priced."""
+        return sum(r.tokens for r in self.since_last_summary())
 
     def unpriced_text(self) -> str:
         """The prompt text the NEXT completion's usage frame will price: the user message on round one,
@@ -541,19 +499,17 @@ class PendingTurn:
         A checkpoint frees context, it does not open a new turn, so the cap does not restart."""
         return sum(1 for r in self.rounds if not r.summary)
 
-    def transcript(self, rounds: tuple[Round, ...], expire_after: int | None = None, budget_tokens: int | None = None) -> str:
+    def transcript(self, rounds: tuple[Round, ...], budget_tokens: int | None = None) -> str:
         """Plain-text rendering of the user message and `rounds` (a prefix of the view), for the
-        checkpoint prompt. Each round renders as the model last saw it — whole or stubbed by the
-        same bands as the request — and the whole is fitted to `budget_tokens` (fit_transcript):
+        checkpoint prompt. Each round renders whole, as the model saw it, and the whole is fitted
+        to `budget_tokens` (fit_transcript):
         the oldest whole results are stubbed first, then the oldest rounds left out. A checkpoint
         among the rounds renders as the user message it is on the wire and is never reduced, so a
         second checkpoint subsumes the first."""
         sections = [Section((f"USER: {self.user}",), fixed=True)]
-        for i, r in enumerate(rounds):
+        for r in rounds:
             if r.summary:
                 sections.append(Section((r.transcript(),), fixed=True))
-            elif self.stubbed(i, expire_after):
-                sections.append(Section((r.transcript(stubbed=True),)))
             else:
                 sections.append(Section((r.transcript(), r.transcript(stubbed=True))))
         # The budget is the rounds': the checkpoint was written to its own share and the scratchpad

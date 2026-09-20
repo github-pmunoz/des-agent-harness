@@ -13,7 +13,6 @@
 #     "context": 200000,
 #     "max_turn_tokens": 8192,
 #     "max_tool_rounds": 60,
-#     "tool_expiration": 10,
 #     "system_prompt": "You are a coding agent.",
 #     "timeout": 600,
 #     "task": "Read task.txt and implement the wc-like CLI using TDD.",
@@ -150,7 +149,6 @@ add_value "-t"   "temperature"
 add_value "-c"   "context"
 add_value "-mt"  "max_turn_tokens"
 add_value "-mtr" "max_tool_rounds"
-add_value "-te"  "tool_expiration"
 add_value "-sp"  "system_prompt"
 add_value "-to"  "timeout"
 add_value "-ta"  "task"

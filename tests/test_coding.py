@@ -198,7 +198,7 @@ class TestBash:
         assert "rejected the arguments" in coding_registry(str(tmp_path)).invoke("Bash", '{"command": "ls"}')
 
     def test_a_mention_of_a_call_shows_the_path_or_the_command(self, tmp_path):
-        """What the expiring line of the scratchpad block says a call was about (Tool.target)."""
+        """What a digest line says a call was about (Tool.target)."""
         registry = coding_registry(str(tmp_path))
         assert registry.target("Read", '{"file_path": "src/a.py", "offset": 10}') == "src/a.py"
         assert registry.target("Edit", '{"file_path": "src/a.py", "old_string": "x", "new_string": "y"}') == "src/a.py"
@@ -352,7 +352,7 @@ class TestDescribeCall:
 # ---------------------
 
 class TestWrittenFold:
-    """A call's arguments are echoed in every later request and never expire: a Write carries the
+    """A call's arguments are echoed in every later request of the turn, whole: a Write carries the
     whole file, and a round that wrote two files could not be checkpointed at 4k. Once the call
     ran, the round records the path and the size under `folded`, a key the schema does not have,
     and the long argument is gone: a model that copies the echoed shape gets a rejected call, not

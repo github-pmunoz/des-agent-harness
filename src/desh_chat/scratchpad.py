@@ -9,20 +9,21 @@ KINDS = ("todo", "done", "fact", "hypothesis", "block")
 Kind = Literal["todo", "done", "fact", "hypothesis", "block"]
 
 # Appended to the system prompt of any run that offers the scratchpad tools. Mechanics first: the
-# model must know that results vanish and WHEN, or it learns it the expensive way — by hitting the
-# round cap and re-gathering everything in the continuation. Formatted with the run's settings.
+# model must know that results vanish and WHEN (at the round cap, and when a checkpoint folds its
+# rounds), or it learns it the expensive way — by re-gathering everything in the continuation.
+# Formatted with the run's settings.
 SCRATCHPAD_SYSTEM_PROMPT = (
     "How your context works. Each reply of yours that calls tools is a round; the results come back "
     "in the next request. A turn allows at most {max_tool_rounds} rounds. At the cap the turn ends: the "
     "scratchpad calls of that reply still run, its other calls do not. If the task is unfinished you are "
     "asked to continue in a new turn in which EVERY tool result of the previous turn has been replaced "
-    "by an expired stub. Within a turn, a tool result stays visible "
-    "for {tool_expiration} rounds and is then replaced by the same stub. The <scratchpad> block at the "
-    "end of every request is the only working memory that survives both: it shows which round you are "
-    "on and names the results that expire next. Use scratchpad_write for whatever you will still need "
-    "(paths, line numbers, ids, constraints, conclusions), condensed, never raw dumps. Write it in the "
-    "same reply as your other tool calls: a scratchpad call costs no round of its own. Persist as you "
-    "go; do not wait for the expiry notice or the cap. Your earlier calls are echoed with their long "
+    "by an expired stub. When the context runs short inside a turn, your earlier rounds are folded into "
+    "a checkpoint and their results are gone; only the scratchpad is kept verbatim. The <scratchpad> "
+    "block at the end of every request is the only working memory that survives both: it shows which "
+    "round you are on and tells you when the cap is one round away. Use scratchpad_write for whatever "
+    "you will still need (paths, line numbers, ids, constraints, conclusions), condensed, never raw "
+    "dumps. Write it in the same reply as your other tool calls: a scratchpad call costs no round of "
+    "its own. Persist as you go; do not wait for the cap. Your earlier calls are echoed with their long "
     "arguments removed and a `folded` note in their place; that is the record, not a form to write.\n"
     "Every entry has a kind: todo, a step still to do; done, a finished step and its outcome; fact, "
     "something established from a file or a result; hypothesis, something you believe but have not "
@@ -30,6 +31,11 @@ SCRATCHPAD_SYSTEM_PROMPT = (
     "todo is done, write the SAME key again as done with the outcome; when a hypothesis is checked, "
     "write it again as a fact. Never add a second key for an item that already has one."
 )
+
+# The closing lines of the block next to the round cap (Scratchpad.message).
+LAST_ROUND_LINE = ("Last round before the cap: every tool result of this turn is stubbed in the next one. "
+                   "Persist what you still need now.")
+CAP_REACHED_LINE = "Round cap reached: only scratchpad calls in this reply will run."
 
 def write(key: str, kind: Kind, value: str, scratchpad: dict[str, dict]) -> str:
     """Write an entry in the scratchpad, creating a new key or overwriting an existing one.
@@ -127,19 +133,21 @@ class Scratchpad:
         """The dict the tools work on and the session file stores: {key: {"kind", "value"}}."""
         return {m.key: {"kind": m.kind, "value": m.value} for m in self.memory}
 
-    def message(self, tool_expiration: int, expiring: tuple[str, ...] = (), round: tuple[int, int] | None = None) -> str:
+    def message(self, round: tuple[int, int] | None = None) -> str:
         """The scratchpad as a context string. `round` is (this round, the turn's cap), shown so the
-        model sees its budget on every request. `expiring` names the rounds whose tool results are
-        shown for the last time in this request (PendingTurn.expiring): names only, never the
-        results — the model reads them where they still are and decides what to persist."""
+        model sees its budget on every request. The round at the cap is the last whose calls run,
+        and the reply after it keeps only its scratchpad calls: each says so in a closing line,
+        while the results the turn is about to lose can still be read."""
         header = f"Round {round[0]} of {round[1]} in this turn. " if round is not None else ""
-        message = f"<scratchpad>{header}Working memory. Tool results expire from context after {tool_expiration} rounds, persist here.\n"
+        message = f"<scratchpad>{header}Working memory. Tool results do not survive the turn, persist here.\n"
         if self.memory:
             message += self.entries_text() + "\n"
         else:
             message += "\n(empty)\n"
-        if expiring:
-            message += "Expiring next round, persist what you still need from: " + "; ".join(expiring) + "\n"
+        if round is not None and round[0] == round[1]:
+            message += LAST_ROUND_LINE + "\n"
+        elif round is not None and round[0] > round[1]:
+            message += CAP_REACHED_LINE + "\n"
         message += "</scratchpad>"
         return message
 
@@ -165,6 +173,6 @@ class Scratchpad:
                 lines.append(f"{entry.key}: {entry.value}")
         return "\n".join(lines)
 
-    def to_context(self, tool_expiration: int, expiring: tuple[str, ...] = (), round: tuple[int, int] | None = None) -> dict:
+    def to_context(self, round: tuple[int, int] | None = None) -> dict:
         """Return a message for injecting into the request."""
-        return {"role": "user", "content": self.message(tool_expiration, expiring, round)}
+        return {"role": "user", "content": self.message(round)}
