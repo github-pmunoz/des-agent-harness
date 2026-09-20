@@ -38,7 +38,7 @@ from desh_chat.events import (
     NextRound, PromptUser, StreamCompletion, TurnEnd, TurnStart, UserMessage,
 )
 from desh_chat.handlers import on_interrupt
-from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn
+from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn, StopReason
 
 
 def tool_round(n: int, tokens: int = 10) -> Round:
@@ -99,23 +99,23 @@ class TestTurnStart:
 
     def test_without_an_operator_a_finished_turn_drains_and_opens_nothing(self, make_state):
         for history in (ChatHistory(),
-                        ChatHistory().append(Turn("q", "done")),
-                        ChatHistory().append(Turn("q", "", cancelled=True))):
+                        ChatHistory().append(Turn("q", "done", stop=StopReason.ANSWER)),
+                        ChatHistory().append(Turn("q", "", stop=StopReason.CANCELLED))):
             new_state, events = TurnStart().execute(make_state(operator=False, history=history))
             assert events == [] and new_state.pending is None, history
 
     def test_a_capped_turn_is_continued_with_the_auto_prompt(self, make_state):
-        capped = Turn("q", "so far", stop="cap")
+        capped = Turn("q", "so far", stop=StopReason.CAP)
         for history in (ChatHistory().append(capped), ChatHistory().append(capped).compact("s")):
             new_state, events = TurnStart().execute(make_state(operator=False, auto_prompt="go", history=history))
             assert new_state.pending == PendingTurn()
             assert [type(e) for e in events] == [Info, UserMessage] and events[-1] == UserMessage("go")
 
     def test_the_auto_prompt_beats_the_operator_and_needs_a_capped_turn(self, make_state):
-        capped = ChatHistory().append(Turn("q", "so far", stop="cap"))
+        capped = ChatHistory().append(Turn("q", "so far", stop=StopReason.CAP))
         _, events = TurnStart().execute(make_state(operator=True, auto_prompt="go", history=capped))
         assert events[-1] == UserMessage("go")
-        done = ChatHistory().append(Turn("q", "done"))
+        done = ChatHistory().append(Turn("q", "done", stop=StopReason.ANSWER))
         _, events = TurnStart().execute(make_state(operator=True, auto_prompt="go", history=done))
         assert [type(e) for e in events] == [DisplayStats, PromptUser]
         _, events = TurnStart().execute(make_state(operator=True, auto_prompt=None, history=capped))
@@ -124,7 +124,7 @@ class TestTurnStart:
     def test_a_cancelled_capped_turn_is_not_continued(self, make_state):
         """An overflow recorded by NextRound is a cancelled turn: the loop head must see it and stop,
         or the same auto prompt would go out again forever."""
-        history = ChatHistory().append(Turn("go", "", cancelled=True, stop="overflow"))
+        history = ChatHistory().append(Turn("go", "", stop=StopReason.OVERFLOW))
         new_state, events = TurnStart().execute(make_state(operator=False, auto_prompt="go", history=history))
         assert events == [] and new_state.pending is None
 
@@ -180,7 +180,7 @@ class TestUserMessageBudget:
 
     def test_a_message_that_cannot_fit_ends_as_an_overflow_turn_without_a_request(self, make_state, capsys):
         """No window to compact (history is empty), so there is nothing to try: the turn is recorded
-        cancelled with stop="overflow" — a record, not a dropped message, so an auto prompt that
+        hidden with stop=OVERFLOW — a record, not a dropped message, so an auto prompt that
         cannot fit is not issued again."""
         settings = Settings(model=MODELS[0], temperature=0.3, think=False,
                              context=1, max_turn_tokens=100, turn_token_cap=1.0)
@@ -190,7 +190,7 @@ class TestUserMessageBudget:
         assert "exceeds context window" in events[0].text
         # the request never goes out, so the estimates in the text are the only record of its size
         assert re.search(r"prompt≈\d+ room=-?\d+ need=\d+", events[0].text)
-        assert events[1].cancelled is True and events[1].stop == "overflow"
+        assert events[1].stop == StopReason.OVERFLOW
         assert new_state.pending is not None    # TurnEnd, not NextRound, clears it
 
 
@@ -203,7 +203,7 @@ class TestUserMessageHistoryView:
     """
 
     def test_prior_turn_is_included_when_there_is_room(self, make_state):
-        history = ChatHistory().append(Turn("previous question", "previous answer"))
+        history = ChatHistory().append(Turn("previous question", "previous answer", stop=StopReason.ANSWER))
         state = make_state(history=history, settings=Settings(
             model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192))
         _, events = open_turn(state, "a new question")
@@ -229,7 +229,7 @@ class TestUserMessageHistoryView:
         """
         system_prompt = "You are a helpful assistant."
         message = "a new question"
-        prior_turn = Turn("previous question", "previous answer", tokens=50)
+        prior_turn = Turn("previous question", "previous answer", tokens=50, stop=StopReason.ANSWER)
         history = ChatHistory().append(prior_turn)
         sys_prompt_tokens = estimate_tokens(system_prompt)
         msg_tokens = estimate_tokens(message)
@@ -249,7 +249,7 @@ class TestUserMessageHistoryView:
         assert message in contents
 
     def test_request_message_order_is_system_then_history_then_new_user_message(self, make_state):
-        history = ChatHistory().append(Turn("q1", "a1"))
+        history = ChatHistory().append(Turn("q1", "a1", stop=StopReason.ANSWER))
         state = make_state(history=history)
         _, events = open_turn(state, "q2")
         roles_and_last = [(m["role"], m["content"]) for m in events[0].request.messages]
@@ -283,7 +283,7 @@ class TestStreamCompletion:
         assert len(events) == 1
         assert isinstance(events[0], TurnEnd)
         assert events[0].assistant == "the answer"
-        assert events[0].cancelled is False
+        assert events[0].stop == StopReason.ANSWER
 
     def test_prints_assistant_prefix_and_content(self, make_state, no_esc_watcher, capsys):
         server = FakeServer(script=[{"content": "hello world"}])
@@ -299,7 +299,7 @@ class TestStreamCompletion:
         state = with_server(make_state, server)
         req = Request(messages=[{"role": "user", "content": "hi"}], model=MODELS[0], stream=True)
         _, events = StreamCompletion(request=req).execute(state)
-        assert events[1].cancelled is True
+        assert events[1].stop == StopReason.CANCELLED
         assert "cancelled" in events[0].text
 
     def test_logs_completion_when_completions_log_is_configured(self, make_state, no_esc_watcher, tmp_path):
@@ -328,7 +328,7 @@ class TestTurnEnd:
     def test_appends_the_pending_turn_and_returns_to_the_loop_head(self, make_state):
         """No compaction on this path: whether the next request needs one is NextRound's call."""
         state = make_state(pending=PendingTurn("q"))
-        new_state, events = TurnEnd(assistant="a", cancelled=False).execute(state)
+        new_state, events = TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(state)
         assert len(new_state.history) == 1
         assert new_state.history.turns[0].user == "q"
         assert new_state.history.turns[0].assistant == "a"
@@ -337,7 +337,7 @@ class TestTurnEnd:
 
     def test_original_state_is_untouched_immutability(self, make_state):
         state = make_state(pending=PendingTurn("q"))
-        TurnEnd(assistant="a", cancelled=False).execute(state)
+        TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(state)
         assert len(state.history) == 0
         assert state.pending == PendingTurn("q")
 
@@ -356,9 +356,9 @@ class TestTurnEnd:
         """No answer arrived: the record is the answer — the checkpoint, the scratchpad and the
         rounds after the checkpoint with their results — and the Warn says so."""
         state = self.salvage_state(make_state)
-        new_state, events = TurnEnd(assistant="", tokens=0, cancelled=True, stop="overflow").execute(state)
+        new_state, events = TurnEnd(assistant="", tokens=0, stop=StopReason.OVERFLOW).execute(state)
         turn = new_state.history.turns[-1]
-        assert turn.stop == "overflow" and turn.cancelled is True
+        assert turn.stop == StopReason.OVERFLOW and turn.visible is False
         assert "overflow" in turn.assistant
         assert "edited wc.py; next: rerun the tests" in turn.assistant       # the checkpoint
         assert "cause: off-by-one in count_lines" in turn.assistant          # the scratchpad
@@ -366,19 +366,37 @@ class TestTurnEnd:
         assert "3 failed" not in turn.assistant                              # folded rounds are the checkpoint's
         assert isinstance(events[0], Warn) and "salvaged" in events[0].text
 
+    def test_a_repeat_stop_keeps_the_guards_note_and_adds_the_record_below(self, make_state):
+        """The repeated-round guard ends the turn with its own note as the text; the work the turn
+        did before looping must not be thrown away with it."""
+        state = self.salvage_state(make_state)
+        note = "[stopped: Bash repeated three times with identical results]"
+        new_state, events = TurnEnd(assistant=note, tokens=0, stop=StopReason.REPEAT).execute(state)
+        turn = new_state.history.turns[-1]
+        assert turn.stop == StopReason.REPEAT and turn.visible is False      # on the record, out of the view
+        assert turn.assistant.startswith(note + "\n\n")                       # the guard's note comes first...
+        assert "TURN ENDED: repeat" in turn.assistant                         # ...and the record below it
+        assert "edited wc.py; next: rerun the tests" in turn.assistant       # the checkpoint
+        assert "cause: off-by-one in count_lines" in turn.assistant          # the scratchpad
+        assert "35 passed" in turn.assistant and "3 failed" not in turn.assistant    # the round after the checkpoint only
+        assert new_state.history.view_turns(budget=10**6) == []
+        assert isinstance(events[0], Warn) and "repeat" in events[0].text and "salvaged" in events[0].text
+
+
+
     def test_a_deadline_keeps_the_models_text_and_adds_the_record_below(self, make_state):
         state = self.salvage_state(make_state)
-        new_state, _ = TurnEnd(assistant="so far: nearly there", tokens=10, cancelled=False, stop="deadline").execute(state)
+        new_state, _ = TurnEnd(assistant="so far: nearly there", tokens=10, stop=StopReason.DEADLINE).execute(state)
         text = new_state.history.turns[-1].assistant
         assert text.startswith("so far: nearly there\n\n") and "35 passed" in text and "deadline" in text
 
     def test_an_error_turn_is_salvaged_too_and_a_capped_one_is_not(self, make_state):
         state = self.salvage_state(make_state)
-        errored, _ = TurnEnd(assistant="", cancelled=True, stop="error").execute(state)
+        errored, _ = TurnEnd(assistant="", stop=StopReason.ERROR).execute(state)
         assert "35 passed" in errored.history.turns[-1].assistant
-        capped, events = TurnEnd(assistant="so far", tokens=5, stop="cap").execute(state)
+        capped, events = TurnEnd(assistant="so far", tokens=5, stop=StopReason.CAP).execute(state)
         assert capped.history.turns[-1].assistant == "so far" and events == [MaybeRegenerate()]
-        plain, _ = TurnEnd(assistant="done").execute(state)
+        plain, _ = TurnEnd(assistant="done", stop=StopReason.ANSWER).execute(state)
         assert plain.history.turns[-1].assistant == "done"
 
     def test_the_rounds_are_bounded_like_a_checkpoint_and_the_fixed_pieces_stand_whole(self, make_state):
@@ -389,7 +407,7 @@ class TestTurnEnd:
         tc = ToolCall(index=0, id="c1", type="function", name="Read", arguments='{"file_path": "wc.py"}')
         big = state.pending.add_round(Round("", (tc,), (ToolResult("c1", "Read", "x" * 3000),), tokens=800))
         state = replace(state, pending=big)
-        new_state, _ = TurnEnd(assistant="", cancelled=True, stop="overflow").execute(state)
+        new_state, _ = TurnEnd(assistant="", stop=StopReason.OVERFLOW).execute(state)
         text = new_state.history.turns[-1].assistant
         fixed = "\n".join(l for l in text.splitlines() if not l.startswith(("ASSISTANT", "TOOL", "[")))
         assert estimate_tokens(text) <= 150 + estimate_tokens(fixed) + 40
@@ -405,7 +423,7 @@ class TestTurnEnd:
         """
         long_user = "a reasonably long user message that is not four characters"
         long_assistant = "a reasonably long assistant reply that is not four characters"
-        new_state, _ = TurnEnd(assistant=long_assistant, cancelled=True).execute(make_state(pending=PendingTurn(long_user)))
+        new_state, _ = TurnEnd(assistant=long_assistant, stop=StopReason.CANCELLED).execute(make_state(pending=PendingTurn(long_user)))
         turn = new_state.history.turns[0]
         assert turn.cancelled is True
         assert turn.tokens == estimate_tokens(long_user) + estimate_tokens(long_assistant)
@@ -413,7 +431,7 @@ class TestTurnEnd:
 
     def test_non_cancelled_turn_tokens_are_also_correct(self, make_state):
         state = make_state(pending=PendingTurn("a decent length user message here"))
-        new_state, _ = TurnEnd(assistant="a decent length assistant reply here", cancelled=False).execute(state)
+        new_state, _ = TurnEnd(assistant="a decent length assistant reply here", stop=StopReason.ANSWER).execute(state)
         turn = new_state.history.turns[0]
         assert turn.cancelled is False
         assert turn.tokens == estimate_tokens(turn.user) + estimate_tokens(turn.assistant)
@@ -435,12 +453,12 @@ class TestNextRoundCompaction:
         assert make_state(settings=self.SETTINGS).min_gen_tokens() == 500
 
     def test_enough_room_streams_without_compacting(self, make_state):
-        history = ChatHistory().append(Turn("short", "reply", tokens=100))    # leaves 892
+        history = ChatHistory().append(Turn("short", "reply", tokens=100, stop=StopReason.ANSWER))    # leaves 892
         _, events = open_turn(make_state(settings=self.SETTINGS, history=history), "hi")
         assert [type(e) for e in events] == [StreamCompletion]
 
     def test_too_little_room_compacts_then_retries_the_same_round(self, make_state):
-        history = ChatHistory().append(Turn("long", "reply", tokens=500))     # leaves 492
+        history = ChatHistory().append(Turn("long", "reply", tokens=500, stop=StopReason.ANSWER))     # leaves 492
         new_state, events = open_turn(make_state(settings=self.SETTINGS, history=history), "hi")
         assert [type(e) for e in events] == [Info, CompactHistory, NextRound]
         assert events[2] == NextRound()      # no flag: the retry reads the state as it is by then
@@ -450,7 +468,7 @@ class TestNextRoundCompaction:
         """CompactHistory rewrites history and schedules nothing; the NextRound after it reads the
         state as it is by then, so the request carries the summary and not the turns behind it."""
         server = FakeServer(script=[{"content": "a tidy summary"}, {"content": "unused"}])
-        history = ChatHistory().append(Turn("long question", "long reply", tokens=500))
+        history = ChatHistory().append(Turn("long question", "long reply", tokens=500, stop=StopReason.ANSWER))
         state = with_server(make_state, server, settings=self.SETTINGS, history=history)
         state, events = open_turn(state, "hi")
         state, _ = events[1].execute(state)                  # CompactHistory
@@ -464,7 +482,7 @@ class TestNextRoundCompaction:
     # fills the window. A 500-token summary leaves 492 before the turn, so every case below is short.
 
     def test_history_is_folded_before_the_turn_even_when_the_turn_is_long(self, make_state):
-        history = ChatHistory().append(Turn("long", "reply", tokens=500))
+        history = ChatHistory().append(Turn("long", "reply", tokens=500, stop=StopReason.ANSWER))
         state = mid_turn(make_state(settings=self.SETTINGS, history=history), "hi", rounds=3)
         _, events = NextRound().execute(state)
         assert [type(e) for e in events] == [Info, CompactHistory, NextRound]
@@ -482,7 +500,7 @@ class TestNextRoundCompaction:
         state = mid_turn(make_state(settings=self.SETTINGS, history=history), "hi", rounds=1)
         _, events = NextRound().execute(state)
         assert [type(e) for e in events] == [Error, TurnEnd]
-        assert events[1].cancelled is True and events[1].stop == "overflow"
+        assert events[1].stop == StopReason.OVERFLOW
 
     def test_a_window_that_is_only_a_summary_is_not_compacted_again(self, make_state):
         """Summarising the summary cannot free room: a message too large for what is left goes
@@ -495,8 +513,8 @@ class TestNextRoundCompaction:
         """Regression from the post-turn design: the just-finished turn is already in the window,
         so nothing may add it a second time. A 450 window leaves 542, above the 500 floor."""
         history = (ChatHistory()
-                   .append(Turn("earlier", "reply", tokens=350))
-                   .append(Turn("latest", "reply", tokens=100)))
+                   .append(Turn("earlier", "reply", tokens=350, stop=StopReason.ANSWER))
+                   .append(Turn("latest", "reply", tokens=100, stop=StopReason.ANSWER)))
         state = make_state(settings=self.SETTINGS, history=history)
         assert state.history.window_tokens() == 450
         _, events = open_turn(state, "hi")
@@ -505,7 +523,7 @@ class TestNextRoundCompaction:
     def test_cancelled_turns_do_not_count(self, make_state):
         """window_tokens() excludes cancelled turns at the source (since_last_summary()'s own
         filter), so a cancelled turn cannot move this check either way."""
-        history = ChatHistory().append(Turn("cancelled", "partial", tokens=900, cancelled=True))
+        history = ChatHistory().append(Turn("cancelled", "partial", tokens=900, stop=StopReason.CANCELLED))
         _, events = open_turn(make_state(settings=self.SETTINGS, history=history), "hi")
         assert [type(e) for e in events] == [StreamCompletion]
 
@@ -526,7 +544,7 @@ class TestCompactHistory:
     def test_happy_path_replaces_history_and_logs(self, make_state, capsys):
         server = FakeServer(script=[{"content": "a tidy summary"}])
         settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192)
-        history = ChatHistory().append(Turn("what happened", "some stuff happened"))
+        history = ChatHistory().append(Turn("what happened", "some stuff happened", stop=StopReason.ANSWER))
         state = with_server(make_state, server, settings=settings, history=history)
 
         new_state, events = CompactHistory().execute(state)
@@ -547,7 +565,7 @@ class TestCompactHistory:
         (an eval of compaction strategies) can be built with another without touching the event."""
         from desh_chat.state import COMPACTION_PROMPT
         server = FakeServer(script=[{"content": "summary"}, {"content": "summary"}])
-        history = ChatHistory().append(Turn("q", "a", tokens=100))
+        history = ChatHistory().append(Turn("q", "a", tokens=100, stop=StopReason.ANSWER))
         CompactHistory().execute(with_server(make_state, server, history=history))
         assert server.calls[0][1].messages[0] == {"role": "system", "content": COMPACTION_PROMPT}
         for must_keep in ("file path", "line numbers", "verbatim", "next steps"):
@@ -559,7 +577,7 @@ class TestCompactHistory:
 
     def test_compaction_request_is_non_streaming_and_deterministic(self, make_state):
         server = FakeServer(script=[{"content": "summary"}])
-        history = ChatHistory().append(Turn("q", "a", tokens=100))
+        history = ChatHistory().append(Turn("q", "a", tokens=100, stop=StopReason.ANSWER))
         state = with_server(make_state, server, history=history)
         CompactHistory().execute(state)
         assert server.calls[0][0] == "complete"  # not stream()
@@ -577,7 +595,7 @@ class TestCompactHistory:
         settings = Settings(model=MODELS[0], temperature=0.3, think=False,
                              context=100, max_turn_tokens=100, turn_token_cap=1.0,
                              min_compaction_tokens=64)
-        long_transcript_turn = Turn("a long user turn " * 10, "a long assistant reply " * 10, tokens=200)
+        long_transcript_turn = Turn("a long user turn " * 10, "a long assistant reply " * 10, tokens=200, stop=StopReason.ANSWER)
         history = ChatHistory().append(long_transcript_turn)
         state = with_server(make_state, server, settings=settings, history=history)
 
@@ -590,7 +608,7 @@ class TestCompactHistory:
     def test_does_not_warn_when_there_is_enough_room(self, make_state, capsys):
         server = FakeServer(script=[{"content": "summary"}])
         settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192)
-        history = ChatHistory().append(Turn("q", "a", tokens=100))
+        history = ChatHistory().append(Turn("q", "a", tokens=100, stop=StopReason.ANSWER))
         state = with_server(make_state, server, settings=settings, history=history)
         CompactHistory().execute(state)
         assert "tight on room" not in capsys.readouterr().out
@@ -607,7 +625,7 @@ class TestCompactPendingTurn:
     def test_happy_path_folds_the_view_but_the_last_round(self, make_state, capsys):
         from desh_chat.state import CHECKPOINT_PREFIX
         server = FakeServer(script=[{"content": "a tidy checkpoint"}])
-        history = ChatHistory().append(Turn("earlier", "reply", tokens=100))
+        history = ChatHistory().append(Turn("earlier", "reply", tokens=100, stop=StopReason.ANSWER))
         state = mid_turn(with_server(make_state, server, history=history), "hi", rounds=3)
 
         new_state, events = CompactPendingTurn().execute(state)
@@ -752,7 +770,7 @@ class TestCompactionTranscriptBound:
 
     def test_history_rounds_are_stubbed_in_the_summary_request(self, make_state):
         server = FakeServer(script=[{"content": "s"}])
-        history = ChatHistory().append(Turn("q", "a", rounds=(tool_round(1),), tokens=50))
+        history = ChatHistory().append(Turn("q", "a", rounds=(tool_round(1),), tokens=50, stop=StopReason.ANSWER))
         CompactHistory().execute(with_server(make_state, server, history=history))
         sent = server.calls[0][1].messages[1]["content"]
         assert "result 1" not in sent and "expired" in sent
@@ -762,7 +780,7 @@ class TestCompactionTranscriptBound:
         settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=1000, max_turn_tokens=500, compaction_target=0.25)
         history = ChatHistory()
         for i in range(6):
-            history = history.append(Turn(f"q{i} " + "x" * 800, f"a{i} " + "y" * 800, tokens=400))   # ~6 x 500 tokens: far over 1000
+            history = history.append(Turn(f"q{i} " + "x" * 800, f"a{i} " + "y" * 800, tokens=400, stop=StopReason.ANSWER))   # ~6 x 500 tokens: far over 1000
         server = FakeServer(script=[{"content": "s"}])
         CompactHistory().execute(with_server(make_state, server, settings=settings, history=history))
         req = server.calls[0][1]
@@ -812,7 +830,7 @@ class TestEmptySummaryFallback:
         server = FakeServer(script=[{"content": "c"}, {"content": "s"}])
         CompactPendingTurn().execute(mid_turn(with_server(make_state, server), "hi", rounds=3))
         assert server.calls[0][1].messages[-1]["content"].endswith(CHECKPOINT_CLOSE)
-        CompactHistory().execute(with_server(make_state, server, history=ChatHistory().append(Turn("q", "a", tokens=50))))
+        CompactHistory().execute(with_server(make_state, server, history=ChatHistory().append(Turn("q", "a", tokens=50, stop=StopReason.ANSWER))))
         assert server.calls[1][1].messages[-1]["content"].endswith(SUMMARY_CLOSE)
 
     def test_twice_nothing_folds_with_the_calls_digest(self, make_state):
@@ -842,7 +860,7 @@ class TestEmptySummaryFallback:
     def test_an_empty_history_summary_is_asked_again_then_digested(self, make_state):
         from desh_chat.display import Warn
         server = FakeServer(script=[{"content": ""}, {"content": ""}])
-        history = ChatHistory().compact("earlier", tokens=20).append(Turn("q1", "a1", rounds=(tool_round(1),), tokens=30))
+        history = ChatHistory().compact("earlier", tokens=20).append(Turn("q1", "a1", rounds=(tool_round(1),), tokens=30, stop=StopReason.ANSWER))
         new_state, events = CompactHistory().execute(with_server(make_state, server, history=history))
         assert [type(e) for e in events[:2]] == [Warn, Warn] and "asking again" in events[0].text and "digest" in events[1].text
         summary = new_state.history.turns[-1]

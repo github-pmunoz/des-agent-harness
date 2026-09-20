@@ -20,7 +20,7 @@ from desh.llama.wire import ToolCall
 from desh.tools import ToolRegistry
 from desh_chat.events import NextRound, StreamCompletion
 from desh_chat.scratchpad import Scratchpad
-from desh_chat.state import CHECKPOINT_PREFIX, EXPIRED_RESULT, MENTION_CHARS, ChatHistory, PendingTurn, Round, Settings, ToolResult, Turn
+from desh_chat.state import CHECKPOINT_PREFIX, EXPIRED_RESULT, MENTION_CHARS, ChatHistory, PendingTurn, Round, Settings, ToolResult, Turn, StopReason
 
 
 def call(name: str, index: int = 0, **arguments) -> ToolCall:
@@ -196,7 +196,7 @@ class TestRequest:
         assert state.scratchpad_tokens() > estimate_tokens(Scratchpad().message(2))
 
     def test_history_turns_are_always_stubbed_in_the_view(self, make_state):
-        turn = Turn("q0", "a0", rounds=(round_(1),), tokens=5)
+        turn = Turn("q0", "a0", rounds=(round_(1),), tokens=5, stop=StopReason.ANSWER)
         state = make_state(pending=PendingTurn("q").add_round(round_(1)), settings=settings(6), history=ChatHistory().append(turn))
         _, events = NextRound().execute(state)
         results = results_in(events[0].request.messages)
@@ -327,7 +327,7 @@ class TestCheckpoint:
         assert p.since_last_summary()[0].tokens == estimate_tokens(CHECKPOINT_PREFIX + "c")
 
     def test_the_finished_turn_keeps_the_record_and_renders_the_view(self):
-        turn = pending(3).compact("c", tokens=100).finish("done", tokens=0, cancelled=False)
+        turn = pending(3).compact("c", tokens=100).finish("done", tokens=0, stop=StopReason.ANSWER)
         assert len(turn.rounds) == 4
         assert [m["role"] for m in turn.messages()] == ["user", "user", "assistant", "tool", "assistant"]
         assert "round 1" not in turn.transcript() and "EARLIER CHECKPOINT: c" in turn.transcript()
@@ -436,7 +436,7 @@ class TestTranscriptFit:
         assert p.transcript(p.since_last_summary()[:-1], expire_after=1, budget_tokens=estimate_result_tokens(want) + 1) == want
 
     def test_the_history_transcript_stubs_rounds_and_reduces_oldest_turns_first(self):
-        turns = [Turn(f"q{i}", f"a{i}", rounds=(round_(1),), tokens=5) for i in range(3)]
+        turns = [Turn(f"q{i}", f"a{i}", rounds=(round_(1),), tokens=5, stop=StopReason.ANSWER) for i in range(3)]
         h = ChatHistory()
         for t in turns:
             h = h.append(t)
@@ -444,7 +444,7 @@ class TestTranscriptFit:
         assert "result 1" not in whole and whole.count(EXPIRED_RESULT) == 3      # as the model last saw them
         reduced = h.transcript(budget_tokens=estimate_result_tokens(whole) - 1)
         assert reduced.startswith("USER: q0\nASSISTANT: a0") and reduced.count(EXPIRED_RESULT) == 2
-        h = ChatHistory().compact("s", tokens=5).append(Turn("q " + "x" * 300, "a", tokens=5))   # too long even without rounds
+        h = ChatHistory().compact("s", tokens=5).append(Turn("q " + "x" * 300, "a", tokens=5, stop=StopReason.ANSWER))   # too long even without rounds
         summary_only = "[1 earlier turns left out of this transcript]\n" + h.turns[0].transcript()
         assert h.transcript(budget_tokens=estimate_result_tokens(summary_only) + 1) == summary_only     # a summary is fixed
 

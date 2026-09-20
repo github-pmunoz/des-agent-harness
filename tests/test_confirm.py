@@ -22,7 +22,7 @@ from desh_chat.events import ExecuteToolCalls, NextRound, PromptUser, TurnEnd, T
 from desh_chat.gate import DENIED_TEXT, SKIPPED_TEXT, Answer
 from dataclasses import replace
 
-from desh_chat.state import InferenceEngine, PendingTurn, Round, Settings
+from desh_chat.state import InferenceEngine, PendingTurn, Round, Settings, StopReason
 
 
 RAN: list[str] = []     # what actually executed, to prove denied/skipped calls never do
@@ -178,7 +178,7 @@ class TestAnswers:
         assert RAN == ["read a"]
         assert len(state.pending.rounds[-1].results) == 1          # partial round stays on pending; TurnEnd freezes it
         assert [type(e) for e in evs] == [Warn, TurnEnd]
-        assert evs[1] == TurnEnd(assistant="", tokens=0, cancelled=True)
+        assert evs[1] == TurnEnd(assistant="", tokens=0, stop=StopReason.CANCELLED)
 
     def test_no_step_ever_schedules_prompt_user(self, make_state, answers):
         for a in (Answer("yes"), Answer("no"), Answer("no", "why"), Answer("cancel")):

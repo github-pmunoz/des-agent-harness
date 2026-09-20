@@ -8,7 +8,7 @@ from desh.llama.wire import ToolCall
 from desh_chat.display import Info
 from desh_chat.events import Exit, MaybeRegenerate, TurnEnd, TurnStart
 from desh_chat.handlers import on_error, on_interrupt
-from desh_chat.state import PendingTurn, Round, Settings, ToolResult
+from desh_chat.state import PendingTurn, Round, Settings, ToolResult, StopReason
 from desh_chat.delegate import child_settings
 
 
@@ -65,8 +65,7 @@ class TestOnInterrupt:
         assert final.settings.auto is False
         assert final.pending is None
         turn = final.history.turns[-1]
-        assert turn.cancelled is True
-        assert turn.stop == "interrupt"
+        assert turn.stop == StopReason.INTERRUPT and turn.visible is False
 
     def test_auto_on_with_pending_turn_leaves_loop_head_safe(self, make_state):
         # The bug symptom: with the pending turn left open, the MaybeRegenerate that
@@ -88,15 +87,13 @@ class TestOnError:
         events = on_error(Info("x"), ValueError("boom"), state)
         ends = [e for e in events if isinstance(e, TurnEnd)]
         assert ends, "on_error must close the pending turn with a TurnEnd"
-        assert ends[0].cancelled is True
-        assert ends[0].stop == "error"
+        assert ends[0].stop == StopReason.ERROR
         final = state
         for e in events:
             final, _ = e.execute(final)
         assert final.pending is None
         turn = final.history.turns[-1]
-        assert turn.cancelled is True
-        assert turn.stop == "error"
+        assert turn.stop == StopReason.ERROR and turn.visible is False
 
     def test_on_error_with_filled_pending_turn_leaves_loop_head_safe(self, make_state):
         # The bug symptom: with the pending turn left open, the MaybeRegenerate that

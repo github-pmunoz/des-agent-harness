@@ -12,7 +12,7 @@ from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 from desh_chat.display import Error, Info, Warn
 from desh_chat.events import CompactHistory, TurnEnd
 from desh_chat.session import LoadSession, SaveSession
-from desh_chat.state import COMPACTION_PROMPT, ChatHistory, InferenceEngine, PendingTurn, Settings, Turn
+from desh_chat.state import COMPACTION_PROMPT, ChatHistory, InferenceEngine, PendingTurn, Settings, Turn, StopReason
 from desh_chat.scratchpad import Scratchpad
 
 
@@ -23,10 +23,10 @@ def with_server(make_state, server, **overrides):
 
 def sample_history() -> ChatHistory:
     return (ChatHistory()
-            .append(Turn("q1", "a1", tokens=40))
-            .append(Turn("partial", "…", tokens=5, cancelled=True))
-            .append(Turn(ChatHistory.SUMMARY_PREFIX + "s", ChatHistory.SUMMARY_ACK, tokens=12, summary=True))
-            .append(Turn("q2", "a2", tokens=60)))
+            .append(Turn("q1", "a1", tokens=40, stop=StopReason.ANSWER))
+            .append(Turn("partial", "…", tokens=5, stop=StopReason.CANCELLED))
+            .append(Turn(ChatHistory.SUMMARY_PREFIX + "s", ChatHistory.SUMMARY_ACK, tokens=12, stop=StopReason.SUMMARY))
+            .append(Turn("q2", "a2", tokens=60, stop=StopReason.ANSWER)))
 
 
 # ---------------------
@@ -35,24 +35,28 @@ def sample_history() -> ChatHistory:
 
 class TestSerialization:
     def test_turn_round_trips_all_fields(self):
-        t = Turn("u", "a", tokens=7, cancelled=True, summary=True)
+        t = Turn("u", "a", tokens=7, stop=StopReason.SUMMARY)
         assert Turn.from_dict(t.to_dict()) == t
 
-    def test_stop_round_trips_and_is_absent_from_a_plain_turn(self):
-        """A plain turn serialises exactly as it did before `stop` existed — no key — so format 2
-        files stay byte-identical; a turn that ended early carries the reason."""
-        assert "stop" not in Turn("u", "a", tokens=7).to_dict()
-        capped = Turn("u", "so far", tokens=7, stop="cap")
-        overflow = Turn("u", "", tokens=7, cancelled=True, stop="overflow")
+    def test_every_turn_carries_its_stop_and_it_round_trips(self):
+        """The stop reason is written as its plain value on every turn, an answered one included,
+        and a turn without one (or with an unknown one) does not load."""
+        assert Turn("u", "a", tokens=7, stop=StopReason.ANSWER).to_dict()["stop"] == "answer"
+        capped = Turn("u", "so far", tokens=7, stop=StopReason.CAP)
+        overflow = Turn("u", "", tokens=7, stop=StopReason.OVERFLOW)
         assert capped.to_dict()["stop"] == "cap"
         assert Turn.from_dict(json.loads(json.dumps(capped.to_dict()))) == capped
         assert Turn.from_dict(json.loads(json.dumps(overflow.to_dict()))) == overflow
-        assert Turn.from_dict({"user": "u", "assistant": "a", "tokens": 7}).stop == ""
+        assert all(Turn.from_dict(Turn("u", "a", tokens=7, stop=s).to_dict()).stop is s for s in StopReason)
+        with pytest.raises(KeyError):
+            Turn.from_dict({"user": "u", "assistant": "a", "tokens": 7})
+        with pytest.raises(ValueError):
+            Turn.from_dict({"user": "u", "assistant": "a", "tokens": 7, "stop": "nope"})
 
     def test_turn_from_dict_with_zero_tokens_reprices_by_heuristic(self):
         # tokens=0 is "unpriced" everywhere else too; a file that carries 0 gets the same treatment
-        t = Turn.from_dict({"user": "hello there", "assistant": "general kenobi", "tokens": 0})
-        assert t.tokens == Turn("hello there", "general kenobi").tokens
+        t = Turn.from_dict({"user": "hello there", "assistant": "general kenobi", "tokens": 0, "stop": "answer"})
+        assert t.tokens == Turn("hello there", "general kenobi", stop=StopReason.ANSWER).tokens
 
     def test_history_round_trips_and_stays_a_tuple(self):
         h = sample_history()
@@ -164,22 +168,17 @@ class TestLoadSession:
         assert (tmp_path / "s.json.bad").read_text() == content
         assert len(events) == 1 and isinstance(events[0], Warn)
 
-    def test_v3_file_still_loads(self, make_state, tmp_path):
-        # a format-3 document: turns only, no "settings" key — loads unchanged
+    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5])
+    def test_an_older_format_is_not_read_and_is_moved_aside(self, make_state, tmp_path, version):
+        # formats before 6 carry no stop reason on the turn: the file is kept as .bad, never overwritten
         path = tmp_path / "s.json"
-        path.write_text(json.dumps({"version": 3, "turns": sample_history().to_dict()["turns"]}))
+        content = json.dumps({"version": version, "turns": [{"user": "q", "assistant": "a", "tokens": 5}]})
+        path.write_text(content)
         state = make_state(session_file=str(path))
-        new_state, _ = LoadSession().execute(state)
-        assert new_state.history == sample_history()
-        assert new_state.settings == state.settings
-
-    def test_a_v4_scratchpad_of_plain_strings_loads_as_facts(self, make_state, tmp_path):
-        # a format-4 turn stores the scratchpad as {key: value}; format 5 stores {key: {kind, value}}
-        path = tmp_path / "s.json"
-        turns = [{"user": "q", "assistant": "a", "tokens": 1, "scratchpad": {"path": "src/x.py"}}]
-        path.write_text(json.dumps({"version": 4, "turns": turns}))
-        new_state, _ = LoadSession().execute(make_state(session_file=str(path), scratchpad=Scratchpad()))
-        assert new_state.scratchpad == Scratchpad().with_entry("path", "fact", "src/x.py")
+        new_state, events = LoadSession().execute(state)
+        assert new_state.history == ChatHistory()
+        assert (tmp_path / "s.json.bad").read_text() == content
+        assert len(events) == 1 and isinstance(events[0], Warn)
 
     def test_load_restores_settings_from_a_v4_document(self, make_state, tmp_path):
         doc_settings = Settings(model="model-b", temperature=0.9, think=True, context=8192,
@@ -197,11 +196,11 @@ class TestLoadSession:
         doc_settings = Settings(model="model-a", temperature=0.3, think=False, context=16384,
                                 max_turn_tokens=8192, max_tool_rounds=7, tool_expiration=3)
         turns = [
-            {"user": "", "assistant": "", "tokens": 1, "type": "settings", "delta": {"model": "model-a", "max_tool_rounds": 5}},
-            {"user": "", "assistant": "", "tokens": 1, "type": "settings", "delta": {"model": "model-b"}},
+            {"user": "", "assistant": "", "tokens": 1, "stop": "setting", "type": "settings", "delta": {"model": "model-a", "max_tool_rounds": 5}},
+            {"user": "", "assistant": "", "tokens": 1, "stop": "setting", "type": "settings", "delta": {"model": "model-b"}},
         ]
         path = tmp_path / "s.json"
-        path.write_text(json.dumps({"version": 4, "turns": turns, "settings": doc_settings.to_dict()}))
+        path.write_text(json.dumps({"version": ChatHistory.SESSION_FORMAT, "turns": turns, "settings": doc_settings.to_dict()}))
         new_state, _ = LoadSession().execute(make_state(session_file=str(path)))
         assert new_state.settings.model == "model-b"       # the last settings turn wins
         assert new_state.settings.max_tool_rounds == 5     # an earlier delta still applies
@@ -216,11 +215,11 @@ class TestLoadSession:
                         max_tool_rounds=7, tool_expiration=3)
         cli = Settings(model="model-cli", temperature=0.1, think=False, context=32768, max_turn_tokens=16384)
         turns = [
-            {"user": "", "assistant": "", "tokens": 1, "type": "settings", "delta": {"model": "model-b"}},
-            {"user": "", "assistant": "", "tokens": 1, "type": "settings", "delta": {"temperature": 0.9}},
+            {"user": "", "assistant": "", "tokens": 1, "stop": "setting", "type": "settings", "delta": {"model": "model-b"}},
+            {"user": "", "assistant": "", "tokens": 1, "stop": "setting", "type": "settings", "delta": {"temperature": 0.9}},
         ]
         path = tmp_path / "s.json"
-        path.write_text(json.dumps({"version": 4, "turns": turns, "settings": seed.to_dict()}))
+        path.write_text(json.dumps({"version": ChatHistory.SESSION_FORMAT, "turns": turns, "settings": seed.to_dict()}))
         new_state, _ = LoadSession().execute(make_state(session_file=str(path), settings=cli))
         assert new_state.settings.model == "model-b"       # the first settings turn
         assert new_state.settings.temperature == 0.9       # the last settings turn wins
@@ -278,7 +277,7 @@ class TestSaveSession:
         path.write_text(json.dumps({**sample_history().to_dict(), "settings": seed.to_dict()}))
         latest = Settings(model="model-b", temperature=0.5, think=False, context=16384, max_turn_tokens=8192)
         history = (sample_history()
-                   .append(Turn("", "", tokens=1, type="settings", delta={"model": "model-b"})))
+                   .append(Turn("", "", tokens=1, type="settings", delta={"model": "model-b"}, stop=StopReason.SETTING)))
         state = make_state(session_file=str(path), history=history, settings=latest)
         SaveSession().execute(state)
         doc = json.loads(path.read_text())
@@ -321,17 +320,17 @@ class TestSaveSession:
 class TestPersistHooks:
     def test_turn_end_emits_save_when_session_file_set(self, make_state, tmp_path):
         state = make_state(session_file=str(tmp_path / "s.json"), pending=PendingTurn("q"))
-        _, events = TurnEnd(assistant="a", cancelled=False).execute(state)
+        _, events = TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(state)
         assert any(isinstance(e, SaveSession) for e in events)
 
     def test_turn_end_does_not_emit_save_without_session_file(self, make_state):
-        _, events = TurnEnd(assistant="a", cancelled=False).execute(make_state(pending=PendingTurn("q")))
+        _, events = TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(make_state(pending=PendingTurn("q")))
         assert not any(isinstance(e, SaveSession) for e in events)
 
     def test_compact_history_emits_save_when_session_file_set(self, make_state, tmp_path):
         server = FakeServer(script=[{"content": "summary"}])
         state = with_server(make_state, server, session_file=str(tmp_path / "s.json"),
-                            history=ChatHistory().append(Turn("q", "a", tokens=100)))
+                            history=ChatHistory().append(Turn("q", "a", tokens=100, stop=StopReason.ANSWER)))
         _, events = CompactHistory().execute(state)
         assert any(isinstance(e, SaveSession) for e in events)
 
@@ -339,7 +338,7 @@ class TestPersistHooks:
         # TurnEnd returns the new state; SaveSession must see it — i.e. run against new_state
         path = tmp_path / "s.json"
         state = make_state(session_file=str(path), pending=PendingTurn("q"))
-        new_state, events = TurnEnd(assistant="a", cancelled=False).execute(state)
+        new_state, events = TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(state)
         save = next(e for e in events if isinstance(e, SaveSession))
         save.execute(new_state)
         assert ChatHistory.from_dict(json.loads(path.read_text())).turns[-1].user == "q"
@@ -387,3 +386,19 @@ class TestResolveSessionFile:
         got = resolve_session_file(path, str(tmp_path / "sessions"), "run1")
         assert got == path
         assert not (tmp_path / "sessions").exists()   # folder untouched when ignored
+
+
+class TestTaskExitCode:
+    """A one-shot run exits 0 only when its last turn left an answer the caller can use."""
+
+    @pytest.mark.parametrize("stop, code", [(s, 0 if s in (StopReason.ANSWER, StopReason.CAP, StopReason.DEADLINE) else 1)
+                                            for s in StopReason])
+    def test_every_stop_reason_maps_to_an_exit_code(self, make_state, stop, code):
+        from desh_chat.cli import task_exit_code
+        state = make_state(history=ChatHistory().append(Turn("q", "a", tokens=5, stop=stop)))
+        expected = 1 if stop is StopReason.SUMMARY else code     # a lone summary is no turn at all
+        assert task_exit_code(state) == expected
+
+    def test_a_run_without_a_turn_fails(self, make_state):
+        from desh_chat.cli import task_exit_code
+        assert task_exit_code(make_state()) == 1

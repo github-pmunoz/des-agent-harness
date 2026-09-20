@@ -1,7 +1,7 @@
 import traceback
 from dataclasses import replace
 from desh.engine import Event
-from desh_chat.state import ChatState
+from desh_chat.state import ChatState, StopReason
 from desh_chat.display import Info
 from desh_chat.events import MaybeRegenerate, Exit, TurnEnd
 
@@ -15,18 +15,18 @@ class AutoOff(Event):
 
 def on_error(ev: Event, ex: Exception, s: ChatState) -> list[Event]:
     traceback.print_exc()
-    # A mid-turn error closes the turn as cancelled first, so the loop head starts from a clean
+    # A mid-turn error closes the turn first (stop=ERROR), so the loop head starts from a clean
     # state (TurnEnd already emits the MaybeRegenerate that returns to the prompt).
     if s.pending is not None and s.pending.user is not None:
-        return [TurnEnd(assistant="", cancelled=True, stop="error")]
+        return [TurnEnd(assistant="", stop=StopReason.ERROR)]
     return [MaybeRegenerate()]
 
 def on_interrupt(s: ChatState) -> list[Event]:
     if s.settings.auto:
         # Ctrl+C in auto mode does not exit: it turns auto mode off and goes back to the prompt.
-        # A turn in progress is closed as cancelled first, so the loop head starts from a clean
+        # A turn in progress is closed first (stop=INTERRUPT), so the loop head starts from a clean
         # state (TurnEnd already emits the MaybeRegenerate that returns to the prompt).
         if s.pending is not None and s.pending.user is not None:
-            return [AutoOff(), Info("auto mode off"), TurnEnd(assistant="", cancelled=True, stop="interrupt")]
+            return [AutoOff(), Info("auto mode off"), TurnEnd(assistant="", stop=StopReason.INTERRUPT)]
         return [AutoOff(), Info("auto mode off"), MaybeRegenerate()]
     return [Info("~ Interrupted"), Exit()]

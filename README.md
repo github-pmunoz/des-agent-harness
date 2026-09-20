@@ -172,7 +172,7 @@ The repository structure is described in more detail in [INDEX.md](INDEX.md).
 | `desh.llama.send_direct` | Standalone CLI for direct llama-server requests (python port of an earlier bash prototype). |
 | `desh.llama.pyscan` | Streaming Python syntax scanner for the renderer; classifies fence-body text into coloured spans while fragments are still arriving. |
 | `desh_chat` | CLI, immutable chat state, turn events, commands, sessions, terminal display, confirmation gate, and toolsets. |
-| `desh_chat.handlers` | Error/interrupt handlers for the chat loop: `AutoOff` event, `on_error` (mid-turn error closes the turn as cancelled with `stop="error"`), `on_interrupt` (in auto mode Ctrl+C turns auto off and cancels the in-flight turn; in manual mode it prints "~ Interrupted" and exits). |
+| `desh_chat.handlers` | Error/interrupt handlers for the chat loop: `AutoOff` event, `on_error` (mid-turn error closes the turn with `stop=ERROR`, a hidden stop), `on_interrupt` (in auto mode Ctrl+C turns auto off and cancels the in-flight turn; in manual mode it prints "~ Interrupted" and exits). |
 
 A normal turn is an event loop, rather than a single blocking completion:
 
@@ -187,7 +187,7 @@ MaybeRegenerate ─ running ─► TurnStart (opens an empty pending turn)
 NextRound ─┬─ room ≥ min_gen ─► StreamCompletion ─┬─ final reply ─► TurnEnd
     ▲      │                                       └─ tool calls ──► AppendRound ─► ExecuteToolCalls(i)
     │      ├─ room short, first time ─► CompactHistory ─► NextRound(compacted)       ├─ yes: run, attach result ─► ExecuteToolCalls(i+1), or after the last call ─┐
-    │      └─ room short, retried ────► TurnEnd (cancelled, stop="overflow")         ├─ no:  denial result, later calls skipped ──────────────────────────────────┤
+    │      └─ room short, retried ────► TurnEnd (stop=OVERFLOW)                      ├─ no:  denial result, later calls skipped ──────────────────────────────────┤
     │                                                                                └─ cancel ─► TurnEnd (cancelled)                                             │
     └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 

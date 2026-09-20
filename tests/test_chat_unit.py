@@ -21,7 +21,7 @@ from desh.llama.wire import Completion, Request
 from desh_chat.commands import Command
 from desh_chat.display import DisplayHistory, DisplayStats, Error, Info, Warn
 from desh_chat.events import Exit, LogCompletion, MaybeRegenerate, PromptUser, TurnStart, UserMessage
-from desh_chat.state import ChatHistory, Turn
+from desh_chat.state import ChatHistory, Turn, StopReason
 
 
 class TestInfo:
@@ -47,8 +47,8 @@ class TestError:
 
 class TestDisplayHistory:
     def test_lists_turns_in_order(self, make_state, capsys):
-        history = ChatHistory().append(Turn("first question", "first answer")) \
-                                .append(Turn("second question", "second answer"))
+        history = ChatHistory().append(Turn("first question", "first answer", stop=StopReason.ANSWER)) \
+                                .append(Turn("second question", "second answer", stop=StopReason.ANSWER))
         state = make_state(history=history)
         _, events = DisplayHistory().execute(state)
         out = capsys.readouterr().out
@@ -60,7 +60,7 @@ class TestDisplayHistory:
         assert events == []
 
     def test_summary_turn_shown_without_user_assistant_prefix(self, make_state, capsys):
-        history = ChatHistory().append(Turn("Summary of the earlier conversation: talked about X", "Understood.", summary=True))
+        history = ChatHistory().append(Turn("Summary of the earlier conversation: talked about X", "Understood.", stop=StopReason.SUMMARY))
         state = make_state(history=history)
         DisplayHistory().execute(state)
         out = capsys.readouterr().out
@@ -73,7 +73,7 @@ class TestDisplayHistory:
         model-context path (view()/since_last_summary()), it does not filter
         cancelled turns out; this is the one place they're meant to be visible.
         """
-        history = ChatHistory().append(Turn("cancelled question", "partial answer", cancelled=True))
+        history = ChatHistory().append(Turn("cancelled question", "partial answer", stop=StopReason.CANCELLED))
         state = make_state(history=history)
         DisplayHistory().execute(state)
         out = capsys.readouterr().out
@@ -84,7 +84,7 @@ class TestDisplayHistory:
 class TestDisplayStats:
     def test_prints_context_and_session_figures(self, make_state, capsys):
         from desh.llama.tokens import estimate_tokens
-        history = ChatHistory().append(Turn("q", "a"))
+        history = ChatHistory().append(Turn("q", "a", stop=StopReason.ANSWER))
         state = make_state(history=history)
         sys_tokens = estimate_tokens(state.system_prompt)
         expected_window = sys_tokens + state.history.window_tokens()

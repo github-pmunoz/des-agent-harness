@@ -31,7 +31,7 @@ from desh_chat.session import LoadSession, SaveSession
 from desh_chat import scratchpad as pad_tools
 from desh_chat.scratchpad import Scratchpad
 from desh.tools import ToolRegistry
-from desh_chat.state import EXPIRED_RESULT, ChatHistory, Deadline, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn
+from desh_chat.state import EXPIRED_RESULT, ChatHistory, Deadline, InferenceEngine, PendingTurn, Round, Settings, ToolResult, Turn, StopReason
 
 
 def with_server(make_state, server, **overrides):
@@ -70,7 +70,7 @@ class TestPendingTurn:
         with pytest.raises(AssertionError):
             PendingTurn().messages()
         with pytest.raises(AssertionError):
-            PendingTurn().finish("a", tokens=0, cancelled=False)
+            PendingTurn().finish("a", tokens=0, stop=StopReason.ANSWER)
 
     def test_add_round_and_with_results_are_immutable(self):
         p0 = PendingTurn("q")
@@ -96,19 +96,19 @@ class TestPendingTurn:
         would reserve room the request no longer spends."""
         round = Round("", (WEATHER,), (result(WEATHER, "a long result " * 40),), tokens=300)
         p = PendingTurn("q").add_round(round)
-        turn = p.finish("the answer", tokens=12, cancelled=False)
-        assert turn == Turn("q", "the answer", tokens=12 + estimate_tokens(round.text(stubbed=True)), rounds=p.rounds)
+        turn = p.finish("the answer", tokens=12, stop=StopReason.ANSWER)
+        assert turn == Turn("q", "the answer", tokens=12 + estimate_tokens(round.text(stubbed=True)), rounds=p.rounds, stop=StopReason.ANSWER)
         assert turn.tokens < 12 + 300
 
     def test_finish_without_usage_estimates_everything_on_the_stubbed_rendering(self):
         round = Round("", (WEATHER,), (result(WEATHER),), tokens=30)
         p = PendingTurn("hello there").add_round(round)
-        turn = p.finish("general kenobi", tokens=0, cancelled=False)
+        turn = p.finish("general kenobi", tokens=0, stop=StopReason.ANSWER)
         assert turn.tokens == estimate_tokens("hello there") + estimate_tokens("general kenobi") + estimate_tokens(round.text(stubbed=True))
 
     def test_unpriced_round_is_estimated_from_its_stubbed_text(self):
         unpriced = Round("Let me check.", (WEATHER,), (result(WEATHER),), tokens=0)
-        turn = Turn("q", "a", rounds=(unpriced,))
+        turn = Turn("q", "a", rounds=(unpriced,), stop=StopReason.ANSWER)
         assert turn.tokens == estimate_tokens("q") + estimate_tokens("a") + estimate_tokens(unpriced.text(stubbed=True))
 
 
@@ -125,7 +125,7 @@ class TestRoundMessages:
         assert len(msgs) == 3
 
     def test_turn_messages_splice_rounds_between_user_and_final_answer(self):
-        turn = Turn("q", "the answer", rounds=(ROUND,))
+        turn = Turn("q", "the answer", rounds=(ROUND,), stop=StopReason.ANSWER)
         roles = [m["role"] for m in turn.messages()]
         assert roles == ["user", "assistant", "tool", "tool", "assistant"]
         assert turn.messages()[-1] == {"role": "assistant", "content": "the answer"}
@@ -133,35 +133,36 @@ class TestRoundMessages:
     def test_a_history_turn_keeps_its_calls_and_stubs_every_result(self):
         """The final answer is what the results led to; once the turn is in history the results
         are gone from the request and the calls stay, one tool message each, for the template."""
-        msgs = Turn("q", "the answer", rounds=(ROUND,)).messages()
+        msgs = Turn("q", "the answer", rounds=(ROUND,), stop=StopReason.ANSWER).messages()
         assert msgs[1]["tool_calls"] == ROUND.messages()[0]["tool_calls"]
         assert [m["content"] for m in msgs[2:4]] == [EXPIRED_RESULT, EXPIRED_RESULT]
         assert [m["tool_call_id"] for m in msgs[2:4]] == ["call_0", "call_1"]
         assert ROUND.results[0].content == "sunny"     # the record is intact
 
     def test_plain_turn_messages_are_unchanged(self):
-        assert Turn("q", "a").messages() == [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+        assert Turn("q", "a", stop=StopReason.ANSWER).messages() == [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
 
 
 class TestTurnSerialization:
-    def test_plain_turn_serializes_exactly_as_format_1_did(self):
-        assert Turn("q", "a", tokens=5).to_dict() == {"user": "q", "assistant": "a", "tokens": 5, "cancelled": False, "summary": False}
+    def test_plain_turn_serializes_without_the_optional_keys(self):
+        assert Turn("q", "a", tokens=5, stop=StopReason.ANSWER).to_dict() == {"user": "q", "assistant": "a", "tokens": 5, "stop": "answer"}
 
     def test_turn_with_rounds_round_trips_through_json(self):
-        turn = Turn("q", "the answer", tokens=42, rounds=(ROUND,))
+        turn = Turn("q", "the answer", tokens=42, rounds=(ROUND,), stop=StopReason.ANSWER)
         back = Turn.from_dict(json.loads(json.dumps(turn.to_dict())))
         assert back == turn
         assert isinstance(back.rounds, tuple) and isinstance(back.rounds[0].tool_calls, tuple)
 
-    def test_history_writes_the_current_format_and_still_reads_formats_1_and_2(self):
-        assert ChatHistory().to_dict()["version"] == ChatHistory.SESSION_FORMAT == 5
-        v1 = {"version": 1, "turns": [{"user": "q", "assistant": "a", "tokens": 5}]}
-        assert ChatHistory.from_dict(v1).turns == (Turn("q", "a", tokens=5),)
-        v2 = {"version": 2, "turns": [{"user": "q", "assistant": "a", "tokens": 5, "rounds": [ROUND.to_dict()]}]}
-        assert ChatHistory.from_dict(v2).turns == (Turn("q", "a", tokens=5, rounds=(ROUND,)),)
+    def test_history_writes_and_reads_the_current_format_only(self):
+        assert ChatHistory().to_dict()["version"] == ChatHistory.SESSION_FORMAT == 6
+        doc = {"version": 6, "turns": [{"user": "q", "assistant": "a", "tokens": 5, "stop": "answer", "rounds": [ROUND.to_dict()]}]}
+        assert ChatHistory.from_dict(doc).turns == (Turn("q", "a", tokens=5, rounds=(ROUND,), stop=StopReason.ANSWER),)
+        for older in (1, 2, 3, 4, 5):
+            with pytest.raises(ValueError):
+                ChatHistory.from_dict({**doc, "version": older})
 
     def test_transcript_renders_calls_and_results_between_user_and_answer(self):
-        text = Turn("q", "the answer", rounds=(ROUND,)).transcript()
+        text = Turn("q", "the answer", rounds=(ROUND,), stop=StopReason.ANSWER).transcript()
         assert text.splitlines() == [
             "USER: q",
             'ASSISTANT (tool calls): Let me check. get_weather({"city": "Santiago"}), get_time({"tz": "CLT"})',
@@ -188,7 +189,7 @@ class TestStreamCompletionRouting:
     def test_stop_finish_emits_turn_end(self, make_state, no_esc_watcher):
         server = FakeServer(script=[{"content": "done"}])
         _, events = StreamCompletion(request=self.REQ).execute(with_server(make_state, server))
-        assert isinstance(events[0], TurnEnd) and events[0].cancelled is False
+        assert isinstance(events[0], TurnEnd) and events[0].stop == StopReason.ANSWER
 
     def test_tool_calls_finish_without_calls_ends_the_turn(self, make_state, no_esc_watcher):
         # defensive: a finish_reason claiming tool calls with nothing folded must not open a round
@@ -200,7 +201,7 @@ class TestStreamCompletionRouting:
         server = FakeServer(script=[{"finish_reason": "cancelled", "tool_calls": [{"name": "get_weather"}]}])
         _, events = StreamCompletion(request=self.REQ).execute(with_server(make_state, server))
         assert isinstance(events[0], Info)
-        assert isinstance(events[1], TurnEnd) and events[1].cancelled is True
+        assert isinstance(events[1], TurnEnd) and events[1].stop == StopReason.CANCELLED
 
 
 # ---------------------
@@ -223,8 +224,8 @@ class TestAppendRound:
         assert new_state.pending == pending                    # the capped round is not recorded
         assert isinstance(events[0], Warn) and "get_time" in events[0].text
         assert isinstance(events[1], TurnEnd)
-        assert events[1].assistant == "one more?" and events[1].tokens == 10 and events[1].cancelled is False
-        assert events[1].stop == "cap"                          # recorded on the Turn, so a reader need not count rounds
+        assert events[1].assistant == "one more?" and events[1].tokens == 10
+        assert events[1].stop == StopReason.CAP                          # recorded on the Turn, so a reader need not count rounds
 
 
 class TestAppendRoundCapScratchpad:
@@ -287,7 +288,7 @@ class TestAppendRoundDeadline:
         assert new_state.pending == state.pending             # the refused round is not recorded
         assert isinstance(events[0], Warn) and "get_time" in events[0].text and "300s" in events[0].text
         assert isinstance(events[1], TurnEnd)
-        assert events[1].assistant == "so far" and events[1].cancelled is False and events[1].stop == "deadline"
+        assert events[1].assistant == "so far" and events[1].stop == StopReason.DEADLINE
 
     def test_a_deadline_still_ahead_lets_the_round_run(self, make_state):
         state = make_state(pending=PendingTurn("q"), deadline=Deadline.in_seconds(60))
@@ -302,7 +303,7 @@ class TestAppendRoundDeadline:
         assert isinstance(events[1], TurnEnd) and events[1].stop == "deadline"
 
     def test_a_timed_out_turn_is_not_continued_by_the_auto_prompt(self, make_state):
-        history = ChatHistory().append(Turn(user="q", assistant="so far", stop="deadline"))
+        history = ChatHistory().append(Turn(user="q", assistant="so far", stop=StopReason.DEADLINE))
         state = make_state(history=history, operator=False, auto_prompt="go on")
         new_state, events = TurnStart().execute(state)
         assert events == [] and new_state.pending is None     # the drain branch: the run returns
@@ -328,7 +329,7 @@ class TestAppendRoundLoopGuard:
         new_state, events = AppendRound(assistant="one more?", tool_calls=(third,), tokens=10).execute(make_state(pending=pending))
         assert new_state.pending == pending                    # the looping round is not recorded
         assert isinstance(events[0], Warn) and "get_weather" in events[0].text
-        assert isinstance(events[1], TurnEnd) and events[1].cancelled is False and events[1].tokens == 10
+        assert isinstance(events[1], TurnEnd) and events[1].stop == StopReason.REPEAT and events[1].tokens == 10
         assert "one more?" in events[1].assistant             # what the model said is kept...
         assert "repeat" in events[1].assistant.lower()        # ...and the reader learns why it stopped
 
@@ -400,7 +401,7 @@ class TestExecuteToolCalls:
 
 class TestNextRoundWithRounds:
     def test_request_carries_system_view_user_and_every_round(self, make_state):
-        history = ChatHistory().append(Turn("q0", "a0", tokens=20))
+        history = ChatHistory().append(Turn("q0", "a0", tokens=20, stop=StopReason.ANSWER))
         pending = PendingTurn("q1").add_round(ROUND)
         state = make_state(history=history, pending=pending)
         _, events = NextRound().execute(state)
@@ -410,7 +411,7 @@ class TestNextRoundWithRounds:
         assert msgs[4]["tool_calls"][0]["id"] == "call_0"
 
     def test_prior_tokens_include_the_priced_rounds(self, make_state):
-        history = ChatHistory().append(Turn("q0", "a0", tokens=20))
+        history = ChatHistory().append(Turn("q0", "a0", tokens=20, stop=StopReason.ANSWER))
         state = make_state(history=history, pending=PendingTurn("q1").add_round(ROUND))
         _, events = NextRound().execute(state)
         assert events[0].prior_tokens == estimate_tokens(state.system_prompt) + 20 + ROUND.tokens
@@ -421,17 +422,17 @@ class TestNextRoundWithRounds:
         new_state, events = NextRound().execute(state)
         assert new_state.pending is state.pending       # TurnEnd, not NextRound, clears it
         assert isinstance(events[0], Error)
-        assert isinstance(events[1], TurnEnd) and events[1].cancelled is True
-        assert events[1].stop == "overflow"             # cancelled keeps it out of the view; stop says why
+        assert isinstance(events[1], TurnEnd)
+        assert events[1].stop == StopReason.OVERFLOW    # a hidden stop: the turn stays out of the view
 
     def test_turn_end_writes_stop_on_the_turn(self, make_state):
         state = make_state(pending=PendingTurn("q").add_round(Round("", (WEATHER,), (result(WEATHER),), tokens=200)))
-        capped, _ = TurnEnd(assistant="so far", tokens=5, stop="cap").execute(state)
-        overflow, _ = TurnEnd(assistant="", tokens=0, cancelled=True, stop="overflow").execute(state)
-        plain, _ = TurnEnd(assistant="done", tokens=5).execute(state)
-        assert capped.history.turns[0].stop == "cap" and capped.history.turns[0].cancelled is False
-        assert overflow.history.turns[0].stop == "overflow" and overflow.history.turns[0].cancelled is True
-        assert plain.history.turns[0].stop == ""
+        capped, _ = TurnEnd(assistant="so far", tokens=5, stop=StopReason.CAP).execute(state)
+        overflow, _ = TurnEnd(assistant="", tokens=0, stop=StopReason.OVERFLOW).execute(state)
+        plain, _ = TurnEnd(assistant="done", tokens=5, stop=StopReason.ANSWER).execute(state)
+        assert capped.history.turns[0].stop == StopReason.CAP and capped.history.turns[0].visible is True
+        assert overflow.history.turns[0].stop == StopReason.OVERFLOW and overflow.history.turns[0].visible is False
+        assert plain.history.turns[0].stop == StopReason.ANSWER
 
 
 # ---------------------

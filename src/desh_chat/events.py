@@ -20,7 +20,7 @@ from desh.llama.wire import Completion, Request, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_result_tokens, estimate_tokens, turn_tokens
 from desh.tools import Tool
-from desh_chat.state import CHECKPOINT_PREFIX, SALVAGE_STOPS, ChatState, ChatHistory, PendingTurn, Round, ToolResult
+from desh_chat.state import CHECKPOINT_PREFIX, SALVAGE_STOPS, ChatState, ChatHistory, PendingTurn, Round, ToolResult, StopReason
 from desh_chat.scratchpad import Scratchpad
 from desh_chat.display import DisplayStats, Error, Info, Warn
 from desh_chat.session import persist
@@ -72,7 +72,7 @@ class TurnStart(Event):
         if self.message is not None:
             return opened, [UserMessage(self.message)]
         last = state.history.last_non_summary()
-        if last is not None and not last.cancelled and last.stop == "cap" and state.auto_prompt is not None:
+        if last is not None and last.stop == StopReason.CAP and state.auto_prompt is not None:
             return opened, [Info("Checkpoint: round cap reached, continuing the task."), UserMessage(state.auto_prompt)]
         if state.operator:
             return opened, [DisplayStats(), PromptUser()]
@@ -152,15 +152,15 @@ class LogCompletion(Event):
 #                            window leaves less than min_gen_tokens           -> StreamCompletion
 #                                                                             | CompactHistory + NextRound
 #                                                                             | CompactPendingTurn + NextRound
-#                                                                             | TurnEnd(cancelled, stop="overflow")
+#                                                                             | TurnEnd(stop=OVERFLOW)
 #   StreamCompletion         streams one round; routes on finish_reason:
-#                              cancelled            -> TurnEnd(cancelled=True)
+#                              cancelled            -> TurnEnd(stop=CANCELLED)
 #                              tool_calls           -> AppendRound
 #                              anything else        -> TurnEnd
-#   AppendRound              round cap check; records the calls on pending  -> ExecuteToolCalls(0) | Warn + TurnEnd(stop="cap")
+#   AppendRound              round cap check; records the calls on pending  -> ExecuteToolCalls(0) | Warn + TurnEnd(stop=CAP)
 #   ExecuteToolCalls(i)      ONE call per step, in order: asks the operator
 #                            if the tool wants confirmation, runs it or
-#                            records the denial, attaches the result       -> ExecuteToolCalls(i+1) | NextRound | TurnEnd(cancelled)
+#                            records the denial, attaches the result       -> ExecuteToolCalls(i+1) | NextRound | TurnEnd(stop=CANCELLED)
 #   TurnEnd                  freezes pending into a history Turn, clears it  -> SaveSession + MaybeRegenerate
 #
 # Today's plain chat is the one-round case: NextRound -> StreamCompletion -> TurnEnd.
@@ -204,11 +204,11 @@ class StreamCompletion(Event):
         last_input = self.unpriced if self.unpriced is not None else self.request.messages[-1]["content"]
         tokens = turn_tokens(completion.usage, last_input, completion.content, completion.reasoning, self.prior_tokens)
         if cancelled:
-            new_events.append(TurnEnd(assistant=completion.content, tokens=tokens, cancelled=True))
+            new_events.append(TurnEnd(assistant=completion.content, tokens=tokens, stop=StopReason.CANCELLED))
         elif completion.finish_reason == "tool_calls" and completion.tool_calls:
             new_events.append(AppendRound(assistant=completion.content, tool_calls=tuple(completion.tool_calls), tokens=tokens))
         else:
-            new_events.append(TurnEnd(assistant=completion.content, tokens=tokens, cancelled=False))
+            new_events.append(TurnEnd(assistant=completion.content, tokens=tokens, stop=StopReason.ANSWER))
         if state.completions_log is not None:
             new_events.append(LogCompletion(request=self.request, completion=completion, port=state.inference.port))
         return state, new_events
@@ -231,7 +231,7 @@ class AppendRound(Event):
         # out of time must not be continued, and a capped turn would be (TurnStart's policy).
         if state.deadline is not None and state.deadline.passed():
             return state, [Warn(f"Task deadline reached ({state.deadline.budget:g}s); {names} not run."),
-                           TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False, stop="deadline")]
+                           TurnEnd(assistant=self.assistant, tokens=self.tokens, stop=StopReason.DEADLINE)]
         if state.pending.non_summary_rounds() >= state.settings.max_tool_rounds:
             # This event only knows the cap was hit and the calls were not run. Whether the turn is
             # over or a checkpoint is the idle event's business (Continue says so when it goes on).
@@ -248,7 +248,7 @@ class AppendRound(Event):
                     shown.append(Info("Ran at the round cap: " + ", ".join(kept)))
             else:
                 shown.append(Warn(f"Tool-call round cap reached ({cap}); only the scratchpad calls ran: {', '.join(kept)}."))
-            return state, shown + [TurnEnd(assistant=self.assistant, tokens=self.tokens, cancelled=False, stop="cap")]
+            return state, shown + [TurnEnd(assistant=self.assistant, tokens=self.tokens, stop=StopReason.CAP)]
 
         # A model that asks for the same calls a third time, having twice seen the same results, is
         # looping: the third round is not recorded and the turn ends the way the round cap ends it.
@@ -265,8 +265,7 @@ class AppendRound(Event):
                 names = ", ".join(tc.name for tc in self.tool_calls)
                 return state, [Warn(f"Repeated round: {names} asked for a third time with identical results; ending the turn."),
                             TurnEnd(assistant=f"{self.assistant}\n[stopped: {names} repeated three times with identical results]",
-                                    tokens=self.tokens, cancelled=False)]
-
+                                    tokens=self.tokens, stop=StopReason.REPEAT)]
             
         pending = state.pending.add_round(Round(self.assistant, self.tool_calls, tokens=self.tokens))
         return replace(state, pending=pending), [ExecuteToolCalls()]
@@ -334,7 +333,7 @@ class ExecuteToolCalls(Event):
                 ExecuteToolCalls(self.index)]
         if answer.kind == "cancel":
             return state, [Warn("Turn cancelled at the confirmation prompt."),
-                           TurnEnd(assistant="", tokens=0, cancelled=True)]
+                           TurnEnd(assistant="", tokens=0, stop=StopReason.CANCELLED)]
         if answer.kind == "no":
             denied = ToolResult(tc.id, tc.name, answer.message or DENIED_TEXT)
             skipped = tuple(ToolResult(o.id, o.name, SKIPPED_TEXT) for o in round.tool_calls[self.index + 1:])
@@ -428,9 +427,9 @@ class TurnEnd(Event):
     """The turn's final completion arrived (or the turn was cut short): freeze state.pending into a
     history Turn. The only event that appends to history."""
     assistant: str
+    stop: StopReason
     tokens: int = 0     # prices the final completion only; 0 -> the Turn falls back to the character heuristic
-    cancelled: bool = False
-    stop: str = ""      # recorded on the Turn: "cap" | "overflow" | "interrupt" | "error" | "" (see Turn.stop)
+
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         assert state.pending is not None
         assistant, shown = self.assistant, []
@@ -443,7 +442,7 @@ class TurnEnd(Event):
             salvaged = state.pending.salvage(self.stop, state.scratchpad, budget_tokens=budget)
             assistant = f"{assistant.rstrip()}\n\n{salvaged}" if assistant.strip() else salvaged
             shown = [Warn(f"Turn ended by {self.stop}; its record stands as the answer ({len(salvaged)} chars salvaged).")]
-        turn = state.pending.finish(assistant, self.tokens, self.cancelled, self.stop, scratchpad=state.scratchpad)
+        turn = state.pending.finish(assistant, self.tokens, self.stop, scratchpad=state.scratchpad)
         new_state = replace(state, history=state.history.append(turn), pending=None)
         return new_state, shown + persist(state) + [MaybeRegenerate()]
 
@@ -591,7 +590,7 @@ class NextRound(Event):
     the model made (one to fold, the last kept whole). No flag counts the rungs: each compaction
     removes the condition that allowed it — a summarised window is not summarisable, a checkpointed
     view holds one model round — so the ladder ends by itself. What still does not fit ends the
-    turn as an overflow, recorded as a cancelled turn so the loop head can see it (a dropped
+    turn as an overflow, recorded as a hidden turn so the loop head can see it (a dropped
     message would be issued again by an auto prompt, forever)."""
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         assert state.pending is not None and state.pending.user is not None
@@ -612,7 +611,7 @@ class NextRound(Event):
             # record of how far the turn grew (the eval grader reads them from the log).
             return state, [Error(f"Request exceeds context window; ending the turn "
                                  f"(prompt≈{state.prompt_tokens(pending_tokens)} room={gen_room} need={state.min_gen_tokens()})."),
-                           TurnEnd(assistant="", tokens=0, cancelled=True, stop="overflow")]
+                           TurnEnd(assistant="", tokens=0, stop=StopReason.OVERFLOW)]
         gen_budget = state.gen_budget(pending_tokens)
         # The scratchpad block goes LAST: it changes whenever the model writes, and everything before
         # it is a stable prefix the server can keep cached. It is not part of the turn — pending

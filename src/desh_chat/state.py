@@ -9,6 +9,22 @@ from desh.engine import State
 from desh.tools import ToolRegistry
 from desh_chat.scratchpad import Scratchpad
 from typing import Any, Callable
+from enum import StrEnum
+
+class StopReason(StrEnum):
+    """How a turn ended. Read by whoever must tell the cases apart: the view (HIDDEN_STOPS), the
+    salvage (SALVAGE_STOPS), the delegate's answer(), the CLI's exit code. The values are what the
+    session file and the eval graders read."""
+    ANSWER = "answer"           # the model answered
+    CAP = "cap"                 # round cap hit; the model's text so far is the answer, and the auto prompt may continue the turn
+    OVERFLOW = "overflow"       # no room left for a completion
+    DEADLINE = "deadline"       # the run's wall-clock budget ran out; the model's text so far is the answer, and unlike CAP the turn is never continued
+    ERROR = "error"             # a mid-turn exception
+    REPEAT = "repeat"           # the same calls asked a third time with identical results
+    CANCELLED = "cancelled"     # the operator pressed ESC or cancelled at a confirmation prompt
+    INTERRUPT = "interrupt"     # Ctrl+C in auto mode
+    SETTING = "setting"         # not a conversation turn: a settings change made by a /command
+    SUMMARY = "summary"         # not a conversation turn: the synthetic turn a compaction leaves
 
 def rounds_since_last_summary(rounds: tuple[Round, ...]) -> tuple[Round, ...]:
     """The rounds since the last summary, including the latest summary round."""
@@ -215,7 +231,7 @@ class ChatState(State):
         turn whose delta is {setting: new_value}. LoadSession replays settings turns in order,
         so the last change wins. tokens=1 keeps the turn out of the token accounting (it is not
         part of the conversation) and stops __post_init__ from re-pricing the empty text."""
-        turn = Turn(user="", assistant="", tokens=1, type="settings", delta={setting: value})
+        turn = Turn(user="", assistant="", tokens=1, type="settings", delta={setting: value}, stop=StopReason.SETTING)
         return replace(self,
                        settings=replace(self.settings, **{setting: value}),
                        history=self.history.append(turn))
@@ -310,9 +326,12 @@ class ToolResult:
 # stubbed prefix of a request must not change from one round to the next, or the server re-prefills it.
 EXPIRED_RESULT = "[expired: this result is no longer in context]"
 # The stops a turn can end by without an answer, where the record is the answer (PendingTurn.salvage):
-# the window overflowed, the run's deadline passed, an error cut the turn. A capped turn is not one —
+# the window overflowed, the run's deadline passed, an error cut the turn, a repeated round. A capped turn is not one —
 # the cap message continues it — and an interrupt is the operator's, who wants no answer.
-SALVAGE_STOPS = ("overflow", "deadline", "error")
+SALVAGE_STOPS = frozenset((StopReason.OVERFLOW, StopReason.DEADLINE, StopReason.ERROR, StopReason.REPEAT))
+# The stops that keep a turn out of the conversation (Turn.visible): it is on the record and in the
+# session file, but not in the view, the token totals or the compaction transcript.
+HIDDEN_STOPS = frozenset((StopReason.CANCELLED, StopReason.INTERRUPT, StopReason.ERROR, StopReason.OVERFLOW, StopReason.REPEAT))
 
 CHECKPOINT_PREFIX = "Checkpoint of this turn so far, in place of the rounds before it: "
 
@@ -499,7 +518,7 @@ class PendingTurn:
         """Append results to the latest round, in call order: the round is answered one call per step."""
         return self.with_results(self.rounds[-1].results + results)
 
-    def finish(self, assistant: str, tokens: int, cancelled: bool, stop: str = "", scratchpad: Scratchpad | None = None) -> Turn:
+    def finish(self, assistant: str, tokens: int, stop: StopReason, scratchpad: Scratchpad | None = None) -> Turn:
         """The final answer arrived (or the turn was cut short): freeze into a history Turn.
         tokens prices only the final completion. A history turn renders its rounds stubbed from
         now on (Turn.messages), so the rounds are priced on that rendering here, once, and not on
@@ -510,7 +529,7 @@ class PendingTurn:
         # every round goes on the record (the session file shows what a checkpoint folded); the
         # Turn renders and prices its view, as the pending turn did
         return Turn(self.user, assistant, tokens=tokens + stubbed_rounds if tokens else 0,
-                    cancelled=cancelled, rounds=self.rounds, stop=stop, scratchpad=scratchpad)
+                    rounds=self.rounds, stop=stop, scratchpad=scratchpad)
 
     def since_last_summary(self) -> tuple[Round, ...]:
         """The rounds the next request carries: the latest checkpoint, when there is one, and
@@ -558,7 +577,7 @@ class PendingTurn:
                 sections.append(Section((f"round {ordinal.get(id(r), '?')}: {r.mentions(describe)}",)))
         return fit_transcript(sections, budget_tokens, unit="rounds")
 
-    def salvage(self, stop: str, scratchpad: Scratchpad | None, budget_tokens: int | None = None) -> str:
+    def salvage(self, stop: StopReason, scratchpad: Scratchpad | None, budget_tokens: int | None = None) -> str:
         """The answer of a turn that ended without one (SALVAGE_STOPS): everything the turn got
         down, assembled from the record rather than asked of the model — at an overflow there is
         no room to ask, at the deadline no time, after an error maybe no server. The sources are
@@ -609,30 +628,19 @@ class PendingTurn:
 # Chat History
 # -----------------------
 
+
+
 @dataclass(frozen=True)
 class Turn:
     user: str
     assistant: str
+    stop: StopReason
     tokens: int = 0
-    cancelled: bool = False
-    summary: bool = False
     rounds: tuple[Round, ...] = ()   # tool exchanges between user and assistant; () for a plain turn
 
-    # why the turn ended early
-    # - "" when the model answered
-    # - "cap" (round cap hit; the model's text so far is the answer)
-    # - "overflow" (no room left for a completion; cancelled as well, so the turn stays out of the view)
-    # - "interrupt" (Ctrl+C in auto mode; cancelled)
-    # - "error" (a mid-turn exception; cancelled)
-    # - "deadline" (the run's wall-clock budget ran out; the model's text so far is the answer,
-    #   and unlike "cap" the turn is never continued)
-    # Read by whoever must tell the cases apart: the delegate's answer(), the CLI's exit code.
-    stop: str = ""
-
     # the scratchpad as it stood when the turn ended; None for a turn made without one (a run
-    # without the tool, a summary turn, a file older than format 3). LoadSession restores the
+    # without the tool, a summary turn). LoadSession restores the
     # newest one. Not part of the turn's tokens: the block is priced live, as the current value.
-
     scratchpad: Scratchpad | None = None
 
     # what kind of turn this is: "chat" (the default, serialized without the key) or "settings"
@@ -663,13 +671,22 @@ class Turn:
         middle = [r.transcript(stubbed=stubbed) for r in rounds_since_last_summary(self.rounds)] if rounds else []
         return "\n".join([f"USER: {self.user}"] + middle + [f"ASSISTANT: {self.assistant}"])
 
+    @property
+    def summary(self) -> bool:
+        return self.stop == StopReason.SUMMARY
+
+    @property
+    def cancelled(self) -> bool:
+        return self.stop == StopReason.CANCELLED
+
+    @property
+    def visible(self) -> bool:
+        return self.stop not in HIDDEN_STOPS
+
     def to_dict(self) -> dict:
-        d = {"user": self.user, "assistant": self.assistant, "tokens": self.tokens,
-             "cancelled": self.cancelled, "summary": self.summary}
-        if self.rounds:     # plain turns serialize exactly as they did in format 1
+        d = {"user": self.user, "assistant": self.assistant, "tokens": self.tokens, "stop": self.stop.value}
+        if self.rounds:     # the key exists only when there is something to record
             d["rounds"] = [r.to_dict() for r in self.rounds]
-        if self.stop:       # likewise: the key exists only when there is a reason to record
-            d["stop"] = self.stop
         if self.scratchpad is not None:     # likewise: only a turn made with the tool carries one
             d["scratchpad"] = self.scratchpad.to_dict()
         if self.type != "chat":     # likewise: a chat turn serializes exactly as before
@@ -681,9 +698,8 @@ class Turn:
     @classmethod
     def from_dict(cls, d: dict) -> Turn:
         return cls(user=d["user"], assistant=d["assistant"], tokens=d.get("tokens", 0),
-                   cancelled=d.get("cancelled", False), summary=d.get("summary", False),
+                   stop=StopReason(d["stop"]),
                    rounds=tuple(Round.from_dict(r) for r in d.get("rounds", [])),
-                   stop=d.get("stop", ""),
                    scratchpad=Scratchpad.from_dict(d["scratchpad"]) if "scratchpad" in d else None,
                    type=d.get("type", "chat"),
                    delta=d.get("delta"))
@@ -693,8 +709,8 @@ class Turn:
 class ChatHistory:
     turns: tuple[Turn, ...] = ()
 
-    SESSION_FORMAT = 5                 # written
-    SESSION_FORMATS = (1, 2, 3, 4, 5)  # readable: 1 = plain turns only; 2 = turns may carry tool rounds; 3 = turns may carry a scratchpad; 4 = the document carries the settings, and turns may be settings turns; 5 = scratchpad entries carry a kind (a format-4 string entry loads as a fact)
+    SESSION_FORMAT = 6                 # written
+    SESSION_FORMATS = (6,)             # readable: 6 = every turn carries its stop reason (StopReason), which replaces the cancelled and summary flags; older formats are not read
 
     def last_scratchpad(self) -> Scratchpad | None:
         """The working memory as it stood at the end of the newest turn that recorded one; None
@@ -727,7 +743,7 @@ class ChatHistory:
         turns and stopping at the last summary; the result is re-reversed into chronological order."""
         view, used  = [], 0
         for turn in reversed(self.turns):
-            if turn.cancelled:
+            if not turn.visible:
                 continue
             if used + turn.tokens > budget:
                 break
@@ -742,8 +758,8 @@ class ChatHistory:
         return [msg for t in self.view_turns(budget) for msg in t.messages()]
 
     def get_total_tokens(self) -> int:
-        """Return total tokens in history. Does not include cancelled turns."""
-        return sum(turn.tokens for turn in self.turns if not turn.cancelled)
+        """Return total tokens in history. Only includs vible turns."""
+        return sum(turn.tokens for turn in self.turns if turn.visible)
 
     def window_tokens(self) -> int:
         """Return tokens since last summary."""
@@ -758,13 +774,13 @@ class ChatHistory:
 
     def compact(self, summary: str, tokens: int = 0) -> ChatHistory:
         """Replaces the turn history with a synthetic summary turn. tokens=0 -> heuristic pricing."""
-        return self.append(Turn(self.SUMMARY_PREFIX + summary, self.SUMMARY_ACK, tokens=tokens, summary=True))
+        return self.append(Turn(self.SUMMARY_PREFIX + summary, self.SUMMARY_ACK, tokens=tokens, stop=StopReason.SUMMARY))
 
     def since_last_summary(self):
         """Return all turns since the last summary, except cancelled."""
         view = []
         for turn in reversed(self.turns):
-            if turn.cancelled:
+            if not turn.visible:
                 continue
             view.append(turn)
             if turn.summary:

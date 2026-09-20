@@ -22,7 +22,7 @@ from desh_chat import scratchpad as pad_tools
 from desh_chat.events import ExecuteToolCalls, NextRound, StreamCompletion, TurnEnd
 from desh_chat.scratchpad import KINDS, Entry, Scratchpad
 from desh_chat.session import LoadSession, SaveSession
-from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Round, Settings, Turn
+from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Round, Settings, Turn, StopReason
 
 
 TOOLS = (ToolRegistry()
@@ -308,48 +308,48 @@ class TestSnapshot:
     def test_turn_end_records_the_value_on_the_turn(self, make_state):
         pad = Scratchpad().with_entry("k", "fact", "v")
         state = make_state(pending=PendingTurn("q"), scratchpad=pad)
-        new_state, _ = TurnEnd(assistant="a").execute(state)
+        new_state, _ = TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(state)
         assert new_state.history.turns[-1].scratchpad == pad
         assert new_state.scratchpad == pad     # the value outlives the turn
 
     def test_a_run_without_the_tool_records_none(self, make_state):
-        new_state, _ = TurnEnd(assistant="a").execute(make_state(pending=PendingTurn("q")))
+        new_state, _ = TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(make_state(pending=PendingTurn("q")))
         assert new_state.history.turns[-1].scratchpad is None
 
     def test_a_plain_turn_serialises_without_the_key(self):
-        assert "scratchpad" not in Turn("u", "a", tokens=7).to_dict()
-        assert Turn.from_dict({"user": "u", "assistant": "a", "tokens": 7}).scratchpad is None
+        assert "scratchpad" not in Turn("u", "a", tokens=7, stop=StopReason.ANSWER).to_dict()
+        assert Turn.from_dict({"user": "u", "assistant": "a", "tokens": 7, "stop": "answer"}).scratchpad is None
 
     def test_a_turn_with_a_scratchpad_round_trips_through_json(self):
         pad = Scratchpad().with_entry("b", "fact", "2").with_entry("a", "fact", "1")
-        turn = Turn("u", "a", tokens=7, scratchpad=pad)
+        turn = Turn("u", "a", tokens=7, scratchpad=pad, stop=StopReason.ANSWER)
         back = Turn.from_dict(json.loads(json.dumps(turn.to_dict())))
         assert back.scratchpad is not None
         assert back == turn and back.scratchpad.memory == (Entry("b", "fact", "2"), Entry("a", "fact", "1"))
-        empty = Turn("u", "a", tokens=7, scratchpad=Scratchpad())
+        empty = Turn("u", "a", tokens=7, scratchpad=Scratchpad(), stop=StopReason.ANSWER)
         assert Turn.from_dict(json.loads(json.dumps(empty.to_dict()))).scratchpad == Scratchpad()
 
     def test_last_scratchpad_skips_turns_without_one(self):
         old = Scratchpad().with_entry("k", "fact", "old")
         new = Scratchpad().with_entry("k", "fact", "new")
         h = (ChatHistory()
-             .append(Turn("q1", "a1", scratchpad=old))
-             .append(Turn("q2", "a2", scratchpad=new))
+             .append(Turn("q1", "a1", scratchpad=old, stop=StopReason.ANSWER))
+             .append(Turn("q2", "a2", scratchpad=new, stop=StopReason.ANSWER))
              .compact("summary"))
         assert h.last_scratchpad() == new
         assert ChatHistory().last_scratchpad() is None
-        assert ChatHistory().append(Turn("q", "a")).last_scratchpad() is None
+        assert ChatHistory().append(Turn("q", "a", stop=StopReason.ANSWER)).last_scratchpad() is None
 
     def test_save_writes_the_snapshot_per_turn(self, make_state, tmp_path):
         path = str(tmp_path / "s.json")
         pad = Scratchpad().with_entry("k", "fact", "v")
         state = make_state(session_file=path, pending=PendingTurn("q"), scratchpad=pad)
-        state, events = TurnEnd(assistant="a").execute(state)
+        state, events = TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(state)
         assert any(isinstance(e, SaveSession) for e in events)
         SaveSession().execute(state)
         with open(path) as f:
             doc = json.load(f)
-        assert doc["version"] == 5 and doc["turns"][-1]["scratchpad"] == {"k": {"kind": "fact", "value": "v"}}
+        assert doc["version"] == ChatHistory.SESSION_FORMAT and doc["turns"][-1]["scratchpad"] == {"k": {"kind": "fact", "value": "v"}}
 
 
 # ---------------------
@@ -368,8 +368,8 @@ class TestLoad:
 
     def test_offered_and_the_file_has_one_restores_the_newest_past_a_summary(self, make_state, tmp_path):
         history = (ChatHistory()
-                   .append(Turn("q1", "a1", scratchpad=self.OLD))
-                   .append(Turn("q2", "a2", scratchpad=self.NEW))
+                   .append(Turn("q1", "a1", scratchpad=self.OLD, stop=StopReason.ANSWER))
+                   .append(Turn("q2", "a2", scratchpad=self.NEW, stop=StopReason.ANSWER))
                    .compact("summary"))
         state = make_state(session_file=self.saved(tmp_path, history), scratchpad=Scratchpad())
         new_state, _ = LoadSession().execute(state)
@@ -378,14 +378,14 @@ class TestLoad:
 
     def test_offered_and_the_file_has_none_starts_empty(self, make_state, tmp_path):
         """A format 2 file, or a run that never had the tool: the value stays the empty one."""
-        state = make_state(session_file=self.saved(tmp_path, ChatHistory().append(Turn("q", "a"))), scratchpad=Scratchpad())
+        state = make_state(session_file=self.saved(tmp_path, ChatHistory().append(Turn("q", "a", stop=StopReason.ANSWER))), scratchpad=Scratchpad())
         new_state, _ = LoadSession().execute(state)
         assert new_state.scratchpad == Scratchpad()
 
     def test_not_offered_ignores_what_the_file_carries(self, make_state, tmp_path):
         """No tool this run means no working memory, whatever the file says: the model would be
         shown memory it cannot change. The file keeps it for a run that offers the tool again."""
-        history = ChatHistory().append(Turn("q", "a", scratchpad=self.NEW))
+        history = ChatHistory().append(Turn("q", "a", scratchpad=self.NEW, stop=StopReason.ANSWER))
         state = make_state(session_file=self.saved(tmp_path, history))
         new_state, _ = LoadSession().execute(state)
         assert new_state.scratchpad is None
@@ -399,7 +399,7 @@ class TestLoad:
     def test_round_trip_through_save_and_load(self, make_state, tmp_path):
         path = str(tmp_path / "s.json")
         state = make_state(session_file=path, pending=PendingTurn("q"), scratchpad=self.NEW)
-        state, _ = TurnEnd(assistant="a").execute(state)
+        state, _ = TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(state)
         SaveSession().execute(state)
         fresh = make_state(session_file=path, scratchpad=Scratchpad())
         restored, _ = LoadSession().execute(fresh)

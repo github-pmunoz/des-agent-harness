@@ -14,7 +14,7 @@ from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
 from desh.llama.wire import Request
 from desh.llama.tokens import estimate_tokens, turn_tokens
 from desh_chat.events import CompactHistory, NextRound, StreamCompletion, TurnEnd, TurnStart, UserMessage
-from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Turn
+from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Turn, StopReason
 
 
 def with_server(make_state, server, **overrides):
@@ -41,7 +41,7 @@ USAGE = {"prompt_tokens": 380, "completion_tokens": 205, "total_tokens": 585}
 class TestTurnTokensPolicy:
     def test_no_usage_returns_zero_so_turn_falls_back_to_heuristic(self):
         assert turn_tokens(None, "hello there", "general kenobi", "", prior_tokens=100) == 0
-        turn = Turn("hello there", "general kenobi", tokens=turn_tokens(None, "hello there", "general kenobi", "", 100))
+        turn = Turn("hello there", "general kenobi", tokens=turn_tokens(None, "hello there", "general kenobi", "", 100), stop=StopReason.ANSWER)
         assert turn.tokens == estimate_tokens("hello there") + estimate_tokens("general kenobi")
 
     def test_residual_user_half_plus_completion_tokens(self):
@@ -83,7 +83,7 @@ class TestTurnTokensPolicy:
 
 class TestUsagePlumbing:
     def test_next_round_reports_prior_tokens_as_sys_estimate_plus_view(self, make_state):
-        history = ChatHistory().append(Turn("q1", "a1", tokens=40)).append(Turn("q2", "a2", tokens=60))
+        history = ChatHistory().append(Turn("q1", "a1", tokens=40, stop=StopReason.ANSWER)).append(Turn("q2", "a2", tokens=60, stop=StopReason.ANSWER))
         state = make_state(history=history)
         _, events = open_turn(state, "q3")
         sc = events[0]
@@ -94,9 +94,9 @@ class TestUsagePlumbing:
         # UserMessage sums prior_tokens over view_turns() and sends view()'s messages; the two
         # must agree on which turns are in, including eviction and the cancelled skip.
         history = (ChatHistory()
-                   .append(Turn("old", "old", tokens=150))
-                   .append(Turn("cancelled", "partial", tokens=5, cancelled=True))
-                   .append(Turn("new", "new", tokens=20)))
+                   .append(Turn("old", "old", tokens=150, stop=StopReason.ANSWER))
+                   .append(Turn("cancelled", "partial", tokens=5, stop=StopReason.CANCELLED))
+                   .append(Turn("new", "new", tokens=20, stop=StopReason.ANSWER)))
         turns = history.view_turns(budget=100)
         assert [t.user for t in turns] == ["new"]
         assert history.view(budget=100) == [m for t in turns for m in t.messages()]
@@ -118,11 +118,11 @@ class TestUsagePlumbing:
         assert events[0].tokens == 0
 
     def test_turn_end_stores_the_priced_tokens(self, make_state):
-        new_state, _ = TurnEnd(assistant="a", cancelled=False, tokens=285).execute(make_state(pending=PendingTurn("q")))
+        new_state, _ = TurnEnd(assistant="a", tokens=285, stop=StopReason.ANSWER).execute(make_state(pending=PendingTurn("q")))
         assert new_state.history.turns[-1].tokens == 285
 
     def test_turn_end_with_zero_tokens_keeps_heuristic(self, make_state):
-        new_state, _ = TurnEnd(assistant="general kenobi", cancelled=False).execute(make_state(pending=PendingTurn("hello there")))
+        new_state, _ = TurnEnd(assistant="general kenobi", stop=StopReason.ANSWER).execute(make_state(pending=PendingTurn("hello there")))
         assert new_state.history.turns[-1].tokens == estimate_tokens("hello there") + estimate_tokens("general kenobi")
 
     def test_end_to_end_window_tracks_usage(self, make_state, no_esc_watcher):
@@ -144,7 +144,7 @@ class TestUsagePlumbing:
 class TestCompactionSummaryPricing:
     def test_summary_turn_uses_completion_tokens_plus_wrapper_estimate(self, make_state):
         server = FakeServer(script=[{"content": "a tidy summary", "usage": {"prompt_tokens": 500, "completion_tokens": 42}}])
-        history = ChatHistory().append(Turn("q", "a", tokens=100))
+        history = ChatHistory().append(Turn("q", "a", tokens=100, stop=StopReason.ANSWER))
         state = with_server(make_state, server, history=history)
         new_state, _ = CompactHistory().execute(state)
         summary = new_state.history.turns[-1]
@@ -153,7 +153,7 @@ class TestCompactionSummaryPricing:
 
     def test_summary_turn_without_usage_keeps_heuristic(self, make_state):
         server = FakeServer(script=[{"content": "a tidy summary"}])
-        history = ChatHistory().append(Turn("q", "a", tokens=100))
+        history = ChatHistory().append(Turn("q", "a", tokens=100, stop=StopReason.ANSWER))
         state = with_server(make_state, server, history=history)
         new_state, _ = CompactHistory().execute(state)
         summary = new_state.history.turns[-1]

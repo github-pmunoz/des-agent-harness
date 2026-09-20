@@ -8,26 +8,26 @@ structure tests. Chain-level tests (TurnStart, UserMessage, AppendTurn, NextRoun
 through real turn-token math instead of hand-picked numbers.
 """
 from desh.llama.tokens import estimate_tokens
-from desh_chat.state import ChatHistory, Turn
+from desh_chat.state import ChatHistory, Turn, StopReason
 
 
-def make_turn(user="u", assistant="a", **kw) -> Turn:
-    return Turn(user, assistant, **kw)
+def make_turn(user="u", assistant="a", stop=StopReason.ANSWER, **kw) -> Turn:
+    return Turn(user, assistant, stop, **kw)
 
 
 class TestTurnTokens:
     def test_tokens_autocomputed_from_user_and_assistant(self):
-        turn = Turn("hello there", "general kenobi")
+        turn = Turn("hello there", "general kenobi", stop=StopReason.ANSWER)
         assert turn.tokens == estimate_tokens("hello there") + estimate_tokens("general kenobi")
 
     def test_explicit_nonzero_tokens_is_not_recomputed(self):
         # __post_init__ only fills tokens when it is exactly 0 — an explicit
         # nonzero value (however it got there) is trusted as-is.
-        turn = Turn("a very very long message well past four chars", "short", tokens=1)
+        turn = Turn("a very very long message well past four chars", "short", tokens=1, stop=StopReason.ANSWER)
         assert turn.tokens == 1
 
     def test_zero_length_strings_recompute_to_zero(self):
-        turn = Turn("", "")
+        turn = Turn("", "", stop=StopReason.ANSWER)
         assert turn.tokens == 0
 
 
@@ -96,7 +96,7 @@ class TestView:
 
     def test_cancelled_turns_are_skipped_not_counted_and_do_not_stop_the_walk(self):
         real_turn = make_turn("real question", "real answer")
-        cancelled_turn = make_turn("cancelled question", "partial", cancelled=True)
+        cancelled_turn = make_turn("cancelled question", "partial", stop=StopReason.CANCELLED)
         h = ChatHistory().append(real_turn).append(cancelled_turn)
         # budget sized for the real turn only — if the cancelled turn were
         # counted, it would eat the budget and exclude the real one too.
@@ -114,7 +114,7 @@ class TestGetTotalTokens:
 
     def test_excludes_cancelled_turns(self):
         real = make_turn("kept", "kept reply")
-        cancelled = make_turn("dropped", "dropped reply", cancelled=True)
+        cancelled = make_turn("dropped", "dropped reply", stop=StopReason.CANCELLED)
         h = ChatHistory().append(real).append(cancelled)
         assert h.get_total_tokens() == real.tokens
 
@@ -168,7 +168,7 @@ class TestSinceLastSummaryAndWindowTokens:
 
     def test_cancelled_turns_excluded_but_walk_continues_past_them(self):
         t1 = make_turn("kept one", "reply one")
-        cancelled = make_turn("dropped", "dropped reply", cancelled=True)
+        cancelled = make_turn("dropped", "dropped reply", stop=StopReason.CANCELLED)
         t2 = make_turn("kept two", "reply two")
         h = ChatHistory().append(t1).append(cancelled).append(t2)
         since = h.since_last_summary()
@@ -179,6 +179,6 @@ class TestSinceLastSummaryAndWindowTokens:
 
 class TestMessages:
     def test_returns_all_turns_unfiltered_including_cancelled_and_summary(self):
-        h = ChatHistory().append(make_turn("a", "b", cancelled=True)).append(make_turn("c", "d"))
+        h = ChatHistory().append(make_turn("a", "b", stop=StopReason.CANCELLED)).append(make_turn("c", "d"))
         msgs = h.messages()
         assert len(msgs) == 4  # both turns, 2 messages each — messages() does not filter

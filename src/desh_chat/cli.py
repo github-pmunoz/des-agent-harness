@@ -19,7 +19,7 @@ from desh.tools import ToolRegistry
 from desh_chat.events import TurnStart
 from desh_chat.session import LoadSession
 from desh_chat.display import DisplayBanner
-from desh_chat.state import ChatHistory, Deadline, Settings, InferenceEngine
+from desh_chat.state import ChatHistory, Deadline, Settings, InferenceEngine, StopReason
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
 from desh_chat.coding import Workspace, edit_preview, fold_edited, fold_written
@@ -219,15 +219,12 @@ def task_exit_code(final: ChatState) -> int:
     turn = final.history.last_non_summary()
     if turn is None:
         return 1
-    stop_to_exit_code: dict[str, int] = {
-        "" : 0,
-        "cap" : 0,
-        "deadline" : 0,
-        "overflow" : 1,
-        "interrupt" : 1,
-        "error" : 1,
-    }
-    return stop_to_exit_code.get(turn.stop, 1)
+
+    match turn.stop:
+        case StopReason.ANSWER | StopReason.CAP |StopReason.DEADLINE:
+            return 0
+        case _:
+            return 1
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ from desh.engine import Engine
 from desh.llama.logger import Logger
 from desh.render import Gutter, Palette, c_out
 from desh.tools import ToolRegistry
-from desh_chat.state import ChatHistory, ChatState, Deadline, InferenceEngine, Settings
+from desh_chat.state import ChatHistory, ChatState, Deadline, InferenceEngine, Settings, StopReason
 from desh_chat.events import TurnStart
 from desh_chat.scratchpad import SCRATCHPAD_SYSTEM_PROMPT, Scratchpad
 
@@ -153,7 +153,7 @@ class Delegate:
         finally:
             print(c_out(Palette.CHROME, "╰─ delegate ─ back to the main agent"))
         last = final.history.last_non_summary()
-        has_answer = last is not None and not last.cancelled and last.assistant != ""
+        has_answer = last is not None and last.visible and last.assistant != ""
         text = answer(final)
         return self._checked(text, check) if has_answer else text
 
@@ -190,15 +190,16 @@ def answer(state: ChatState) -> str:
 
     The turn that matters is the last one that is not a summary: a child that checkpointed has
     capped turns and summaries before it. None at all means the request never fit the context
-    window even on round one; otherwise that turn's `stop` and `cancelled` say how it ended:
-      stop == "overflow"   the window filled up mid-task (cancelled is True as well)
-      cancelled            the operator pressed ESC or cancelled at a confirmation prompt
-      stop == "cap"        the round cap cut the turn short and the auto prompt could not go on;
+    window even on round one; otherwise that turn's `stop` (StopReason) says how it ended:
+      OVERFLOW             the window filled up mid-task
+      CANCELLED, INTERRUPT the operator pressed ESC, cancelled at a confirmation prompt, or hit Ctrl+C
+      CAP                  the round cap cut the turn short and the auto prompt could not go on;
                            the model's text so far is the answer
-      stop == "deadline"   the run's wall-clock budget ran out; the model's text so far is the answer
-      neither              the answer, verbatim ("(no answer)" when the model said nothing)
+      DEADLINE             the run's wall-clock budget ran out; the model's text so far is the answer
+      REPEAT               the repeated-round guard ended the turn
+      ANSWER               the answer, verbatim ("(no answer)" when the model said nothing)
     Every case must come back as text the parent can act on — it cannot see the child's history.
-    A turn that ended by overflow, deadline or error carries what it got down as its answer
+    A turn that ended by overflow, deadline, error or repeat carries what it got down as its answer
     (TurnEnd salvages it from the checkpoint, the scratchpad and the rounds), so the parent
     reads that, followed by a note naming how the turn ended: "[Subagent ran out of context
     window]", "[Subagent hit the task deadline]", "[Subagent hit an error]"; a capped turn's
@@ -210,10 +211,15 @@ def answer(state: ChatState) -> str:
     if turn is None:
         return "The request didn't fit the context window."
     child_msg = turn.assistant or "(no answer)"
-    notes = {"overflow": "[Subagent ran out of context window]", "deadline": "[Subagent hit the task deadline]",
-             "error": "[Subagent hit an error]", "cap": "[Subagent hit the tool round cap]"}
+    notes = {
+        StopReason.OVERFLOW: "[Subagent ran out of context window]",
+        StopReason.DEADLINE: "[Subagent hit the task deadline]",
+        StopReason.ERROR: "[Subagent hit an error]",
+        StopReason.CAP: "[Subagent hit the tool round cap]",
+        StopReason.REPEAT: "[Subagent ran into a repeat loop]",
+    }
     if turn.stop in notes:
         return f"{child_msg}\n{notes[turn.stop]}"
-    if turn.cancelled:
+    if turn.stop in (StopReason.CANCELLED, StopReason.INTERRUPT):
         return "The operator cancelled the request."
     return child_msg

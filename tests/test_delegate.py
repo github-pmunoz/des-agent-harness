@@ -19,7 +19,7 @@ from desh_chat.delegate import (BRIEF_HEAD_CHARS, CAP_CONTINUE_MSG, DELEGATE_SYS
 from desh_chat.display import Info
 from desh_chat.events import MaybeRegenerate, TurnStart, UserMessage
 from desh_chat.gate import Answer
-from desh_chat.state import ChatHistory, InferenceEngine, Round, Settings, ToolResult, Turn
+from desh_chat.state import ChatHistory, InferenceEngine, Round, Settings, ToolResult, Turn, StopReason
 from desh.llama.wire import ToolCall
 
 from conftest import FakeServer, MAX_CONTEXT, MODELS, PORT
@@ -28,9 +28,9 @@ from conftest import FakeServer, MAX_CONTEXT, MODELS, PORT
 SETTINGS = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, max_tool_rounds=3)
 
 
-def turn(assistant: str, rounds: int = 0, cancelled: bool = False, stop: str = "") -> Turn:
+def turn(assistant: str, rounds: int = 0, stop: StopReason = StopReason.ANSWER) -> Turn:
     tc = ToolCall(index=0, id="c", type="function", name="Read", arguments="{}")
-    return Turn("task", assistant, cancelled=cancelled, stop=stop,
+    return Turn("task", assistant, stop,
                 rounds=tuple(Round("", (tc,), results=(ToolResult("c", "Read", "x"),)) for _ in range(rounds)))
 
 
@@ -79,7 +79,7 @@ class RecordingEngine:
 
     def run(self, state, seed, **kwargs):
         RecordingEngine.states.append(state)
-        return replace(state, history=ChatHistory((Turn("t", "42"),)))
+        return replace(state, history=ChatHistory((Turn("t", "42", stop=StopReason.ANSWER),)))
 
 
 # ---------------------
@@ -123,7 +123,7 @@ class TestAnswer:
         assert "context window" in answer(child_of(make_state))
 
     def test_cancelled_turn_is_reported_not_passed_on(self, make_state):
-        text = answer(child_of(make_state, turn("partial...", cancelled=True)))
+        text = answer(child_of(make_state, turn("partial...", stop=StopReason.CANCELLED)))
         assert "cancelled" in text and "partial" not in text
 
     def test_plain_answer_is_returned_verbatim(self, make_state):
@@ -133,11 +133,11 @@ class TestAnswer:
         assert answer(child_of(make_state, turn(""))) == "(no answer)"
 
     def test_a_capped_turn_qualifies_the_answer(self, make_state):
-        text = answer(child_of(make_state, turn("so far: x", rounds=SETTINGS.max_tool_rounds, stop="cap")))
+        text = answer(child_of(make_state, turn("so far: x", rounds=SETTINGS.max_tool_rounds, stop=StopReason.CAP)))
         assert text == "so far: x\n[Subagent hit the tool round cap]"
 
     def test_round_cap_with_no_text_composes_both_notes(self, make_state):
-        text = answer(child_of(make_state, turn("", rounds=SETTINGS.max_tool_rounds, stop="cap")))
+        text = answer(child_of(make_state, turn("", rounds=SETTINGS.max_tool_rounds, stop=StopReason.CAP)))
         assert text == "(no answer)\n[Subagent hit the tool round cap]"
 
     def test_finishing_on_the_last_allowed_round_is_not_a_cap(self, make_state):
@@ -147,22 +147,30 @@ class TestAnswer:
 
     def test_overflow_passes_the_salvaged_record_on_with_a_note_not_as_a_cancel(self, make_state):
         """TurnEnd salvaged the record into the turn's text: the parent reads it, and the note."""
-        text = answer(child_of(make_state, turn("what it got down", rounds=2, cancelled=True, stop="overflow")))
+        text = answer(child_of(make_state, turn("what it got down", rounds=2, stop=StopReason.OVERFLOW)))
         assert text == "what it got down\n[Subagent ran out of context window]"
 
     def test_an_error_turn_is_named_as_an_error_not_as_a_cancel(self, make_state):
-        text = answer(child_of(make_state, turn("record", rounds=1, cancelled=True, stop="error")))
+        text = answer(child_of(make_state, turn("record", rounds=1, stop=StopReason.ERROR)))
         assert text == "record\n[Subagent hit an error]"
+
+    def test_a_repeat_stop_passes_the_salvaged_record_on_with_a_note(self, make_state):
+        text = answer(child_of(make_state, turn("record", rounds=2, stop=StopReason.REPEAT)))
+        assert text == "record\n[Subagent ran into a repeat loop]"
+
+    def test_an_interrupted_turn_is_reported_as_the_operators_cancel(self, make_state):
+        text = answer(child_of(make_state, turn("partial...", stop=StopReason.INTERRUPT)))
+        assert "cancelled" in text and "partial" not in text
 
     def test_the_last_non_summary_turn_is_the_answer_after_a_checkpoint(self, make_state):
         """A child that checkpointed leaves capped turn, summary, final turn: the final turn answers."""
-        history = (ChatHistory().append(turn("so far", rounds=3, stop="cap"))
+        history = (ChatHistory().append(turn("so far", rounds=3, stop=StopReason.CAP))
                    .compact("what it did so far")
-                   .append(Turn(CAP_CONTINUE_MSG, "done: 42")))
+                   .append(Turn(CAP_CONTINUE_MSG, "done: 42", stop=StopReason.ANSWER)))
         assert answer(make_state(settings=SETTINGS, history=history, running=True)) == "done: 42"
 
     def test_a_checkpoint_that_could_not_continue_reports_the_capped_turn(self, make_state):
-        history = ChatHistory().append(turn("so far", rounds=3, stop="cap")).compact("summary")
+        history = ChatHistory().append(turn("so far", rounds=3, stop=StopReason.CAP)).compact("summary")
         assert answer(make_state(settings=SETTINGS, history=history, running=True)) == "so far\n[Subagent hit the tool round cap]"
 
     def test_a_pending_turn_at_drain_is_a_harness_bug(self, make_state):
@@ -290,7 +298,7 @@ class TestFoldBrief:
 # ---------------------
 
 def capped(assistant="so far", tokens=0) -> Turn:
-    t = turn(assistant, rounds=2, stop="cap")
+    t = turn(assistant, rounds=2, stop=StopReason.CAP)
     return replace(t, tokens=tokens) if tokens else t
 
 
@@ -314,9 +322,9 @@ class TestChildTurnStart:
     def test_any_other_ending_drains(self, make_state):
         for history in (ChatHistory(),
                         ChatHistory().append(turn("done", rounds=2)),
-                        ChatHistory().append(turn("", cancelled=True)),
-                        ChatHistory().append(turn("", cancelled=True, stop="overflow")),
-                        ChatHistory().append(capped()).compact("s").append(Turn("go", "done"))):
+                        ChatHistory().append(turn("", stop=StopReason.CANCELLED)),
+                        ChatHistory().append(turn("", stop=StopReason.OVERFLOW)),
+                        ChatHistory().append(capped()).compact("s").append(Turn("go", "done", stop=StopReason.ANSWER))):
             new_state, events = TurnStart().execute(child_head(make_state, history=history))
             assert events == [] and new_state.pending is None, history
 
@@ -332,8 +340,7 @@ class TestChildTurnStart:
                            history=ChatHistory().append(capped(tokens=150)), auto_prompt="go " * 300)
         final = Engine[type(state)]().run(state, seed=[MaybeRegenerate()])
         assert [k for k, _ in server.calls] == ["complete"]
-        assert [(t.stop, t.cancelled, t.summary) for t in final.history.turns] == [
-            ("cap", False, False), ("", False, True), ("overflow", True, False)]
+        assert [t.stop for t in final.history.turns] == [StopReason.CAP, StopReason.SUMMARY, StopReason.OVERFLOW]
         assert final.pending is None
         # the overflowed turn had no rounds and no checkpoint: its record is the lead line alone
         assert answer(final) == "TURN ENDED: overflow\n[Subagent ran out of context window]"

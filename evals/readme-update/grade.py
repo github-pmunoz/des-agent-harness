@@ -307,18 +307,30 @@ def engine_stats(rows: list[dict]) -> dict:
     }
 
 
+def is_summary(turn: dict) -> bool:
+    """A compaction's synthetic turn: stop "summary" in a format-6 session, the summary flag before."""
+    return turn.get("stop") == "summary" or bool(turn.get("summary"))
+
+
+def stop_of(turn: dict) -> str:
+    """How the turn ended, "" for an answer: format 6 writes "answer", older sessions no key, and
+    the summaries of older runs tally "" — so both read the same here."""
+    stop = turn.get("stop", "")
+    return "" if stop == "answer" else stop
+
+
 def session_stats(session: dict | None) -> dict:
     """Turn-level shape of one agent's run from its session file, and what its scratchpad held
     at the end. `stop` is how the run ended; "" is an answer."""
     turns = (session or {}).get("turns") or []
-    real = [t for t in turns if not t.get("summary")]
+    real = [t for t in turns if not is_summary(t)]
     last = real[-1] if real else {}
     results = [res.get("content", "") for t in turns for r in t.get("rounds", []) for res in r.get("results", [])]
     pad = (turns[-1].get("scratchpad") if turns else None) or {}
-    # The repeated-round guard ends a turn without a stop reason: the session records an answered
-    # turn whose answer is the guard's own note, and nothing of the turn is salvaged. It is told
-    # apart here by that note, so a run of work thrown away does not count as an answer.
-    stop = last.get("stop", "") if real else None
+    # Before format 6 the repeated-round guard ended a turn without a stop reason: the session
+    # records an answered turn whose answer is the guard's own note. It is told apart here by that
+    # note, so those runs tally "repeat" as the newer ones do.
+    stop = stop_of(last) if real else None
     if stop == "" and REPEAT_STOP.search(last.get("assistant") or ""):
         stop = "repeat"
     final_kinds: dict[str, int] = {}
@@ -382,7 +394,7 @@ def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifes
     for child, rows in zip(children, child_completions):
         session = read_json(os.path.join(run_dir, os.path.basename(child["session"]))) if child["session"] else None
         turns = (session or {}).get("turns") or []
-        real = [t for t in turns if not t.get("summary")]
+        real = [t for t in turns if not is_summary(t)]
         s = agent_stats(rows, child["rows"], session)
         answer = real[-1].get("assistant", "") if real else ""
         result = delivered(answer, main_session)

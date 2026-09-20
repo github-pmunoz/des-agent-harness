@@ -249,12 +249,24 @@ def pytest_rounds(completions: list[dict]) -> list[dict]:
     return rounds
 
 
+def is_summary(turn: dict) -> bool:
+    """A compaction's synthetic turn: stop "summary" in a format-6 session, the summary flag before."""
+    return turn.get("stop") == "summary" or bool(turn.get("summary"))
+
+
+def stop_of(turn: dict) -> str:
+    """How the turn ended, "" for an answer: format 6 writes "answer", older sessions no key, and
+    the summaries of older runs tally "" — so both read the same here."""
+    stop = turn.get("stop", "")
+    return "" if stop == "answer" else stop
+
+
 def session_stats(session: dict | None) -> dict:
     """Turn-level shape of the run from the session file: how many turns, how many ended at the
     round cap and were continued, how many are compaction summaries, and which tool calls the cap
     dropped. Runs under a small cap show their pathology here, not in the token totals."""
     turns = (session or {}).get("turns") or []
-    real = [t for t in turns if not t.get("summary")]
+    real = [t for t in turns if not is_summary(t)]
     last = real[-1] if real else {}
     results = [res.get("content", "") for t in turns for r in t.get("rounds", []) for res in r.get("results", [])]
     return {
@@ -265,8 +277,8 @@ def session_stats(session: dict | None) -> dict:
         "cut_results": sum(1 for c in results if any(m in c for m in CUT_MARKERS)),
         # read-only calls answered with the re-read notice instead of running (a loop the harness caught)
         "rereads_refused": sum(1 for c in results if c.startswith("Not run: ") and "already been answered" in c),
-        "stop": last.get("stop", "") if real else None,      # how the run ended; "" is an answer
-        "final_answer": bool(last.get("assistant")) and not last.get("stop"),
+        "stop": stop_of(last) if real else None,      # how the run ended; "" is an answer
+        "final_answer": bool(last.get("assistant")) and not stop_of(last),
     }
 
 
