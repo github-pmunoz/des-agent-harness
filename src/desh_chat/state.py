@@ -259,11 +259,23 @@ class ChatState(State):
         return (self.pending.non_summary_rounds() + 1, self.settings.max_tool_rounds)
 
     def fold_near(self) -> bool:
-        """Whether a round the size of this turn's typical one would leave less than the room a
-        request needs, so that the NEXT request folds the pending turn into a checkpoint
-        (NextRound's ladder). False while the history still holds something to compact — that rung
-        goes first and folds nothing of the turn — and while the view holds fewer than two model
-        rounds, when there is nothing to fold. An estimate: the next round's results are unknown."""
+        """Whether the fold alert is due: a round the size of this turn's typical one would leave
+        less than the room a request needs, so that the NEXT request folds the pending turn into a
+        checkpoint (NextRound's ladder) — and that was not yet so one round ago. Said once, on the
+        edge: a reply that only persists adds next to nothing to the prompt, so a line repeated
+        while the condition holds is answered with the same write round after round, and the
+        rounds it was meant to save are spent on it."""
+        p = self.pending
+        if p is None or not self._fold_within_a_round():
+            return False
+        before = replace(self, pending=replace(p, rounds=p.rounds[:-1]))
+        return not before._fold_within_a_round()
+
+    def _fold_within_a_round(self) -> bool:
+        """The condition fold_near watches the edge of. False while the history still holds
+        something to compact — that rung goes first and folds nothing of the turn — and while the
+        view holds fewer than two model rounds, when there is nothing to fold. An estimate: the
+        next round's results are unknown."""
         p = self.pending
         if p is None or any(not t.summary for t in self.history.since_last_summary()):
             return False

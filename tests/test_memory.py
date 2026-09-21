@@ -129,6 +129,14 @@ class TestFoldNear:
         assert state.fold_near() and FOLD_NEAR_LINE in state.memory_block()["content"]
         assert state.memory_tokens() == estimate_tokens(state.memory_block()["content"])     # priced as sent
 
+    def test_said_once_on_the_edge_not_while_the_condition_holds(self, make_state):
+        """A reply that only persists barely grows the prompt: the run is still one round from a
+        fold, and saying so again is answered with the same write again."""
+        p = self.pending(4, 540).add_round(Round("", (call("scratchpad_write", 9),), tokens=20)).with_results(())
+        state = make_state(pending=p, settings=self.SETTINGS, scratchpad=Scratchpad())
+        assert state._fold_within_a_round() and not state.fold_near()
+        assert FOLD_NEAR_LINE not in state.memory_block()["content"]
+
     def test_not_said_with_room_to_spare(self, make_state):
         state = make_state(pending=self.pending(4, 50), settings=self.SETTINGS, scratchpad=Scratchpad())
         assert not state.fold_near() and FOLD_NEAR_LINE not in state.memory_block()["content"]

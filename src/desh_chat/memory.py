@@ -76,7 +76,8 @@ LAST_ROUND_LINE = ("Last round before the cap: every tool result of this turn is
                    "Persist what you still need now.")
 CAP_REACHED_LINE = "Round cap reached: only memory calls ({tool_names}) in this reply will run."
 FOLD_NEAR_LINE = ("The context is nearly full: your earlier rounds are folded into a checkpoint within a round "
-                  "or two and their results are gone. Persist what you still need now.")
+                  "or two and their results are gone. Persist what you still need in this reply, with your other calls; "
+                  "this is said once.")
 OVER_BUDGET_TEXT = ("Not recorded: <{name}> would take {tokens} tokens, over its budget of {budget}. "
                     "Condense or delete entries first.")
 
