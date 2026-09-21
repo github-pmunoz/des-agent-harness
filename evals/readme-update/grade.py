@@ -424,6 +424,45 @@ def chars_lost_of(result: str | None) -> int:
     return int(found.group(1)) if found else 0
 
 
+# What a delegation was FOR, read off its brief. A subagent is for work whose details the
+# orchestrator does not need — an investigation that reports findings, a rewrite, a test loop. Two
+# kinds of brief spend a whole child run on something else: "transport" asks for file text back
+# (the orchestrator has Read, and the answer is capped, so the text arrives cut and is paged back in
+# from the spill file), and "verify" asks a subagent to look at a result (the check argument, or
+# one call of the orchestrator's own, does that).
+TRANSPORT_BRIEF = re.compile(r"verbatim|word[- ]for[- ]word|exact(?: current)? (?:text|contents?)|full (?:text|contents?) of", re.I)
+VERIFY_BRIEF = re.compile(r"^\W*(?:verify|confirm|validate|double[- ]check|check (?:that|whether|if))\b", re.I)
+
+
+def brief_kind(brief: str) -> str:
+    if VERIFY_BRIEF.search(brief):
+        return "verify"
+    return "transport" if TRANSPORT_BRIEF.search(brief) else "work"
+
+
+def orchestration_stats(main_session: dict | None, delegations: list[dict], main: dict) -> dict:
+    """How the orchestrator divided the work between itself and its subagents: the delegations by
+    kind (brief_kind), briefs issued twice, and what its own rounds went to."""
+    seen: dict[str, int] = {}
+    for d in delegations:
+        seen[d["brief_head"]] = seen.get(d["brief_head"], 0) + 1
+    rounds = [r for t in (main_session or {}).get("turns") or [] for r in t.get("rounds", []) if r.get("tool_calls")]
+    def names(r: dict) -> list[str]:
+        return [(c.get("function") or c).get("name", "") for c in r["tool_calls"]]
+    kinds = [d["kind"] for d in delegations]
+    return {
+        "delegations": len(delegations),
+        "work": kinds.count("work"), "transport": kinds.count("transport"), "verify": kinds.count("verify"),
+        "repeated_briefs": sum(n - 1 for n in seen.values()),
+        "with_check": sum(1 for d in delegations if d["check_exit"] is not None),
+        "main_rounds": len(rounds),
+        "main_delegate_rounds": sum(1 for r in rounds if "delegate" in names(r)),
+        # rounds that only persisted: the memory calls that were meant to ride with other calls
+        "main_memory_only_rounds": sum(1 for r in rounds if all(MEMORY_TOOL.match(n) for n in names(r))),
+        "main_spill_reads": main["spill_reads"],     # a delegate answer over the cap, paged back in
+    }
+
+
 def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifest: dict | None,
              main_session: dict | None) -> dict:
     runs = engine_runs(des_log)
@@ -442,6 +481,8 @@ def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifes
         delegations.append({
             "session": os.path.basename(child["session"] or ""),
             "brief": " ".join((turns[0].get("user") or "").split())[:120] if turns else "",
+            "brief_head": " ".join((turns[0].get("user") or "").split())[:400] if turns else "",
+            "kind": brief_kind(turns[0].get("user") or "") if turns else "work",
             "wall_ms": round((child["end"] - child["start"]) * 1000) if child["end"] else None,
             "check_exit": check_exit_of(result),
             "answer_chars": len(answer),
@@ -482,6 +523,7 @@ def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifes
         "exit_status": (manifest or {}).get("status"),
         "main": main,
         "sub": sub,
+        "orchestration": orchestration_stats(main_session, delegations, main),
         "delegations": delegations,
     }
 
@@ -533,6 +575,9 @@ def summary(r: dict) -> str:
         *[f"  main <{slot}>: {x['writes']} writes in {x['write_rounds']} rounds, {x['folds_after_first_write']} folds after the first"
           f" (before first fold: {x['writes_before_first_fold']}), {m['memory_final'].get(slot, 0)} entries at the end, calls {x['calls']}"
           for slot, x in m["memory"].items()],
+        "  orchestration: {delegations} delegations ({work} work, {transport} transport, {verify} verify, {repeated_briefs} repeated, "
+        "{with_check} with a check); main {main_rounds} rounds = {main_delegate_rounds} delegate, {main_spill_reads} spill reads, "
+        "{main_memory_only_rounds} memory-only".format(**s["orchestration"]),
         f"  subagents: {sub['count']} runs, {sub['answered']} answered, {sub['overflows']} overflow, {sub['capped']} cap, {sub['repeat_stops']} repeat-stop,"
         f" {sub['deadlines']} deadline, {sub['errors']} error, {sub['salvaged']} salvaged, {sub['checks_failed']} checks failed,"
         f" peak {sub['prompt_tokens_peak']}",
