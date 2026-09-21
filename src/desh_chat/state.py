@@ -7,7 +7,7 @@ from desh.llama.wire import ToolCall
 from desh.llama.tokens import RESULT_CHARS_PER_TOKEN, estimate_result_tokens, estimate_tokens
 from desh.engine import State
 from desh.tools import ToolRegistry
-from desh_chat.scratchpad import Scratchpad
+from desh_chat.memory import Memories
 from typing import Any, Callable
 from enum import StrEnum
 
@@ -94,13 +94,13 @@ Keep, exactly as written: the task and its success criterion; every file path to
 Drop: narration, the full contents of files that were read, tool output that a later step superseded. Prefer a terse list to prose. Do not mention this instruction and do not repeat the transcript."""
 
 # The system prompt of the checkpoint request (CompactPendingTurn). Unlike a history summary, the
-# checkpoint is read right after the task message and next to the scratchpad block, in a window
+# checkpoint is read right after the task message and next to the memory block, in a window
 # that is already tight, and it is rewritten every few rounds: so it must not restate the task,
-# must not duplicate what the scratchpad holds, must say what the next concrete action is, and
+# must not duplicate what the working memory holds, must say what the next concrete action is, and
 # must stay short.
-CHECKPOINT_PROMPT = """You will be sent a transcript of agent rounds being folded away. Write the checkpoint the assistant will read in place of them, right after the task message and next to the scratchpad block.
+CHECKPOINT_PROMPT = """You will be sent a transcript of agent rounds being folded away. Write the checkpoint the assistant will read in place of them, right after the task message and next to the working memory block.
 
-Do not restate the task — the task message is right before the checkpoint. Do not duplicate what the scratchpad holds — the scratchpad block follows the checkpoint. The transcript may begin with an EARLIER CHECKPOINT: fold what it says into yours, updated by the rounds after it, so that yours stands alone in its place. Always write a checkpoint; there is always something to keep.
+Do not restate the task — the task message is right before the checkpoint. Do not duplicate what the working memory holds — the memory block follows the checkpoint. The transcript may begin with an EARLIER CHECKPOINT: fold what it says into yours, updated by the rounds after it, so that yours stands alone in its place. Always write a checkpoint; there is always something to keep.
 
 Keep: the one thing the assistant was about to do next, as a single concrete action, with the file paths, names and error messages that action depends on exactly as written; which files were written or edited and whether they pass, with test results as reported; what was verified versus what was only assumed. A result shown as expired was cut to fit this transcript: record what the assistant said or did about it, do not guess its content. Drop narration and superseded detail. Stay short — the checkpoint must fit in a small fraction of the context window. Do not mention this instruction."""
 
@@ -120,10 +120,14 @@ class Settings:
     auto: bool = False           # auto mode: confirmed tools run without asking; Ctrl+C turns it off
     compaction_prompt: str = field(default=COMPACTION_PROMPT, repr=False)    # system prompt of the compaction request
     # A checkpoint (CompactPendingTurn) has its own instruction and share of the context: it sits
-    # after the task message and next to the scratchpad, so it must not repeat either, and it is
+    # after the task message and next to the memory block, so it must not repeat either, and it is
     # rewritten every few rounds in a tight window, so it is kept smaller than a history summary.
     checkpoint_target: float = 0.15
     checkpoint_prompt: str = field(default=CHECKPOINT_PROMPT, repr=False)
+    # The share of the context ONE memory may take (Memories.commit refuses a write past it): the
+    # block is re-sent whole with every request, so a memory that grows without bound eats the
+    # window its results need.
+    memory_target: float = 0.10
 
     def to_dict(self) -> dict:
         """Plain-JSON form of every field, for the session document (format 4)."""
@@ -142,6 +146,7 @@ class Settings:
             "compaction_prompt": self.compaction_prompt,
             "checkpoint_target": self.checkpoint_target,
             "checkpoint_prompt": self.checkpoint_prompt,
+            "memory_target": self.memory_target,
         }
 
     @classmethod
@@ -165,6 +170,7 @@ class Settings:
             compaction_prompt=d.get("compaction_prompt", COMPACTION_PROMPT),
             checkpoint_target=d.get("checkpoint_target", 0.15),
             checkpoint_prompt=d.get("checkpoint_prompt", CHECKPOINT_PROMPT),
+            memory_target=d.get("memory_target", 0.10),
         )
 
 @dataclass(frozen=True)
@@ -207,11 +213,11 @@ class ChatState(State):
     # with before either — None means a capped turn is never continued automatically.
     operator: bool = True
     auto_prompt: str | None = None
-    # The model's working memory, as a value: None when the tool is not offered. Every write goes
-    # through ExecuteToolCalls, which commits the new value here; the scratchpad tools themselves
-    # only see a dict built from it for the one call. Rendered last in every request, and snapshotted
-    # onto each finished Turn so a session restores it.
-    scratchpad: Scratchpad | None = None
+    # The model's working memory: the memories the run registered and the value each holds; empty
+    # when none is offered. Every write goes through ExecuteToolCalls, which commits the new value
+    # here; a memory tool only sees a dict built from its slot for the one call. Rendered last in
+    # every request, and snapshotted onto each finished Turn so a session restores it.
+    memory: Memories = field(default_factory=Memories)
     # What MaybeRegenerate does when the queue runs dry: 'prompt' opens the next turn (the
     # interactive loop); 'exit' ends the run (a one-shot --task run).
     idle_policy: str = "prompt"
@@ -242,19 +248,45 @@ class ChatState(State):
         unpriced = estimate_tokens(p.unpriced_text()) if not p.rounds else estimate_result_tokens(p.unpriced_text())
         return p.priced_tokens() + unpriced
 
-    def scratchpad_block(self) -> dict | None:
-        """The scratchpad as the last message of the next request, with the round the turn is on
-        and, next to the cap, the line saying so; None when the tool is not offered. The one place
-        the block is built, so what is priced is what is sent."""
-        if self.scratchpad is None:
-            return None
-        # the round the next completion is: one past the completed ones, against the turn's cap
-        round = (self.pending.non_summary_rounds() + 1, self.settings.max_tool_rounds) if self.pending is not None else None
-        return self.scratchpad.to_context(round=round)
+    def memory_budget(self) -> int:
+        """What one memory may take of the window, in tokens (Settings.memory_target)."""
+        return int(self.settings.memory_target * self.settings.context)
 
-    def scratchpad_tokens(self) -> int:
-        """What the scratchpad block costs in the prompt: heuristic, it is re-sent whole every request."""
-        block = self.scratchpad_block()
+    def turn_round(self) -> tuple[int, int] | None:
+        """The round the next completion is — one past the completed ones — against the turn's cap."""
+        if self.pending is None:
+            return None
+        return (self.pending.non_summary_rounds() + 1, self.settings.max_tool_rounds)
+
+    def fold_near(self) -> bool:
+        """Whether a round the size of this turn's typical one would leave less than the room a
+        request needs, so that the NEXT request folds the pending turn into a checkpoint
+        (NextRound's ladder). False while the history still holds something to compact — that rung
+        goes first and folds nothing of the turn — and while the view holds fewer than two model
+        rounds, when there is nothing to fold. An estimate: the next round's results are unknown."""
+        p = self.pending
+        if p is None or any(not t.summary for t in self.history.since_last_summary()):
+            return False
+        rounds = sum(1 for r in p.since_last_summary() if not r.summary)
+        if rounds < 2:
+            return False
+        pending_tokens = self.pending_tokens()
+        block = self.memory.block(round=self.turn_round(), budget_tokens=self.memory_budget())
+        prompt = (estimate_tokens(self.system_prompt) + self.tools_tokens() + self.history.window_tokens()
+                  + pending_tokens + (estimate_tokens(block["content"]) if block is not None else 0))
+        return self.settings.context - prompt - pending_tokens // rounds < self.min_gen_tokens()
+
+    def memory_block(self) -> dict | None:
+        """The working memory as the last message of the next request, framed with the round the
+        turn is on and the line that says what is about to expire; None when no memory is
+        registered. The one place the block is built, so what is priced is what is sent."""
+        if not self.memory:
+            return None
+        return self.memory.block(round=self.turn_round(), budget_tokens=self.memory_budget(), fold_near=self.fold_near())
+
+    def memory_tokens(self) -> int:
+        """What the memory block costs in the prompt: heuristic, it is re-sent whole every request."""
+        block = self.memory_block()
         return estimate_tokens(block["content"]) if block is not None else 0
 
     def tools_tokens(self) -> int:
@@ -265,8 +297,8 @@ class ChatState(State):
         return estimate_tokens(json.dumps(schemas)) if schemas else 0
 
     def prompt_tokens(self, pending_tokens: int) -> int:
-        """What the next request costs before generation: system prompt, tool schemas, window since the last summary, pending, scratchpad."""
-        return estimate_tokens(self.system_prompt) + self.tools_tokens() + self.history.window_tokens() + pending_tokens + self.scratchpad_tokens()
+        """What the next request costs before generation: system prompt, tool schemas, window since the last summary, pending, memory block."""
+        return estimate_tokens(self.system_prompt) + self.tools_tokens() + self.history.window_tokens() + pending_tokens + self.memory_tokens()
 
     def gen_room(self, pending_tokens: int) -> int:
         """What the window leaves for the next completion, before any cap: context minus the prompt."""
@@ -476,18 +508,18 @@ class PendingTurn:
         """Append results to the latest round, in call order: the round is answered one call per step."""
         return self.with_results(self.rounds[-1].results + results)
 
-    def finish(self, assistant: str, tokens: int, stop: StopReason, scratchpad: Scratchpad | None = None) -> Turn:
+    def finish(self, assistant: str, tokens: int, stop: StopReason, memory: dict[str, dict] | None = None) -> Turn:
         """The final answer arrived (or the turn was cut short): freeze into a history Turn.
         tokens prices only the final completion. A history turn renders its rounds stubbed from
         now on (Turn.messages), so the rounds are priced on that rendering here, once, and not on
-        the usage frames that priced them whole. scratchpad is the working memory as it stands
-        when the turn ends, recorded on the Turn for the session file."""
+        the usage frames that priced them whole. memory is the working memory as it stands when
+        the turn ends (Memories.snapshot), recorded on the Turn for the session file."""
         assert self.user is not None, "pending turn has no message yet"
         stubbed_rounds = sum(estimate_tokens(r.text(stubbed=True)) for r in self.since_last_summary())
         # every round goes on the record (the session file shows what a checkpoint folded); the
         # Turn renders and prices its view, as the pending turn did
         return Turn(self.user, assistant, tokens=tokens + stubbed_rounds if tokens else 0,
-                    rounds=self.rounds, stop=stop, scratchpad=scratchpad)
+                    rounds=self.rounds, stop=stop, memory=memory)
 
     def since_last_summary(self) -> tuple[Round, ...]:
         """The rounds the next request carries: the latest checkpoint, when there is one, and
@@ -512,7 +544,7 @@ class PendingTurn:
                 sections.append(Section((r.transcript(),), fixed=True))
             else:
                 sections.append(Section((r.transcript(), r.transcript(stubbed=True))))
-        # The budget is the rounds': the checkpoint was written to its own share and the scratchpad
+        # The budget is the rounds': the checkpoint was written to its own share and the memory
         # is paid for in every request, so both stand whole, and the head cut that a compaction
         # request needs to fit the window never fires here — history compaction and a parent's
         # result cap bound the record later, each in its own way.
@@ -533,19 +565,18 @@ class PendingTurn:
                 sections.append(Section((f"round {ordinal.get(id(r), '?')}: {r.mentions(describe)}",)))
         return fit_transcript(sections, budget_tokens, unit="rounds")
 
-    def salvage(self, stop: StopReason, scratchpad: Scratchpad | None, budget_tokens: int | None = None) -> str:
+    def salvage(self, stop: StopReason, memory: Memories = Memories(), budget_tokens: int | None = None) -> str:
         """The answer of a turn that ended without one (SALVAGE_STOPS): everything the turn got
         down, assembled from the record rather than asked of the model — at an overflow there is
         no room to ask, at the deadline no time, after an error maybe no server. The sources are
-        the view's checkpoint (the model's own summary of the folded rounds), the scratchpad as it
-        stands, and the rounds after the checkpoint with their results, fitted to `budget_tokens`
+        the view's checkpoint (the model's own summary of the folded rounds), the memories as they
+        stand, and the rounds after the checkpoint with their results, fitted to `budget_tokens`
         the way a compaction transcript is (fit_transcript): the oldest results are stubbed first,
         then the oldest rounds left out. Read by the operator, by the next turn as history, and by
         a delegating agent as the subagent's result, which cannot see any of these sources."""
         view = self.since_last_summary()
         checkpoint = view[0].checkpoint_body() if view and view[0].summary else None
         rounds = [r for r in view if not r.summary]
-        scratch = scratchpad.entries_text() if scratchpad is not None and scratchpad.memory else None
         # Oldest first, because fit_transcript reduces from the front: the lead line and the
         # checkpoint are the oldest and most important, and the rounds run in order after them.
         # The parent agent reads this as a tool result, head and tail first: the lead line tells
@@ -554,11 +585,10 @@ class PendingTurn:
         sections = [Section((f"TURN ENDED: {stop}",), fixed=True)]
         if checkpoint is not None:
             sections.append(Section((f"CHECKPOINT: {checkpoint}",), fixed=True))
-        if scratch is not None:
-            sections.append(Section((f"SCRATCHPAD:\n{scratch}",), fixed=True))
+        sections += [Section((text,), fixed=True) for text in memory.salvage_sections()]
         for r in rounds:
             sections.append(Section((r.transcript(), r.transcript(stubbed=True))))
-        # The budget is the rounds': the checkpoint was written to its own share and the scratchpad
+        # The budget is the rounds': the checkpoint was written to its own share and the memory
         # is paid for in every request, so both stand whole, and the head cut that a compaction
         # request needs to fit the window never fires here — history compaction and a parent's
         # result cap bound the record later, each in its own way.
@@ -594,10 +624,11 @@ class Turn:
     tokens: int = 0
     rounds: tuple[Round, ...] = ()   # tool exchanges between user and assistant; () for a plain turn
 
-    # the scratchpad as it stood when the turn ended; None for a turn made without one (a run
-    # without the tool, a summary turn). LoadSession restores the
-    # newest one. Not part of the turn's tokens: the block is priced live, as the current value.
-    scratchpad: Scratchpad | None = None
+    # the working memory as it stood when the turn ended, {slot: dict form}; None for a turn made
+    # without one (a run that registered no memory, a summary turn). Kept in the dict form so the
+    # record needs no plugin to load; LoadSession restores each registered slot from the newest
+    # turn that recorded it. Not part of the turn's tokens: the block is priced live.
+    memory: dict[str, dict] | None = None
 
     # what kind of turn this is: "chat" (the default, serialized without the key) or "settings"
     # (a settings change made by a /command; delta carries {setting: new_value}). LoadSession
@@ -643,8 +674,8 @@ class Turn:
         d = {"user": self.user, "assistant": self.assistant, "tokens": self.tokens, "stop": self.stop.value}
         if self.rounds:     # the key exists only when there is something to record
             d["rounds"] = [r.to_dict() for r in self.rounds]
-        if self.scratchpad is not None:     # likewise: only a turn made with the tool carries one
-            d["scratchpad"] = self.scratchpad.to_dict()
+        if self.memory:     # likewise: only a turn made with a memory carries one
+            d["memory"] = self.memory
         if self.type != "chat":     # likewise: a chat turn serializes exactly as before
             d["type"] = self.type
         if self.delta is not None:
@@ -656,7 +687,8 @@ class Turn:
         return cls(user=d["user"], assistant=d["assistant"], tokens=d.get("tokens", 0),
                    stop=StopReason(d["stop"]),
                    rounds=tuple(Round.from_dict(r) for r in d.get("rounds", [])),
-                   scratchpad=Scratchpad.from_dict(d["scratchpad"]) if "scratchpad" in d else None,
+                   # format 6 recorded the one memory there was under its own key
+                   memory=d["memory"] if "memory" in d else {"scratchpad": d["scratchpad"]} if "scratchpad" in d else None,
                    type=d.get("type", "chat"),
                    delta=d.get("delta"))
 
@@ -665,15 +697,18 @@ class Turn:
 class ChatHistory:
     turns: tuple[Turn, ...] = ()
 
-    SESSION_FORMAT = 6                 # written
-    SESSION_FORMATS = (6,)             # readable: 6 = every turn carries its stop reason (StopReason), which replaces the cancelled and summary flags; older formats are not read
+    SESSION_FORMAT = 7                 # written
+    # readable: 6 = every turn carries its stop reason (StopReason), which replaces the cancelled
+    # and summary flags; 7 = a turn's working memory is recorded per slot under "memory", where 6
+    # had a "scratchpad" key; older formats are not read
+    SESSION_FORMATS = (6, 7)
 
-    def last_scratchpad(self) -> Scratchpad | None:
-        """The working memory as it stood at the end of the newest turn that recorded one; None
-        when no turn did. Summary turns record none, so compaction never hides it."""
+    def last_memory(self, name: str) -> dict | None:
+        """The dict form of the memory `name` as it stood at the end of the newest turn that
+        recorded it; None when no turn did. Summary turns record none, so compaction never hides it."""
         for turn in reversed(self.turns):
-            if turn.scratchpad is not None:
-                return turn.scratchpad
+            if turn.memory is not None and name in turn.memory:
+                return turn.memory[name]
         return None
 
     def to_dict(self) -> dict:

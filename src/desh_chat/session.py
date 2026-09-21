@@ -42,16 +42,11 @@ class LoadSession(Event):
             bad = path + ".bad"
             os.replace(path, bad)
             return state, [Warn(f"Session file {path} is unreadable ({e}); moved to {bad}, starting fresh.")]
-        # The working memory the file carries is the newest snapshot on a turn (history.last_scratchpad());
-        # what the run starts with is state.scratchpad: an empty value when the tool is offered, None
-        # when it is not.
-        # When the tool is offered, the scratchpad is the one from the last turn that recorded it if any, otherwise stays empty.
-        # When the tool is not offered, the scratchpad is not loaded even if the session file carried one.
-        scratchpad = state.scratchpad
-        if scratchpad is not None: # tool was offered
-            loaded_scratchpad = history.last_scratchpad()
-            if loaded_scratchpad is not None:
-                scratchpad = loaded_scratchpad
+        # The working memory the file carries is, per slot, the newest snapshot on a turn
+        # (history.last_memory); what the run starts with is state.memory: every registered memory,
+        # empty. A registered slot takes the snapshot when the file has one and stays empty
+        # otherwise; a slot the file carries but the run did not register is not loaded.
+        memory = state.memory.restored(history.last_memory)
         # format 4: the session_file_contentument's settings seed the restored settings (v1-3 files carry no
         # "settings" key and load unchanged); settings turns then replay in order on top, so
         # the last change wins. A delta naming a setting that no longer exists (a file written
@@ -63,7 +58,7 @@ class LoadSession(Event):
                 for setting, value in turn.delta.items():
                     if setting in known:
                         settings = replace(settings, **{setting: value})
-        return replace(state, history=history, scratchpad=scratchpad, settings=settings), [Info(c_out(Palette.DIM_CHROME, f"Restored {len(history)} turns from {path}")), DisplayStats()]
+        return replace(state, history=history, memory=memory, settings=settings), [Info(c_out(Palette.DIM_CHROME, f"Restored {len(history)} turns from {path}")), DisplayStats()]
 
 
 @dataclass(frozen=True)

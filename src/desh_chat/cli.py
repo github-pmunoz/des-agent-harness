@@ -24,8 +24,26 @@ from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
 from desh_chat.coding import Workspace, edit_preview, fold_edited, fold_written
 from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG, fold_brief
-from desh_chat import scratchpad
-from desh_chat.scratchpad import Scratchpad, SCRATCHPAD_SYSTEM_PROMPT
+from desh_chat.memory import Memories, Memory
+from desh_chat.ontology import ONTOLOGY
+from desh_chat.plan import PLAN
+from desh_chat.scratchpad import SCRATCHPAD
+
+
+# The memories a run can register, by the name --memory takes. A new memory tool is one entry here.
+MEMORIES: dict[str, Memory] = {m.name: m for m in (SCRATCHPAD, PLAN, ONTOLOGY)}
+
+
+def selected_memories(args: argparse.Namespace) -> tuple[Memory, ...]:
+    """The memories the flags ask for, in the order given, each once: --memory NAME[,NAME...],
+    and --scratchpad as the older spelling of --memory scratchpad."""
+    names = [n.strip() for n in (getattr(args, "memory", "") or "").split(",") if n.strip()]
+    if getattr(args, "scratchpad", False) and "scratchpad" not in names:
+        names.insert(0, "scratchpad")
+    unknown = [n for n in names if n not in MEMORIES]
+    if unknown:
+        raise SystemExit(f"unknown memory {', '.join(unknown)}; one of {', '.join(MEMORIES)}")
+    return tuple(MEMORIES[n] for n in dict.fromkeys(names))
 
 
 def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: Settings, *,
@@ -41,7 +59,8 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     tools = ToolRegistry(debug=args.debug, max_result_chars=max_result_chars)
     # `target` is the argument a one-line mention of the call shows (a digest line, in place of
     # a folded round): a file tool is about its path, Bash about its command, a delegate about
-    # its task, a scratchpad tool about its key.
+    # its task, a memory tool about its key.
+    memories = selected_memories(args)
     if args.read:
         tools = tools.add(ws.read, name="Read", confirm=False, target="file_path")
     if args.write:
@@ -57,21 +76,19 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         delegate_tools = (delegate_tools.add(ws.read, name="Read", confirm=False, target="file_path")
                           .add(ws.write, name="Write", fold=fold_written, target="file_path")
                           .add(ws.edit, name="Edit", preview=edit_preview, fold=fold_edited, target="file_path")
-                          .add(ws.bash, name="Bash", identity=("command",), target="command")
-                          .add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, fold=scratchpad.fold_write, target="key")
-                          .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False, target="key")
-                          .add(scratchpad.clear, name="scratchpad_clear", inject=("scratchpad",), confirm=False))
+                          .add(ws.bash, name="Bash", identity=("command",), target="command"))
+        # a subagent gets the run's memories that are worth having for one run (Memory.subagent)
+        child_memories = tuple(m for m in memories if m.subagent == "fresh")
+        for m in child_memories:
+            delegate_tools = m.register(delegate_tools)
         delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug,
-                            result_chars=max_result_chars)
+                            result_chars=max_result_chars, memories=child_memories)
         # the parent's CURRENT settings travel with every call; the child derives its own from them
         tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief, target="task")
-    if args.scratchpad:
-        # the working memory itself lives on ChatState; the tools only get a dict for the call. A
-        # write's value is folded out of the round once it ran: the block shows it.
-        tools = (tools.add(scratchpad.write, name="scratchpad_write", inject=("scratchpad",), confirm=False, fold=scratchpad.fold_write, target="key")
-                      .add(scratchpad.delete, name="scratchpad_delete", inject=("scratchpad",), confirm=False, target="key")
-                      .add(scratchpad.clear, name="scratchpad_clear", inject=("scratchpad",), confirm=False))
+    # the working memory itself lives on ChatState; its tools only get a dict for the call
+    for m in memories:
+        tools = m.register(tools)
     return tools
 
 
@@ -127,17 +144,21 @@ def main():
     ap.add_argument("--edit",      action="store_true", help="offer the Edit tool")
     ap.add_argument("--bash",      action="store_true", help="offer the Bash tool")
     ap.add_argument("--delegate",  action="store_true", help="offer delegate: subagents with the same tools and settings")
-    ap.add_argument("--scratchpad", action="store_true", help="offer the scratchpad tool")
+    ap.add_argument("--memory",    default="", help=f"memory tools to offer, comma-separated: {', '.join(MEMORIES)}")
+    ap.add_argument("--scratchpad", action="store_true", help="same as --memory scratchpad")
     ap.add_argument("--current_time", action="store_true", help="offer the current time")
     ap.add_argument("-tc",  "--tool-cap",       type=float, default=10.0, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
     ap.add_argument("-ct",  "--checkpoint-target", type=float, default=0.15, help="share of the context a mid-turn checkpoint summary may take")
+    ap.add_argument("-mg",  "--memory-target",  type=float, default=0.10, help="share of the context one memory may take; a write past it is refused")
     args = ap.parse_args()
 
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
     session_file = resolve_session_file(args.session, args.sessions_folder, run_id)
-    system_prompt = args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely."
-    if args.scratchpad:
-        system_prompt += "\n\n" + SCRATCHPAD_SYSTEM_PROMPT.format(max_tool_rounds=args.max_tool_rounds)
+    # empty here; LoadSession restores what a session saved. The system prompt explains how the
+    # context works only when there is a memory to act on it with.
+    memory = Memories.of(*selected_memories(args))
+    system_prompt = memory.system_prompt(args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely.",
+                                         args.max_tool_rounds)
     # Setup logging
     if args.des_log:
         if(d := os.path.dirname(args.des_log)):
@@ -159,6 +180,7 @@ def main():
         max_tool_rounds=args.max_tool_rounds,
         auto=args.auto,
         checkpoint_target=args.checkpoint_target,
+        memory_target=args.memory_target,
     )
     inference = InferenceEngine(
         server=client,
@@ -179,7 +201,7 @@ def main():
         tools=tools,
         operator=True,
         auto_prompt=CAP_CONTINUE_MSG if args.cont else None,
-        scratchpad=Scratchpad() if args.scratchpad else None,   # empty here; LoadSession restores a saved one
+        memory=memory,
         # the clock starts here, before the session loads and the router loads the model: both are run time
         deadline=Deadline.in_seconds(args.task_timeout) if args.task and args.task_timeout > 0 else None,
     )

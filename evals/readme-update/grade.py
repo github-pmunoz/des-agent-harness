@@ -228,7 +228,43 @@ def split_completions(completions: list[dict], children: list[dict]) -> tuple[li
 
 # --- stats -------------------------------------------------------------------------
 
-def usage_stats(completions: list[dict], first_fold_ts: float | None = None) -> dict:
+# A memory tool is named <slot>_<verb> (desh_chat.memory: the slot is the memory's name).
+MEMORY_TOOL = re.compile(r"^([a-z]+)_(write|delete|clear)$")
+
+
+def memory_stats(completions: list[dict], fold_ts: list[float]) -> dict:
+    """What each memory was used for, by slot, from the calls the model issued. The questions a
+    memory tool has to answer: was it written as the work went or in one burst (write_rounds
+    against writes), and was it ever load-bearing — did a compaction or a checkpoint fold results
+    away AFTER something was written (folds_after_first_write)? A memory written once at the end,
+    or in a run where nothing folded, was never needed, whatever the score."""
+    slots: dict[str, dict] = {}
+    for r in completions:
+        written: set[str] = set()
+        for call in tool_calls_of(r):
+            found = MEMORY_TOOL.match(call["name"])
+            if not found:
+                continue
+            slot = slots.setdefault(found.group(1), {"calls": {}, "writes": 0, "write_rounds": 0, "first_write_ts": None,
+                                                     "writes_before_first_fold": 0})
+            slot["calls"][call["name"]] = slot["calls"].get(call["name"], 0) + 1
+            if found.group(2) == "write":
+                slot["writes"] += 1
+                written.add(found.group(1))
+                slot["first_write_ts"] = ts_of(r) if slot["first_write_ts"] is None else slot["first_write_ts"]
+                slot["writes_before_first_fold"] += int(bool(fold_ts) and ts_of(r) <= min(fold_ts))
+        for name in written:
+            slots[name]["write_rounds"] += 1
+    for slot in slots.values():
+        first = slot.pop("first_write_ts")
+        slot["folds_after_first_write"] = sum(1 for t in fold_ts if first is not None and t > first)
+        if not fold_ts:
+            slot["writes_before_first_fold"] = None
+    return slots
+
+
+def usage_stats(completions: list[dict], fold_ts: list[float] | None = None) -> dict:
+    first_fold_ts = min(fold_ts) if fold_ts else None
     usage = [((r.get("response") or {}).get("usage") or {}) for r in completions]
     timings = [((r.get("response") or {}).get("timings") or {}) for r in completions]
     tools: dict[str, int] = {}
@@ -266,6 +302,7 @@ def usage_stats(completions: list[dict], first_fold_ts: float | None = None) -> 
         "scratchpad_kinds": kinds,
         # notes taken before the first compaction or checkpoint are the ones that survive it; None when nothing folded
         "scratchpad_writes_before_first_fold": early_writes if first_fold_ts is not None else None,
+        "memory": memory_stats(completions, fold_ts or []),
         "finish_reasons": finish,
         "prompt_tokens": sum(u.get("prompt_tokens", 0) for u in usage),
         "prompt_tokens_cached": sum(t.get("cache_n", 0) for t in timings),
@@ -326,7 +363,9 @@ def session_stats(session: dict | None) -> dict:
     real = [t for t in turns if not is_summary(t)]
     last = real[-1] if real else {}
     results = [res.get("content", "") for t in turns for r in t.get("rounds", []) for res in r.get("results", [])]
-    pad = (turns[-1].get("scratchpad") if turns else None) or {}
+    # format 7 records every memory under "memory", by slot; format 6 had the scratchpad alone
+    memory = (turns[-1].get("memory") if turns else None) or {}
+    pad = memory.get("scratchpad") or (turns[-1].get("scratchpad") if turns else None) or {}
     # Before format 6 the repeated-round guard ended a turn without a stop reason: the session
     # records an answered turn whose answer is the guard's own note. It is told apart here by that
     # note, so those runs tally "repeat" as the newer ones do.
@@ -347,6 +386,8 @@ def session_stats(session: dict | None) -> dict:
         # read-only calls answered with the re-read notice instead of running (a loop the harness caught)
         "rereads_refused": sum(1 for c in results if c.startswith("Not run: ") and "already been answered" in c),
         "scratchpad_final": final_kinds,
+        # entries held at the end, by slot
+        "memory_final": {slot: len(value) for slot, value in (memory or ({"scratchpad": pad} if pad else {})).items()},
         "open_todos": final_kinds.get("todo", 0),
         "stop": stop,
         "final_answer": bool(last.get("assistant")) and not stop,
@@ -355,7 +396,7 @@ def session_stats(session: dict | None) -> dict:
 
 def agent_stats(completions: list[dict], rows: list[dict], session: dict | None) -> dict:
     folds = [e.get("ts") for e in rows if e.get("event") in FOLD_EVENTS]
-    return usage_stats(completions, min(folds) if folds else None) | engine_stats(rows) | session_stats(session)
+    return usage_stats(completions, folds) | engine_stats(rows) | session_stats(session)
 
 
 def delivered(answer: str, main_session: dict | None) -> str | None:
@@ -489,6 +530,9 @@ def summary(r: dict) -> str:
         f" {m['salvaged_turns']} salvaged, tools {m['tool_mix']}   not run: {m['calls_not_run']}",
         f"  main scratchpad: writes {m['scratchpad_kinds']} (before first fold: {m['scratchpad_writes_before_first_fold']}),"
         f" at the end {m['scratchpad_final']}",
+        *[f"  main <{slot}>: {x['writes']} writes in {x['write_rounds']} rounds, {x['folds_after_first_write']} folds after the first"
+          f" (before first fold: {x['writes_before_first_fold']}), {m['memory_final'].get(slot, 0)} entries at the end, calls {x['calls']}"
+          for slot, x in m["memory"].items()],
         f"  subagents: {sub['count']} runs, {sub['answered']} answered, {sub['overflows']} overflow, {sub['capped']} cap, {sub['repeat_stops']} repeat-stop,"
         f" {sub['deadlines']} deadline, {sub['errors']} error, {sub['salvaged']} salvaged, {sub['checks_failed']} checks failed,"
         f" peak {sub['prompt_tokens_peak']}",

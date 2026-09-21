@@ -2,40 +2,26 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from desh_chat.memory import Memory
+
 # Every entry has a kind: what the entry IS to the model's task, not what it is about. The tool's
 # schema lists them (a Literal becomes a JSON enum), the block renders them grouped, and the
 # system prompt says what each one means.
 KINDS = ("todo", "done", "fact", "hypothesis", "block")
 Kind = Literal["todo", "done", "fact", "hypothesis", "block"]
 
-# Appended to the system prompt of any run that offers the scratchpad tools. Mechanics first: the
-# model must know that results vanish and WHEN (at the round cap, and when a checkpoint folds its
-# rounds), or it learns it the expensive way — by re-gathering everything in the continuation.
-# Formatted with the run's settings.
-SCRATCHPAD_SYSTEM_PROMPT = (
-    "How your context works. Each reply of yours that calls tools is a round; the results come back "
-    "in the next request. A turn allows at most {max_tool_rounds} rounds. At the cap the turn ends: the "
-    "scratchpad calls of that reply still run, its other calls do not. If the task is unfinished you are "
-    "asked to continue in a new turn in which EVERY tool result of the previous turn has been replaced "
-    "by an expired stub. When the context runs short inside a turn, your earlier rounds are folded into "
-    "a checkpoint and their results are gone; only the scratchpad is kept verbatim. The <scratchpad> "
-    "block at the end of every request is the only working memory that survives both: it shows which "
-    "round you are on and tells you when the cap is one round away. Use scratchpad_write for whatever "
-    "you will still need (paths, line numbers, ids, constraints, conclusions), condensed, never raw "
-    "dumps. Write it in the same reply as your other tool calls: a scratchpad call costs no round of "
-    "its own. Persist as you go; do not wait for the cap. Your earlier calls are echoed with their long "
-    "arguments removed and a `folded` note in their place; that is the record, not a form to write.\n"
+# What the scratchpad is for and how its tools are used; appended to the system prompt after the
+# harness's own account of how the context works (memory.CONTEXT_MECHANICS_PROMPT), which this
+# prompt never repeats.
+SCRATCHPAD_PROMPT = (
+    "The <scratchpad> is your working memory for the task. Use scratchpad_write for whatever you "
+    "will still need (paths, line numbers, ids, constraints, conclusions).\n"
     "Every entry has a kind: todo, a step still to do; done, a finished step and its outcome; fact, "
     "something established from a file or a result; hypothesis, something you believe but have not "
     "verified; block, what stops progress and what it needs. An item keeps its key for life: when a "
     "todo is done, write the SAME key again as done with the outcome; when a hypothesis is checked, "
     "write it again as a fact. Never add a second key for an item that already has one."
 )
-
-# The closing lines of the block next to the round cap (Scratchpad.message).
-LAST_ROUND_LINE = ("Last round before the cap: every tool result of this turn is stubbed in the next one. "
-                   "Persist what you still need now.")
-CAP_REACHED_LINE = "Round cap reached: only scratchpad calls in this reply will run."
 
 def write(key: str, kind: Kind, value: str, scratchpad: dict[str, dict]) -> str:
     """Write an entry in the scratchpad, creating a new key or overwriting an existing one.
@@ -133,27 +119,10 @@ class Scratchpad:
         """The dict the tools work on and the session file stores: {key: {"kind", "value"}}."""
         return {m.key: {"kind": m.kind, "value": m.value} for m in self.memory}
 
-    def message(self, round: tuple[int, int] | None = None) -> str:
-        """The scratchpad as a context string. `round` is (this round, the turn's cap), shown so the
-        model sees its budget on every request. The round at the cap is the last whose calls run,
-        and the reply after it keeps only its scratchpad calls: each says so in a closing line,
-        while the results the turn is about to lose can still be read."""
-        header = f"Round {round[0]} of {round[1]} in this turn. " if round is not None else ""
-        message = f"<scratchpad>{header}Working memory. Tool results do not survive the turn, persist here.\n"
-        if self.memory:
-            message += self.entries_text() + "\n"
-        else:
-            message += "\n(empty)\n"
-        if round is not None and round[0] == round[1]:
-            message += LAST_ROUND_LINE + "\n"
-        elif round is not None and round[0] > round[1]:
-            message += CAP_REACHED_LINE + "\n"
-        message += "</scratchpad>"
-        return message
-
-    def entries_text(self) -> str:
-        """The entries grouped by kind, for the block: one header line per kind that has entries,
-        kinds without any left out, each entry on its own `key: value` line under its header."""
+    def render(self) -> str:
+        """The entries grouped by kind, for the block (MemoryValue.render): one header line per kind
+        that has entries, kinds without any left out, each entry on its own `key: value` line under
+        its header; "" when there is none."""
 
         rendering_order = ["done", "fact", "hypothesis", "block", "todo"]
         headers: dict[str, str] = {
@@ -173,6 +142,15 @@ class Scratchpad:
                 lines.append(f"{entry.key}: {entry.value}")
         return "\n".join(lines)
 
-    def to_context(self, round: tuple[int, int] | None = None) -> dict:
-        """Return a message for injecting into the request."""
-        return {"role": "user", "content": self.message(round)}
+
+# The scratchpad as a pluggable memory. A write's value is folded out of the round once it ran:
+# the block shows it.
+SCRATCHPAD = Memory(
+    name="scratchpad",
+    empty=Scratchpad,
+    from_dict=Scratchpad.from_dict,
+    tools=((write, {"name": "scratchpad_write", "fold": fold_write, "target": "key"}),
+           (delete, {"name": "scratchpad_delete", "target": "key"}),
+           (clear, {"name": "scratchpad_clear"})),
+    prompt=SCRATCHPAD_PROMPT,
+)

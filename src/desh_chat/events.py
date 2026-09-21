@@ -21,7 +21,7 @@ from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_result_tokens, estimate_tokens, turn_tokens
 from desh.tools import Tool
 from desh_chat.state import CHECKPOINT_PREFIX, SALVAGE_STOPS, ChatState, ChatHistory, PendingTurn, Round, ToolResult, StopReason
-from desh_chat.scratchpad import Scratchpad
+from desh_chat.memory import Memories
 from desh_chat.display import DisplayStats, Error, Info, Warn
 from desh_chat.session import persist
 from desh_chat import gate
@@ -183,7 +183,7 @@ class LogCompletion(Event):
 @dataclass(frozen=True)
 class StreamCompletion(Event):
     request: Request
-    prior_tokens: int = 0   # tokens already accounted for in request.messages (system prompt estimate + history view + priced rounds + scratchpad block)
+    prior_tokens: int = 0   # tokens already accounted for in request.messages (system prompt estimate + history view + priced rounds + memory block)
     # the text this round's usage frame prices as "new prompt": the user message on round one, the
     # tool results afterwards. Only the heuristic fallback reads it. None -> the request's last
     # message, which is right when nothing follows the pending turn in the request.
@@ -235,11 +235,11 @@ class AppendRound(Event):
         if state.pending.non_summary_rounds() >= state.settings.max_tool_rounds:
             # This event only knows the cap was hit and the calls were not run. Whether the turn is
             # over or a checkpoint is the idle event's business (Continue says so when it goes on).
-            # The round's scratchpad calls are the exception: they are the persistence the cap
+            # The round's memory calls are the exception: they are the persistence the cap
             # message asks for, side-effect free on the workspace, so they run before the turn
             # ends. The round itself is still not recorded — its acks would be read by nobody; the
             # next turn's block shows the entries — and TurnEnd snapshots the value onto the Turn.
-            state, kept, rest = run_scratchpad_calls(state, self.tool_calls)
+            state, kept, rest = run_memory_calls(state, self.tool_calls)
             cap = state.settings.max_tool_rounds
             shown: list[Event] = []
             if rest:
@@ -247,7 +247,7 @@ class AppendRound(Event):
                 if kept:
                     shown.append(Info("Ran at the round cap: " + ", ".join(kept)))
             else:
-                shown.append(Warn(f"Tool-call round cap reached ({cap}); only the scratchpad calls ran: {', '.join(kept)}."))
+                shown.append(Warn(f"Tool-call round cap reached ({cap}); only the memory calls ran: {', '.join(kept)}."))
             return state, shown + [TurnEnd(assistant=self.assistant, tokens=self.tokens, stop=StopReason.CAP)]
 
         # A model that asks for the same calls a third time, having twice seen the same results, is
@@ -277,7 +277,7 @@ class AppendRound(Event):
 # nothing but the same three reads, which the two-round repeat guard could not see.
 REREAD_LIMIT = 2
 REREAD_TEXT = ("Not run: {call} has already been answered {n} times this turn with nothing written, edited or run since, "
-               "and its result has not changed. Save what you need from it to the scratchpad, or act on it.")
+               "and its result has not changed. Save what you need from it to your working memory, or act on it.")
 
 
 def rereads(state: ChatState, tc: ToolCall) -> int:
@@ -353,7 +353,7 @@ class ExecuteToolCalls(Event):
                      DisplayStats(colour=Palette.TOOL_STATS),
                      NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
-        content, scratchpad = run_call(state, tc)
+        content, memory = run_call(state, tc)
         result = ToolResult(tc.id, tc.name, content)
         pending = state.pending.add_results(result)
 
@@ -364,47 +364,47 @@ class ExecuteToolCalls(Event):
             pending = pending.fold_call(self.index, folded_arguments(tool, tc.arguments))
 
         # the echo is for the operator's eye, so it is short; the model gets the full result
-        return (replace(state, pending=pending, scratchpad=scratchpad),
+        return (replace(state, pending=pending, memory=memory),
                 [Info(shorten(result.content), colour=Palette.TOOL_RESULT),
                  DisplayStats(colour=Palette.TOOL_STATS),
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
 
-def run_call(state: ChatState, tc: ToolCall) -> tuple[str, Scratchpad | None]:
-    """Run one call through the registry: the text that answers it, and the scratchpad value after
+def run_call(state: ChatState, tc: ToolCall) -> tuple[str, Memories]:
+    """Run one call through the registry: the text that answers it, and the working memory after
     it. What the harness supplies to tools that declared it (Tool.inject):
     - the settings, so a subagent inherits the parent's CURRENT settings, not the ones captured
       when the registry was built
     - the deadline, so a subagent stops when the run that spawned it must
-    - the scratchpad as a dict built from the state value for this one call.
-    A tool that asked for the scratchpad may have changed it: the dict it wrote to is read back
-    into a value here, the one way a call becomes a state transition. Nothing mutable survives
-    the step, so a step the engine rolls back leaves the working memory untouched."""
+    - each registered memory the tool asked for, as a dict built from the state value for this
+      one call.
+    A tool that asked for a memory may have changed it: the dict it wrote to is read back into a
+    value here, the one way a call becomes a state transition. Nothing mutable survives the step,
+    so a step the engine rolls back leaves the working memory untouched. A write that takes a
+    memory past its budget is not committed, and the refusal is what answers the call."""
     tool = state.tools.get(tc.name)
     provided: dict[str, Any] = {"settings": state.settings, "deadline": state.deadline}
-    if state.scratchpad is not None:
-        provided["scratchpad"] = state.scratchpad.to_dict()
-    content = state.tools.invoke(tc.name, tc.arguments, **provided)
-    scratchpad = state.scratchpad
-    if tool is not None and "scratchpad" in tool.inject and scratchpad is not None:
-        scratchpad = Scratchpad.from_dict(provided["scratchpad"])
-    return content, scratchpad
+    slots = state.memory.provide(tool.inject) if tool is not None else {}
+    content = state.tools.invoke(tc.name, tc.arguments, **provided, **slots)
+    memory, refused = state.memory.commit(slots, budget_tokens=state.memory_budget())
+    return (refused if refused is not None else content), memory
 
 
-def run_scratchpad_calls(state: ChatState, calls: tuple[ToolCall, ...]) -> tuple[ChatState, list[str], list[ToolCall]]:
-    """Run the calls that only touch the scratchpad, in order, and return the state after them,
-    a mention of each one that ran (name and key), and the calls left unrun. A scratchpad tool is
-    one that declared the injection; without a working memory on the state, its calls are left
-    unrun like any other, rather than answered with an error nobody reads."""
+def run_memory_calls(state: ChatState, calls: tuple[ToolCall, ...]) -> tuple[ChatState, list[str], list[ToolCall]]:
+    """Run the calls that only touch the working memory, in order, and return the state after
+    them, a mention of each one that ran (name and target), and the calls left unrun. A memory
+    tool is one that declared a registered slot as injected (Memories.owns); one whose memory the
+    run did not register is left unrun like any other, rather than answered with an error nobody
+    reads."""
     kept: list[str] = []
     rest: list[ToolCall] = []
     for tc in calls:
         tool = state.tools.get(tc.name)
-        if tool is None or "scratchpad" not in tool.inject or state.scratchpad is None:
+        if tool is None or not state.memory.owns(tool.inject):
             rest.append(tc)
             continue
-        _, scratchpad = run_call(state, tc)
-        state = replace(state, scratchpad=scratchpad)
+        _, memory = run_call(state, tc)
+        state = replace(state, memory=memory)
         kept.append(f"{tc.name} {state.tools.target(tc.name, tc.arguments)}".strip())
     return state, kept, rest
 
@@ -439,10 +439,10 @@ class TurnEnd(Event):
             # a checkpoint — it is one, written by the harness — so history and a parent's tool
             # result stay within their shares.
             budget = int(state.settings.checkpoint_target * state.settings.context)
-            salvaged = state.pending.salvage(self.stop, state.scratchpad, budget_tokens=budget)
+            salvaged = state.pending.salvage(self.stop, state.memory, budget_tokens=budget)
             assistant = f"{assistant.rstrip()}\n\n{salvaged}" if assistant.strip() else salvaged
             shown = [Warn(f"Turn ended by {self.stop}; its record stands as the answer ({len(salvaged)} chars salvaged).")]
-        turn = state.pending.finish(assistant, self.tokens, self.stop, scratchpad=state.scratchpad)
+        turn = state.pending.finish(assistant, self.tokens, self.stop, memory=state.memory.snapshot() or None)
         new_state = replace(state, history=state.history.append(turn), pending=None)
         return new_state, shown + persist(state) + [MaybeRegenerate()]
 
@@ -613,19 +613,19 @@ class NextRound(Event):
                                  f"(prompt≈{state.prompt_tokens(pending_tokens)} room={gen_room} need={state.min_gen_tokens()})."),
                            TurnEnd(assistant="", tokens=0, stop=StopReason.OVERFLOW)]
         gen_budget = state.gen_budget(pending_tokens)
-        # The scratchpad block goes LAST: it changes whenever the model writes, and everything before
+        # The memory block goes LAST: it changes whenever the model writes, and everything before
         # it is a stable prefix the server can keep cached. It is not part of the turn — pending
         # and history never hold it — so it is priced here as the current value and counted as
         # prior, the way the system prompt is, and never as the round's own text. It also carries
-        # the line that says the cap is one round away: the block is re-sent every request anyway,
-        # so announcing it there costs no cache, where a note inside the round would.
+        # the lines that say the cap or a checkpoint is one round away: the block is re-sent every
+        # request anyway, so announcing it there costs no cache, where a note inside the round would.
         #
         # The pending turn renders whole, so each request appends to the last one; history turns
         # are always stubbed (Turn.messages). The pending turn is never left out of the request,
         # however many rounds it holds — a checkpoint is what makes room inside it.
-        block = state.scratchpad_block()
-        scratchpad_tokens = state.scratchpad_tokens()
-        prior = sys_prompt_tokens + state.tools_tokens() + scratchpad_tokens     # re-sent whole every request, never a round's own text
+        block = state.memory_block()
+        memory_tokens = estimate_tokens(block["content"]) if block is not None else 0
+        prior = sys_prompt_tokens + state.tools_tokens() + memory_tokens     # re-sent whole every request, never a round's own text
         reserved = prior + pending_tokens + gen_budget
         view = state.history.view_turns(state.settings.context - reserved)
         return state, [StreamCompletion(

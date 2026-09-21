@@ -22,7 +22,7 @@ from desh_chat.gate import Answer
 from desh_chat.state import ChatHistory, InferenceEngine, Round, Settings, ToolResult, Turn, StopReason
 from desh.llama.wire import ToolCall
 
-from conftest import FakeServer, MAX_CONTEXT, MODELS, PORT
+from conftest import FakeServer, MAX_CONTEXT, MODELS, PORT, pad_of
 
 
 SETTINGS = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, max_tool_rounds=3)
@@ -234,32 +234,31 @@ class TestChildSetup:
         assert child.settings == child_settings(current)
         assert (child.settings.auto, child.settings.model, child.settings.temperature) == (True, MODELS[1], 0.9)
 
-    def test_a_registry_with_scratchpad_tools_gives_the_child_a_fresh_memory_and_the_prompt(self, make_state, monkeypatch, capsys):
-        """The child has a scratchpad when its registry offers the tools — the same inject
-        declaration ExecuteToolCalls commits on — and starts empty: none of the parent's
-        conversation, none of its memory. The prompt names the child's own round cap."""
-        from desh_chat import scratchpad as pad_tools
-        from desh_chat.scratchpad import SCRATCHPAD_SYSTEM_PROMPT, Scratchpad
+    def test_a_delegate_with_memories_gives_the_child_fresh_ones_and_the_prompt(self, make_state, monkeypatch, capsys):
+        """The child has the memories the delegate was built with and starts them empty: none of
+        the parent's conversation, none of its memory. The mechanics prompt names the child's own
+        round cap, and the memory's own prompt follows it."""
+        from desh_chat.scratchpad import SCRATCHPAD, SCRATCHPAD_PROMPT, Scratchpad
         monkeypatch.setattr("desh_chat.delegate.Engine", RecordingEngine)
         RecordingEngine.states.clear()
         inference, _ = with_server(make_state, FakeServer())
-        tools = ToolRegistry().add(pad_tools.write, name="scratchpad_write", inject=("scratchpad",), confirm=False)
+        tools = SCRATCHPAD.register(ToolRegistry())
         current = replace(SETTINGS, max_tool_rounds=5)
-        Delegate(root=".", inference=inference, settings=SETTINGS, tools=tools).delegate("task", context="ctx", settings=current)
+        Delegate(root=".", inference=inference, settings=SETTINGS, tools=tools, memories=(SCRATCHPAD,)).delegate("task", context="ctx", settings=current)
         child, = RecordingEngine.states
-        assert child.scratchpad == Scratchpad()
-        assert SCRATCHPAD_SYSTEM_PROMPT.format(max_tool_rounds=5) in child.system_prompt
+        assert pad_of(child) == Scratchpad()
+        assert SCRATCHPAD_PROMPT in child.system_prompt
+        assert child.system_prompt.index("How your context works") < child.system_prompt.index(SCRATCHPAD_PROMPT)
         assert "at most 5 rounds" in child.system_prompt and "visible for" not in child.system_prompt
         assert child.system_prompt.index("How your context works") < child.system_prompt.index("Context from the delegating agent")
 
-    def test_a_registry_without_scratchpad_tools_gives_the_child_none(self, make_state, monkeypatch, capsys):
-        from desh_chat.scratchpad import SCRATCHPAD_SYSTEM_PROMPT
+    def test_a_delegate_without_memories_gives_the_child_none(self, make_state, monkeypatch, capsys):
         monkeypatch.setattr("desh_chat.delegate.Engine", RecordingEngine)
         RecordingEngine.states.clear()
         inference, _ = with_server(make_state, FakeServer())
         Delegate(root=".", inference=inference, settings=SETTINGS).delegate("task")
         child, = RecordingEngine.states
-        assert child.scratchpad is None
+        assert pad_of(child) is None and not child.memory
         assert "How your context works" not in child.system_prompt
 
 

@@ -6,6 +6,7 @@
   "max_tool_rounds": 10,
   "tool_cap": 10.0,
   "checkpoint_target": 0.15,
+  "memory_target": 0.10,
   "system_prompt": "You are a coding agent.",
   "timeout": 600,
   "task": "Read task.txt and execute the instructions there.",
@@ -14,7 +15,7 @@
   "debug": false,
   "think": false,
   "read": true, "write": true, "edit": true, "bash": true,
-  "scratchpad": true, "current_time": false, "delegate": false,
+  "memory": "scratchpad", "current_time": false, "delegate": false,
   "port": 8012,
   "task_timeout": 600
 }

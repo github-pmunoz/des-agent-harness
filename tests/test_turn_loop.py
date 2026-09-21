@@ -13,7 +13,7 @@ Real-tool dispatch is covered in test_tools.py.
 """
 import json
 
-from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
+from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer, pad_of
 
 from desh.engine import Engine
 from desh.llama.wire import Request, ToolCall
@@ -154,9 +154,10 @@ class TestTurnSerialization:
         assert isinstance(back.rounds, tuple) and isinstance(back.rounds[0].tool_calls, tuple)
 
     def test_history_writes_and_reads_the_current_format_only(self):
-        assert ChatHistory().to_dict()["version"] == ChatHistory.SESSION_FORMAT == 6
-        doc = {"version": 6, "turns": [{"user": "q", "assistant": "a", "tokens": 5, "stop": "answer", "rounds": [ROUND.to_dict()]}]}
+        assert ChatHistory().to_dict()["version"] == ChatHistory.SESSION_FORMAT == 7
+        doc = {"version": 7, "turns": [{"user": "q", "assistant": "a", "tokens": 5, "stop": "answer", "rounds": [ROUND.to_dict()]}]}
         assert ChatHistory.from_dict(doc).turns == (Turn("q", "a", tokens=5, rounds=(ROUND,), stop=StopReason.ANSWER),)
+        assert ChatHistory.from_dict({**doc, "version": 6}) == ChatHistory.from_dict(doc)     # 6 differs only in the memory key
         for older in (1, 2, 3, 4, 5):
             with pytest.raises(ValueError):
                 ChatHistory.from_dict({**doc, "version": older})
@@ -245,19 +246,19 @@ class TestAppendRoundCapScratchpad:
         state = self.capped_state(make_state)
         write = call(0, name="scratchpad_write", arguments='{"key": "next", "kind": "todo", "value": "run the tests"}')
         new_state, events = AppendRound(assistant="so far", tool_calls=(write, TIME), tokens=10).execute(state)
-        assert new_state.scratchpad == Scratchpad().with_entry("next", "todo", "run the tests")
+        assert pad_of(new_state) == Scratchpad().with_entry("next", "todo", "run the tests")
         assert new_state.pending == state.pending                 # the capped round is not recorded
         assert isinstance(events[0], Warn) and "get_time not run" in events[0].text and "scratchpad_write" not in events[0].text
         assert isinstance(events[1], Info) and "scratchpad_write next" in events[1].text
         assert isinstance(events[2], TurnEnd) and events[2].stop == "cap"
         ended, _ = events[2].execute(new_state)
-        assert ended.history.turns[-1].scratchpad == new_state.scratchpad     # the snapshot carries it
+        assert ended.history.turns[-1].memory == {"scratchpad": pad_of(new_state).to_dict()}     # the snapshot carries it
 
     def test_a_round_of_scratchpad_calls_only_names_nothing_as_not_run(self, make_state):
         state = self.capped_state(make_state)
         write = call(0, name="scratchpad_write", arguments='{"key": "k", "kind": "fact", "value": "v"}')
         new_state, events = AppendRound(assistant="", tool_calls=(write,), tokens=10).execute(state)
-        assert new_state.scratchpad == Scratchpad().with_entry("k", "fact", "v")
+        assert pad_of(new_state) == Scratchpad().with_entry("k", "fact", "v")
         assert isinstance(events[0], Warn) and "not run" not in events[0].text and "scratchpad_write k" in events[0].text
         assert isinstance(events[1], TurnEnd) and events[1].stop == "cap"
 
@@ -266,13 +267,13 @@ class TestAppendRoundCapScratchpad:
         write = call(0, name="scratchpad_write", arguments='{"key": "k", "kind": "fact", "value": "v"}')
         delete = call(1, name="scratchpad_delete", arguments='{"key": "k"}')
         new_state, _ = AppendRound(assistant="", tool_calls=(write, delete), tokens=10).execute(state)
-        assert new_state.scratchpad == Scratchpad().with_entry("old", "fact", "1")
+        assert pad_of(new_state) == Scratchpad().with_entry("old", "fact", "1")
 
     def test_without_a_working_memory_the_call_is_left_unrun(self, make_state):
         state = self.capped_state(make_state, scratchpad=None)
         write = call(0, name="scratchpad_write", arguments='{"key": "k", "kind": "fact", "value": "v"}')
         new_state, events = AppendRound(assistant="", tool_calls=(write,), tokens=10).execute(state)
-        assert new_state.scratchpad is None
+        assert pad_of(new_state) is None
         assert isinstance(events[0], Warn) and "scratchpad_write not run" in events[0].text
         assert isinstance(events[1], TurnEnd)
 
@@ -550,7 +551,7 @@ class TestRereadGuard:
         state = make_state(pending=pending, tools=reg, settings=Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, auto=True))
         new_state, events = ExecuteToolCalls(0).execute(state)
         answer = new_state.pending.rounds[-1].results[0].content
-        assert answer.startswith("Not run: Read a.py has already been answered 2 times") and "scratchpad" in answer
+        assert answer.startswith("Not run: Read a.py has already been answered 2 times") and "working memory" in answer
         assert seen == []                                            # the tool did not run
         assert [type(e) for e in events] == [Warn, DisplayStats, NextRound]   # the turn goes on
 

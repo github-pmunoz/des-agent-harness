@@ -28,7 +28,7 @@
 #     "debug": false,
 #     "think": true,
 #     "read": true, "write": true, "edit": true, "bash": true,
-#     "scratchpad": true, "current_time": true, delegate": false
+#     "memory": "scratchpad", "current_time": true, delegate": false
 #   }
 #
 # Each run gets its own workspace under ./runs/run-<timestamp>-<hash6>/workspace.
@@ -173,6 +173,8 @@ add_value "-ta"  "task"
 add_value "-tt"  "task_timeout"
 add_value "-tc"  "tool_cap"
 add_value "-ct"  "checkpoint_target"
+add_value "-mg"  "memory_target"
+add_value "--memory" "memory"
 
 # harness forced values
 force_value "-cl"  "${completions_log}"
@@ -192,7 +194,6 @@ add_bool "--write"        "write"
 add_bool "--edit"         "edit"
 add_bool "--bash"         "bash"
 add_bool "--delegate"     "delegate"
-add_bool "--scratchpad"   "scratchpad"
 add_bool "--current_time" "current_time"
 
 # A key this script never read is a typo that would otherwise run silently on the flag's default

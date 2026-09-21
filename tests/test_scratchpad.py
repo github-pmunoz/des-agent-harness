@@ -13,14 +13,15 @@ The scratchpad: the model's working memory as a VALUE on ChatState.
 """
 import json
 
-from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer
+from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer, pad_of
 
 from desh.llama.tokens import estimate_tokens
 from desh.llama.wire import Request, ToolCall
 from desh.tools import ToolRegistry
 from desh_chat import scratchpad as pad_tools
 from desh_chat.events import ExecuteToolCalls, NextRound, StreamCompletion, TurnEnd
-from desh_chat.scratchpad import KINDS, Entry, Scratchpad
+from desh_chat.memory import Memories
+from desh_chat.scratchpad import KINDS, SCRATCHPAD, Entry, Scratchpad
 from desh_chat.session import LoadSession, SaveSession
 from desh_chat.state import ChatHistory, InferenceEngine, PendingTurn, Round, Settings, Turn, StopReason
 
@@ -43,6 +44,16 @@ def with_server(make_state, server, **overrides):
 # ---------------------
 # The value
 # ---------------------
+
+def snap(pad: Scratchpad) -> dict:
+    """What a Turn records for a run whose one memory is this scratchpad."""
+    return {"scratchpad": pad.to_dict()}
+
+
+def block_of(pad: Scratchpad) -> str:
+    """The memory block of a run whose one memory is this scratchpad, outside any turn."""
+    return Memories(((SCRATCHPAD, pad),)).block()["content"]
+
 
 class TestValue:
     def test_empty_by_default_and_every_op_returns_a_new_value(self):
@@ -79,30 +90,31 @@ class TestValue:
         p = Scratchpad.from_dict({"path": "src/x.py", "step": {"kind": "todo", "value": "run it"}})
         assert p.memory == (Entry("path", "fact", "src/x.py"), Entry("step", "todo", "run it"))
 
-    def test_message_says_results_do_not_survive_and_lists_the_entries_or_says_empty(self):
-        empty = Scratchpad().message()
-        assert empty.startswith("<scratchpad>") and empty.endswith("</scratchpad>")
-        assert "do not survive the turn" in empty and "(empty)" in empty
-        full = Scratchpad().with_entry("path", "fact", "src/x.py").with_entry("id", "fact", "42").message()
+    def test_the_block_says_results_do_not_survive_and_lists_the_entries_or_says_empty(self):
+        empty = block_of(Scratchpad())
+        assert empty.startswith("<memory>") and empty.endswith("</memory>")
+        assert "do not survive the turn" in empty and "<scratchpad>\n(empty)\n</scratchpad>" in empty
+        full = block_of(Scratchpad().with_entry("path", "fact", "src/x.py").with_entry("id", "fact", "42"))
         assert "path: src/x.py\nid: 42\n" in full and "(empty)" not in full
+        assert Scratchpad().render() == ""
 
     def test_the_block_groups_the_entries_by_kind_and_leaves_empty_kinds_out(self):
         """Grouped, whatever the order the kinds are shown in: every entry of one kind sits
         under that kind's header, no header for a kind without entries, entry lines unchanged."""
         pad = (Scratchpad().with_entry("a", "todo", "1").with_entry("b", "fact", "2")
                            .with_entry("c", "todo", "3").with_entry("d", "block", "4"))
-        text = pad.entries_text()
+        text = pad.render()
         lines = text.split("\n")
         assert "a: 1" in lines and "b: 2" in lines and "c: 3" in lines and "d: 4" in lines
         assert lines.index("a: 1") + 1 == lines.index("c: 3")      # the todos are adjacent, in order
         headers = [l for l in lines if l not in ("a: 1", "b: 2", "c: 3", "d: 4")]
         assert len(headers) == 3                                    # todo, fact, block; no done, no hypothesis
         assert not any("done" in h or "hypothesis" in h for h in headers)
-        assert text in pad.message()
+        assert text in block_of(pad)
 
-    def test_to_context_is_a_user_message(self):
+    def test_the_block_is_a_user_message(self):
         pad = Scratchpad().with_entry("k", "fact", "v")
-        assert pad.to_context() == {"role": "user", "content": pad.message()}
+        assert Memories(((SCRATCHPAD, pad),)).block() == {"role": "user", "content": block_of(pad)}
 
 
 # ---------------------
@@ -174,7 +186,7 @@ class TestFold:
         tc = call("scratchpad_write", key="k", kind="todo", value="v" * 300)
         state = make_state(pending=PendingTurn("q").add_round(Round("", (tc,))), tools=tools, scratchpad=Scratchpad())
         new_state, _ = ExecuteToolCalls(index=0).execute(state)
-        assert new_state.scratchpad == Scratchpad().with_entry("k", "todo", "v" * 300)
+        assert pad_of(new_state) == Scratchpad().with_entry("k", "todo", "v" * 300)
         echoed = json.loads(new_state.pending.rounds[-1].tool_calls[0].arguments)
         assert echoed == {"key": "k", "kind": "todo", "folded": "300 characters, shown in the scratchpad block"}
 
@@ -191,17 +203,17 @@ class TestCommit:
 
     def test_a_write_is_committed_as_a_new_value_and_the_old_state_is_untouched(self, make_state):
         state, new_state, _ = self.run_call(make_state, call("scratchpad_write", key="path", kind="fact", value="src/x.py"))
-        assert new_state.scratchpad == Scratchpad().with_entry("path", "fact", "src/x.py")
-        assert state.scratchpad == Scratchpad()
+        assert pad_of(new_state) == Scratchpad().with_entry("path", "fact", "src/x.py")
+        assert pad_of(state) == Scratchpad()
         assert new_state.pending is not None
         assert new_state.pending.rounds[-1].results[0].content == "created 'path' (fact)"
 
     def test_delete_and_clear_commit_too(self, make_state):
         start = Scratchpad().with_entry("a", "fact", "1").with_entry("b", "fact", "2")
         _, after_delete, _ = self.run_call(make_state, call("scratchpad_delete", key="a"), scratchpad=start)
-        assert after_delete.scratchpad == Scratchpad().with_entry("b", "fact", "2")
+        assert pad_of(after_delete) == Scratchpad().with_entry("b", "fact", "2")
         _, after_clear, _ = self.run_call(make_state, call("scratchpad_clear"), scratchpad=start)
-        assert after_clear.scratchpad == Scratchpad()
+        assert pad_of(after_clear) == Scratchpad()
 
     def test_a_tool_that_did_not_ask_for_the_scratchpad_leaves_it_alone(self, make_state):
         def now() -> str:
@@ -209,7 +221,7 @@ class TestCommit:
             return "10:00"
         start = Scratchpad().with_entry("a", "fact", "1")
         _, new_state, _ = self.run_call(make_state, call("now"), scratchpad=start, tools=TOOLS.add(now, name="now", confirm=False))
-        assert new_state.scratchpad is start
+        assert pad_of(new_state) is start
         assert new_state.pending is not None
         assert new_state.pending.rounds[-1].results[0].content == "10:00"
 
@@ -218,7 +230,7 @@ class TestCommit:
         dict it never reached is read back unchanged."""
         start = Scratchpad().with_entry("a", "fact", "1")
         _, new_state, _ = self.run_call(make_state, call("scratchpad_write", key="b", kind="fact"), scratchpad=start)
-        assert new_state.scratchpad == start
+        assert pad_of(new_state) == start
         assert new_state.pending is not None
         assert "value" in new_state.pending.rounds[-1].results[0].content
 
@@ -226,7 +238,7 @@ class TestCommit:
         """The registry offers the tool but the run has no working memory: the injection is
         missing, which invoke reports as text, and the state stays without one."""
         _, new_state, _ = self.run_call(make_state, call("scratchpad_write", key="a", kind="fact", value="1"), scratchpad=None)
-        assert new_state.scratchpad is None
+        assert pad_of(new_state) is None
         assert new_state.pending is not None
         assert "scratchpad" in new_state.pending.rounds[-1].results[0].content
 
@@ -246,31 +258,31 @@ class TestRequest:
     def test_the_block_is_the_last_message_after_the_pending_turn(self, make_state):
         pad = Scratchpad().with_entry("k", "fact", "v")
         ev = self.stream_event(make_state, scratchpad=pad)
-        assert ev.request.messages[-1] == make_state(pending=PendingTurn("hello"), scratchpad=pad).scratchpad_block()
-        assert ev.request.messages[-1]["content"].startswith("<scratchpad>") and "k: v" in ev.request.messages[-1]["content"]
+        assert ev.request.messages[-1] == make_state(pending=PendingTurn("hello"), scratchpad=pad).memory_block()
+        assert ev.request.messages[-1]["content"].startswith("<memory>") and "k: v" in ev.request.messages[-1]["content"]
         assert ev.request.messages[-2] == {"role": "user", "content": "hello"}
 
     def test_the_block_shows_the_round_against_the_cap(self, make_state):
         """The next completion is one past the completed rounds; the cap is the turn's."""
         settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, max_tool_rounds=8)
-        first = make_state(pending=PendingTurn("hello"), settings=settings, scratchpad=Scratchpad()).scratchpad_block()
+        first = make_state(pending=PendingTurn("hello"), settings=settings, scratchpad=Scratchpad()).memory_block()
         assert "Round 1 of 8 in this turn." in first["content"]
         tc = ToolCall(index=0, id="c0", type="function", name="Read", arguments="{}")
         later = make_state(pending=PendingTurn("hello").add_round(Round("", (tc,))).add_round(Round("", (tc,))),
-                           settings=settings, scratchpad=Scratchpad()).scratchpad_block()
+                           settings=settings, scratchpad=Scratchpad()).memory_block()
         assert "Round 3 of 8 in this turn." in later["content"]
-        assert "Round" not in Scratchpad().message()     # the pure form carries no counter
+        assert "Round" not in block_of(Scratchpad())     # outside a turn the block carries no counter
 
     def test_no_scratchpad_means_no_block(self, make_state):
         ev = self.stream_event(make_state)
         assert ev.request.messages[-1] == {"role": "user", "content": "hello"}
-        assert not any("<scratchpad>" in m["content"] for m in ev.request.messages)
+        assert not any("<memory>" in m["content"] for m in ev.request.messages)
 
     def test_the_block_counts_as_prior_and_the_user_message_stays_the_unpriced_text(self, make_state):
         pad = Scratchpad().with_entry("k", "fact", "v")
         plain = self.stream_event(make_state)
         with_pad = self.stream_event(make_state, scratchpad=pad)
-        block = make_state(pending=PendingTurn("hello"), scratchpad=pad).scratchpad_block()
+        block = make_state(pending=PendingTurn("hello"), scratchpad=pad).memory_block()
         assert with_pad.prior_tokens - plain.prior_tokens == estimate_tokens(block["content"])
         assert with_pad.unpriced == "hello" and plain.unpriced == "hello"
 
@@ -278,7 +290,7 @@ class TestRequest:
         pad = Scratchpad().with_entry("k", "fact", "v" * 4000)
         state = make_state(pending=PendingTurn("hello"), scratchpad=pad)
         bare = make_state(pending=PendingTurn("hello"))
-        cost = estimate_tokens(state.scratchpad_block()["content"])
+        cost = estimate_tokens(state.memory_block()["content"])
         assert state.prompt_tokens(state.pending_tokens()) - bare.prompt_tokens(bare.pending_tokens()) == cost
         assert state.gen_room(state.pending_tokens()) == bare.gen_room(bare.pending_tokens()) - cost
 
@@ -286,7 +298,7 @@ class TestRequest:
         """A usage frame without a prompt count: turn_tokens falls back to estimating the new
         prompt text, which must be the user message, not the block that came last."""
         pad = Scratchpad().with_entry("k", "fact", "v" * 2000)
-        req = Request(messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "hello"}, pad.to_context()],
+        req = Request(messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "hello"}, Memories(((SCRATCHPAD, pad),)).block()],
                       model=MODELS[0], temperature=0.3, max_tokens=100, think=False, stream=True)
         server = FakeServer(script=[{"content": "hi", "usage": {"completion_tokens": 5}}])
         state = with_server(make_state, server, pending=PendingTurn("hello"), scratchpad=pad)
@@ -304,36 +316,41 @@ class TestSnapshot:
         pad = Scratchpad().with_entry("k", "fact", "v")
         state = make_state(pending=PendingTurn("q"), scratchpad=pad)
         new_state, _ = TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(state)
-        assert new_state.history.turns[-1].scratchpad == pad
-        assert new_state.scratchpad == pad     # the value outlives the turn
+        assert new_state.history.turns[-1].memory == {"scratchpad": pad.to_dict()}
+        assert pad_of(new_state) == pad     # the value outlives the turn
 
     def test_a_run_without_the_tool_records_none(self, make_state):
         new_state, _ = TurnEnd(assistant="a", stop=StopReason.ANSWER).execute(make_state(pending=PendingTurn("q")))
-        assert new_state.history.turns[-1].scratchpad is None
+        assert new_state.history.turns[-1].memory is None
 
     def test_a_plain_turn_serialises_without_the_key(self):
-        assert "scratchpad" not in Turn("u", "a", tokens=7, stop=StopReason.ANSWER).to_dict()
-        assert Turn.from_dict({"user": "u", "assistant": "a", "tokens": 7, "stop": "answer"}).scratchpad is None
+        assert "memory" not in Turn("u", "a", tokens=7, stop=StopReason.ANSWER).to_dict()
+        assert Turn.from_dict({"user": "u", "assistant": "a", "tokens": 7, "stop": "answer"}).memory is None
 
     def test_a_turn_with_a_scratchpad_round_trips_through_json(self):
         pad = Scratchpad().with_entry("b", "fact", "2").with_entry("a", "fact", "1")
-        turn = Turn("u", "a", tokens=7, scratchpad=pad, stop=StopReason.ANSWER)
+        turn = Turn("u", "a", tokens=7, memory=snap(pad), stop=StopReason.ANSWER)
         back = Turn.from_dict(json.loads(json.dumps(turn.to_dict())))
-        assert back.scratchpad is not None
-        assert back == turn and back.scratchpad.memory == (Entry("b", "fact", "2"), Entry("a", "fact", "1"))
-        empty = Turn("u", "a", tokens=7, scratchpad=Scratchpad(), stop=StopReason.ANSWER)
-        assert Turn.from_dict(json.loads(json.dumps(empty.to_dict()))).scratchpad == Scratchpad()
+        assert back.memory is not None
+        assert back == turn and Scratchpad.from_dict(back.memory["scratchpad"]).memory == (Entry("b", "fact", "2"), Entry("a", "fact", "1"))
+        empty = Turn("u", "a", tokens=7, memory=snap(Scratchpad()), stop=StopReason.ANSWER)
+        assert Turn.from_dict(json.loads(json.dumps(empty.to_dict()))).memory == snap(Scratchpad())
 
-    def test_last_scratchpad_skips_turns_without_one(self):
+    def test_a_format_6_turn_loads_its_scratchpad_key_as_the_scratchpad_slot(self):
+        d = {"user": "u", "assistant": "a", "tokens": 7, "stop": "answer", "scratchpad": {"k": {"kind": "fact", "value": "v"}}}
+        assert Turn.from_dict(d).memory == snap(Scratchpad().with_entry("k", "fact", "v"))
+
+    def test_last_memory_skips_turns_without_one(self):
         old = Scratchpad().with_entry("k", "fact", "old")
         new = Scratchpad().with_entry("k", "fact", "new")
         h = (ChatHistory()
-             .append(Turn("q1", "a1", scratchpad=old, stop=StopReason.ANSWER))
-             .append(Turn("q2", "a2", scratchpad=new, stop=StopReason.ANSWER))
+             .append(Turn("q1", "a1", memory=snap(old), stop=StopReason.ANSWER))
+             .append(Turn("q2", "a2", memory=snap(new), stop=StopReason.ANSWER))
              .compact("summary"))
-        assert h.last_scratchpad() == new
-        assert ChatHistory().last_scratchpad() is None
-        assert ChatHistory().append(Turn("q", "a", stop=StopReason.ANSWER)).last_scratchpad() is None
+        assert h.last_memory("scratchpad") == new.to_dict()
+        assert h.last_memory("ontology") is None
+        assert ChatHistory().last_memory("scratchpad") is None
+        assert ChatHistory().append(Turn("q", "a", stop=StopReason.ANSWER)).last_memory("scratchpad") is None
 
     def test_save_writes_the_snapshot_per_turn(self, make_state, tmp_path):
         path = str(tmp_path / "s.json")
@@ -344,7 +361,7 @@ class TestSnapshot:
         SaveSession().execute(state)
         with open(path) as f:
             doc = json.load(f)
-        assert doc["version"] == ChatHistory.SESSION_FORMAT and doc["turns"][-1]["scratchpad"] == {"k": {"kind": "fact", "value": "v"}}
+        assert doc["version"] == ChatHistory.SESSION_FORMAT and doc["turns"][-1]["memory"] == {"scratchpad": {"k": {"kind": "fact", "value": "v"}}}
 
 
 # ---------------------
@@ -363,33 +380,33 @@ class TestLoad:
 
     def test_offered_and_the_file_has_one_restores_the_newest_past_a_summary(self, make_state, tmp_path):
         history = (ChatHistory()
-                   .append(Turn("q1", "a1", scratchpad=self.OLD, stop=StopReason.ANSWER))
-                   .append(Turn("q2", "a2", scratchpad=self.NEW, stop=StopReason.ANSWER))
+                   .append(Turn("q1", "a1", memory=snap(self.OLD), stop=StopReason.ANSWER))
+                   .append(Turn("q2", "a2", memory=snap(self.NEW), stop=StopReason.ANSWER))
                    .compact("summary"))
         state = make_state(session_file=self.saved(tmp_path, history), scratchpad=Scratchpad())
         new_state, _ = LoadSession().execute(state)
-        assert new_state.scratchpad == self.NEW
+        assert pad_of(new_state) == self.NEW
         assert len(new_state.history) == 3
 
     def test_offered_and_the_file_has_none_starts_empty(self, make_state, tmp_path):
         """A format 2 file, or a run that never had the tool: the value stays the empty one."""
         state = make_state(session_file=self.saved(tmp_path, ChatHistory().append(Turn("q", "a", stop=StopReason.ANSWER))), scratchpad=Scratchpad())
         new_state, _ = LoadSession().execute(state)
-        assert new_state.scratchpad == Scratchpad()
+        assert pad_of(new_state) == Scratchpad()
 
     def test_not_offered_ignores_what_the_file_carries(self, make_state, tmp_path):
         """No tool this run means no working memory, whatever the file says: the model would be
         shown memory it cannot change. The file keeps it for a run that offers the tool again."""
-        history = ChatHistory().append(Turn("q", "a", scratchpad=self.NEW, stop=StopReason.ANSWER))
+        history = ChatHistory().append(Turn("q", "a", memory=snap(self.NEW), stop=StopReason.ANSWER))
         state = make_state(session_file=self.saved(tmp_path, history))
         new_state, _ = LoadSession().execute(state)
-        assert new_state.scratchpad is None
-        assert new_state.history.turns[-1].scratchpad == self.NEW    # still in the history, just not live
+        assert pad_of(new_state) is None
+        assert new_state.history.turns[-1].memory == snap(self.NEW)    # still in the history, just not live
 
     def test_a_missing_file_leaves_the_empty_value(self, make_state, tmp_path):
         state = make_state(session_file=str(tmp_path / "none.json"), scratchpad=Scratchpad())
         new_state, _ = LoadSession().execute(state)
-        assert new_state.scratchpad == Scratchpad()
+        assert pad_of(new_state) == Scratchpad()
 
     def test_round_trip_through_save_and_load(self, make_state, tmp_path):
         path = str(tmp_path / "s.json")
@@ -398,4 +415,4 @@ class TestLoad:
         SaveSession().execute(state)
         fresh = make_state(session_file=path, scratchpad=Scratchpad())
         restored, _ = LoadSession().execute(fresh)
-        assert restored.scratchpad == self.NEW
+        assert pad_of(restored) == self.NEW

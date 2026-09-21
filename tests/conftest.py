@@ -1,6 +1,8 @@
 import pytest
 
 from desh.llama.wire import Completion, Request, ToolCall
+from desh_chat.memory import Memories
+from desh_chat.scratchpad import SCRATCHPAD
 from desh_chat.state import ChatHistory, ChatState, InferenceEngine, Settings
 
 MODELS = ["model-a", "model-b"]
@@ -117,9 +119,19 @@ def make_state():
             system_prompt="You are a helpful assistant.",
             completions_log=None,
         )
+        # The scratchpad is the memory most tests are about: `scratchpad=<value>` registers it
+        # holding that value, `scratchpad=None` registers no memory.
+        if "scratchpad" in overrides:
+            value = overrides.pop("scratchpad")
+            overrides["memory"] = Memories(((SCRATCHPAD, value),)) if value is not None else Memories()
         base.update(overrides)
         return ChatState(**base)
     return _make
+
+
+def pad_of(state):
+    """The scratchpad value a state holds; None when the memory is not registered."""
+    return state.memory.get("scratchpad")
 
 
 @pytest.fixture

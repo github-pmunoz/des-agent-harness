@@ -139,7 +139,7 @@ class Tool:
     # (a delegate brief), so the request stops carrying the ask once it carries the answer.
     fold: Optional[Callable[[dict], dict]] = field(default=None, repr=False, compare=False)
     # the argument that says what a call was ABOUT, for a one-line mention of the call (the expiring
-    # line of the scratchpad block): a command, a path, a key. "" means the call is mentioned by
+    # line of the memory block): a command, a path, a key. "" means the call is mentioned by
     # tool name alone. Declared by the app at registration; the engine knows no tool by name.
     target: str = ""
 

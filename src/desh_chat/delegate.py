@@ -41,7 +41,7 @@ from desh.tools import DEFAULT_RESULT_CHARS, ToolRegistry
 from desh_chat.coding import spill
 from desh_chat.state import ChatHistory, ChatState, Deadline, InferenceEngine, Settings, StopReason
 from desh_chat.events import TurnStart
-from desh_chat.scratchpad import SCRATCHPAD_SYSTEM_PROMPT, Scratchpad
+from desh_chat.memory import Memories, Memory
 
 
 DELEGATE_SYSTEM_PROMPT = (
@@ -52,7 +52,7 @@ Orient yourself before searching: if the project root has an INDEX.md, `grep -n 
 You are handling a subtask delegated by another agent. Complete it using your tools, then reply with your final answer only: what you found or did, concretely, without narrating the steps. Your reply is all the delegating agent will see, and it is read into a context that is smaller than yours: report exactly what the task asked to be reported, name files by path and line rather than pasting them, and never include whole files, whole logs or whole command outputs. If the task cannot be completed as specified, stop and report why."""
 )
 
-CAP_CONTINUE_MSG = ("Checkpoint: the tool round cap was reached. Any scratchpad call in your last reply ran; its other tool calls were not run. "
+CAP_CONTINUE_MSG = ("Checkpoint: the tool round cap was reached. Any memory call in your last reply ran; its other tool calls were not run. "
                     "If the task is not finished, continue from here and ask again for any call you still need. "
                     "If it is finished, reply with your final answer.")
 
@@ -100,6 +100,8 @@ class Delegate:
     # The cap on one result, the registry's bound made known to the tool (as Workspace.result_chars
     # is): an answer over it is saved whole where the parent can Read it, and says so.
     result_chars: int = DEFAULT_RESULT_CHARS
+    # The memories every subagent starts with, empty: the ones whose tools `tools` registers.
+    memories: tuple[Memory, ...] = ()
 
     def delegate(self, task: str, context: str = "", gate: str = "", check: str = "", *,
                  settings: Settings | None = None, deadline: Deadline | None = None) -> str:
@@ -119,13 +121,10 @@ class Delegate:
         # `settings` is not in the Args block on purpose: the registry injects it (Tool.inject) and
         # the schema leaves it out, so the model cannot pass it. Register with inject=("settings",).
         child_config = child_settings(settings if settings is not None else self.settings)
-        # A subagent has a working memory when its registry offers the scratchpad tools — the same
-        # declaration ExecuteToolCalls commits on — and starts with an empty one: it has none of
-        # the parent's conversation, so it has none of the parent's memory either.
-        scratchpad = Scratchpad() if self.offers_scratchpad() else None
-        system_prompt = DELEGATE_SYSTEM_PROMPT
-        if scratchpad is not None:
-            system_prompt += "\n\n" + SCRATCHPAD_SYSTEM_PROMPT.format(max_tool_rounds=child_config.max_tool_rounds)
+        # A subagent starts with its memories empty: it has none of the parent's conversation, so
+        # it has none of the parent's memory either.
+        memory = Memories.of(*self.memories)
+        system_prompt = memory.system_prompt(DELEGATE_SYSTEM_PROMPT, child_config.max_tool_rounds)
         if context:
             system_prompt += "\n\nContext from the delegating agent:\n" + context
         if gate:
@@ -142,7 +141,7 @@ class Delegate:
             tools=self.tools,
             operator=False,                 # nobody to prompt: a finished turn returns the run
             auto_prompt=CAP_CONTINUE_MSG,   # checkpoint: a capped turn is continued, not returned
-            scratchpad=scratchpad,
+            memory=memory,
             deadline=deadline,              # the parent's, injected like settings: no child outlives the run
         )
         print(c_out(Palette.CHROME, "╭─ delegate ─ subagent starts" + (f" ({session_file})" if session_file else "")))
@@ -168,10 +167,6 @@ class Delegate:
             return text
         path = spill(self.root, "delegate", task, text)
         return text + f"\n[answer is {len(text)} characters, cut to {self.result_chars}; the whole of it is saved at {path} — Read it with offset and limit]"
-
-    def offers_scratchpad(self) -> bool:
-        """Whether the subagent's registry holds a tool that works on the scratchpad (Tool.inject)."""
-        return any("scratchpad" in t.inject for t in self.tools.tools)
 
     def _checked(self, text: str, check: str) -> str:
         """Append the check block to a real answer. Canned strings are not checked by this 
@@ -212,7 +207,7 @@ def answer(state: ChatState) -> str:
       ANSWER               the answer, verbatim ("(no answer)" when the model said nothing)
     Every case must come back as text the parent can act on — it cannot see the child's history.
     A turn that ended by overflow, deadline, error or repeat carries what it got down as its answer
-    (TurnEnd salvages it from the checkpoint, the scratchpad and the rounds), so the parent
+    (TurnEnd salvages it from the checkpoint, the memories and the rounds), so the parent
     reads that, followed by a note naming how the turn ended: "[Subagent ran out of context
     window]", "[Subagent hit the task deadline]", "[Subagent hit an error]"; a capped turn's
     answer is followed by "[Subagent hit the tool round cap]". An operator's cancel passes

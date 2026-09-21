@@ -5,7 +5,7 @@ two points only — when a checkpoint folds their round (PendingTurn.compact), a
 ends: a history turn is always stubbed, EXPIRED_RESULT in place of each result, the calls kept
 (its answer is what the results led to). Nothing is recorded: stubbing is a rendering, so the
 session file, the repeat detector and the compaction transcript always read the whole results.
-The scratchpad block paces the model towards the round cap, the one expiry event it can see coming.
+The memory block paces the model towards the round cap, the one expiry event it can see coming.
 """
 import json
 
@@ -15,7 +15,8 @@ from desh.llama.tokens import estimate_result_tokens, estimate_tokens
 from desh.llama.wire import ToolCall
 from desh.tools import ToolRegistry
 from desh_chat.events import NextRound, StreamCompletion
-from desh_chat.scratchpad import CAP_REACHED_LINE, LAST_ROUND_LINE, Scratchpad
+from desh_chat.memory import CAP_REACHED_LINE, LAST_ROUND_LINE
+from desh_chat.scratchpad import SCRATCHPAD, Scratchpad
 from desh_chat.state import CHECKPOINT_PREFIX, EXPIRED_RESULT, MENTION_CHARS, ChatHistory, PendingTurn, Round, Settings, ToolResult, Turn, StopReason
 
 
@@ -120,6 +121,10 @@ class TestMentions:
 # NextRound: what the request looks like
 # ---------------------
 
+# the cap line names the run's memory tools
+CAP_REACHED = CAP_REACHED_LINE.format(tool_names=", ".join(SCRATCHPAD.tool_names()))
+
+
 class TestRequest:
     def stream_event(self, make_state, p: PendingTurn, cap: int = 10, scratchpad=None) -> StreamCompletion:
         state = make_state(pending=p, settings=settings(cap), scratchpad=scratchpad)
@@ -135,29 +140,29 @@ class TestRequest:
     def test_no_closing_line_before_the_cap(self, make_state):
         ev = self.stream_event(make_state, pending(3), cap=5, scratchpad=Scratchpad())
         block = ev.request.messages[-1]["content"]
-        assert block.startswith("<scratchpad>Round 4 of 5") and LAST_ROUND_LINE not in block and CAP_REACHED_LINE not in block
+        assert block.startswith("<memory>Round 4 of 5") and LAST_ROUND_LINE not in block and CAP_REACHED not in block
 
-    def test_the_last_round_is_announced_in_the_scratchpad_block(self, make_state):
+    def test_the_last_round_is_announced_in_the_memory_block(self, make_state):
         """Round cap of cap: the last reply whose calls run, and the last request that shows the
         turn's results."""
         ev = self.stream_event(make_state, pending(4), cap=5, scratchpad=Scratchpad().with_entry("k", "fact", "v"))
         block = ev.request.messages[-1]["content"]
-        assert block.startswith("<scratchpad>Round 5 of 5") and LAST_ROUND_LINE in block and CAP_REACHED_LINE not in block
+        assert block.startswith("<memory>Round 5 of 5") and LAST_ROUND_LINE in block and CAP_REACHED not in block
         assert not any(LAST_ROUND_LINE in m["content"] for m in ev.request.messages[:-1])
 
-    def test_the_capped_reply_is_told_only_scratchpad_calls_run(self, make_state):
+    def test_the_capped_reply_is_told_only_memory_calls_run(self, make_state):
         ev = self.stream_event(make_state, pending(5), cap=5, scratchpad=Scratchpad())
         block = ev.request.messages[-1]["content"]
-        assert CAP_REACHED_LINE in block and LAST_ROUND_LINE not in block
+        assert CAP_REACHED in block and LAST_ROUND_LINE not in block
 
-    def test_no_scratchpad_means_no_line_anywhere(self, make_state):
+    def test_no_memory_means_no_line_anywhere(self, make_state):
         ev = self.stream_event(make_state, pending(4), cap=5)
         assert not any(LAST_ROUND_LINE in m["content"] for m in ev.request.messages)
 
     def test_the_block_is_priced_with_its_closing_line(self, make_state):
         state = make_state(pending=pending(4), settings=settings(5), scratchpad=Scratchpad())
-        assert state.scratchpad_tokens() == estimate_tokens(state.scratchpad_block()["content"])
-        assert state.scratchpad_tokens() > estimate_tokens(Scratchpad().message((4, 5)))
+        assert state.memory_tokens() == estimate_tokens(state.memory_block()["content"])
+        assert state.memory_tokens() > estimate_tokens(state.memory.block((4, 5), budget_tokens=state.memory_budget())["content"])
 
     def test_history_turns_are_always_stubbed_in_the_view(self, make_state):
         turn = Turn("q0", "a0", rounds=(round_(1),), tokens=5, stop=StopReason.ANSWER)
@@ -243,8 +248,8 @@ class TestCheckpoint:
 
     def test_the_block_counts_the_models_rounds_across_a_checkpoint(self, make_state):
         state = make_state(pending=checkpointed(2, 3), settings=settings(6), scratchpad=Scratchpad())     # 5 model rounds, one checkpoint
-        block = state.scratchpad_block()["content"]
-        assert block.startswith("<scratchpad>Round 6 of 6") and LAST_ROUND_LINE in block
+        block = state.memory_block()["content"]
+        assert block.startswith("<memory>Round 6 of 6") and LAST_ROUND_LINE in block
 
     def test_pricing_counts_the_checkpoint_and_the_view_only(self):
         p = pending(3).compact("c", tokens=100)        # rounds 1, 2 (10, 20) folded; view: checkpoint 100, round 3 re-priced
