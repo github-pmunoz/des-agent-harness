@@ -4,6 +4,7 @@
 Discrete-Event-Simulation (DES) engine for chatbot
 """
 import argparse
+import json
 import sys
 import time
 import os
@@ -27,6 +28,7 @@ from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG, fold_brief
 from desh_chat.memory import Memories, Memory
 from desh_chat.ontology import ONTOLOGY
 from desh_chat.plan import PLAN
+from desh_chat.prompts import PromptError, Prompts, from_file
 from desh_chat.scratchpad import SCRATCHPAD
 
 
@@ -48,7 +50,7 @@ def selected_memories(args: argparse.Namespace) -> tuple[Memory, ...]:
 
 def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: Settings, *,
                 session_file: str | None = None, completions_log: Logger | None = None,
-                des_log: TextIO | None = None) -> ToolRegistry:
+                des_log: TextIO | None = None, prompts: Prompts = Prompts()) -> ToolRegistry:
     """The toolsets are additive: each flag contributes its tools, none of them means no tools.
     The delegate tool is built from the RESOLVED session path, completions Logger and DES log file,
     never from the raw flags: a subagent writes to the same log objects the parent's engine does."""
@@ -60,7 +62,8 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     # `target` is the argument a one-line mention of the call shows (a digest line, in place of
     # a folded round): a file tool is about its path, Bash about its command, a delegate about
     # its task, a memory tool about its key.
-    memories = selected_memories(args)
+    memories = prompts.memories(selected_memories(args))
+    applied: set[str] = set()
     if args.read:
         tools = tools.add(ws.read, name="Read", confirm=False, target="file_path")
     if args.write:
@@ -81,14 +84,19 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         child_memories = tuple(m for m in memories if m.subagent == "fresh")
         for m in child_memories:
             delegate_tools = m.register(delegate_tools)
+        delegate_tools, applied = prompts.describe(delegate_tools)
         delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug,
-                            result_chars=max_result_chars, memories=child_memories)
+                            result_chars=max_result_chars, memory=Memories.of(*child_memories, frame=prompts.frame()),
+                            system_prompt=prompts.get("delegate.system"), cap_continue=prompts.get("cap_continue"))
         # the parent's CURRENT settings travel with every call; the child derives its own from them
         tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief, target="task")
     # the working memory itself lives on ChatState; its tools only get a dict for the call
     for m in memories:
         tools = m.register(tools)
+    # the texts a run was built with others of reach the schemas last, over both registries
+    tools, applied_here = prompts.describe(tools)
+    prompts.check_tools(applied | applied_here)
     return tools
 
 
@@ -117,8 +125,11 @@ def resolve_session_file(session: str, sessions_folder: str, run_id: str) -> str
     return None  # no session persistence
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Simple chatbot using LlamaClient")
+    ap.add_argument("--config",    default="", help="JSON file of these options, keyed by long flag name with underscores, plus a \"prompts\" object; a flag on the command line wins over the file")
+    ap.add_argument("--prompt",    action="append", default=[], metavar="KEY=TEXT", help="override one instruction prompt (see desh_chat.prompts for the keys); TEXT may be @file; repeatable, wins over the config's prompts")
+    ap.add_argument("--print-config", action="store_true", help="print the effective configuration as JSON, every prompt included, and exit")
     ap.add_argument("-a",   "--auto",    action="store_true", help="enable auto mode")
     ap.add_argument("-co",   "--cont",    action="store_true", help="enable auto-continue prompt on tool round cap of orchestrator")
     ap.add_argument("-p",   "--port",           type=int, default=8012)
@@ -150,13 +161,127 @@ def main():
     ap.add_argument("-tc",  "--tool-cap",       type=float, default=10.0, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
     ap.add_argument("-ct",  "--checkpoint-target", type=float, default=0.15, help="share of the context a mid-turn checkpoint summary may take")
     ap.add_argument("-mg",  "--memory-target",  type=float, default=0.10, help="share of the context one memory may take; a write past it is refused")
-    args = ap.parse_args()
+    return ap
 
+
+# what a config file may not carry: the flags that are about the config itself
+NOT_IN_CONFIG = ("config", "prompt", "print_config", "help")
+
+
+def load_config(ap: argparse.ArgumentParser, path: str) -> tuple[dict, dict[str, str]]:
+    """Read a --config file into (parser defaults, prompt overrides). Keys are the parser's dests —
+    the long flag name with underscores — so the file and the command line cannot drift apart; a
+    key the parser does not know is an error, not a run on the flag's default. A switch takes a
+    JSON bool, a typed option is passed through its type, and a string value spelled `@path` is
+    the text of that file, relative to the config's directory. The "prompts" object is returned
+    apart: it is checked where the prompts are resolved."""
+    path = os.path.expanduser(path)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"error: cannot read config {path}: {e}")
+    if not isinstance(doc, dict):
+        raise SystemExit(f"error: config {path} must be a JSON object")
+    base_dir = os.path.dirname(os.path.abspath(path))
+    prompts = doc.pop("prompts", {})
+    if not isinstance(prompts, dict):
+        raise SystemExit(f"error: config {path}: \"prompts\" must be an object")
+    actions = {a.dest: a for a in ap._actions if a.dest not in NOT_IN_CONFIG}
+    defaults: dict = {}
+    for key, value in doc.items():
+        action = actions.get(key)
+        if action is None:
+            raise SystemExit(f"error: config {path}: unknown key {key!r} (keys are the long flag names, with underscores)")
+        if isinstance(action, argparse._StoreTrueAction):
+            if not isinstance(value, bool):
+                raise SystemExit(f"error: config {path}: {key!r} is a switch and takes true or false, got {value!r}")
+        elif isinstance(value, bool):
+            raise SystemExit(f"error: config {path}: {key!r} takes a value, got {value!r}")
+        else:
+            try:
+                value = from_file(value, base_dir) if isinstance(value, str) else value
+                value = action.type(value) if action.type is not None else value
+            except (ValueError, TypeError, PromptError) as e:
+                raise SystemExit(f"error: config {path}: {key!r}: {e}")
+            if action.type is None and not isinstance(value, str):
+                raise SystemExit(f"error: config {path}: {key!r} takes a string, got {value!r}")
+        defaults[key] = value
+    return defaults, prompts
+
+
+def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, Prompts]:
+    """The run's options and prompts. Precedence: a flag on the command line, then the --config
+    file, then the built-in default — the file becomes the parser's defaults, so argparse itself
+    settles it. Prompts merge the same way: the config's object, then each --prompt KEY=TEXT."""
+    ap = build_parser()
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default="")
+    known, _ = pre.parse_known_args(argv)
+    config_prompts: dict[str, str] = {}
+    config_dir = "."
+    if known.config:
+        defaults, config_prompts = load_config(ap, known.config)
+        config_dir = os.path.dirname(os.path.abspath(os.path.expanduser(known.config)))
+        ap.set_defaults(**defaults)
+    args = ap.parse_args(argv)
+    cli_prompts: dict[str, str] = {}
+    for item in args.prompt:
+        key, sep, text = item.partition("=")
+        if not sep or not key:
+            ap.error(f"--prompt takes KEY=TEXT, got {item!r}")
+        cli_prompts[key.strip()] = text
+    try:
+        return args, Prompts.resolve((config_prompts, config_dir), (cli_prompts, "."))
+    except PromptError as e:
+        ap.error(str(e))
+
+
+def settings_of(args: argparse.Namespace, prompts: Prompts) -> Settings:
+    return Settings(
+        model=args.model,
+        temperature=args.temperature,
+        think=args.think,
+        context=args.context,
+        max_turn_tokens=args.max_turn_tokens,
+        max_tool_rounds=args.max_tool_rounds,
+        auto=args.auto,
+        checkpoint_target=args.checkpoint_target,
+        memory_target=args.memory_target,
+        **prompts.settings(),
+    )
+
+
+def effective_config(args: argparse.Namespace, prompts: Prompts) -> dict:
+    """Everything the run is built from, as a --config document: every option, and every prompt
+    by key with its text, defaults included. The template of a new eval arm, and the record of
+    what a run was built with."""
+    doc = {k: v for k, v in sorted(vars(args).items()) if k not in NOT_IN_CONFIG}
+    # no inference: the registries are built only to be read
+    tools = build_tools(args, None, settings_of(args, prompts), prompts=prompts)     # type: ignore[arg-type]
+    delegate = tools.get("delegate")
+    registries = (tools,) + ((delegate.fn.__self__.tools,) if delegate is not None else ())
+    doc["prompts"] = prompts.effective(prompts.memories(selected_memories(args)), *registries)
+    return doc
+
+
+def main():
+    try:
+        args, prompts = parse_args()
+        if args.print_config:
+            print(json.dumps(effective_config(args, prompts), indent=2, ensure_ascii=False))
+            return
+        run(args, prompts)
+    except PromptError as e:
+        raise SystemExit(f"error: {e}")
+
+
+def run(args: argparse.Namespace, prompts: Prompts):
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"  # Unique run ID
     session_file = resolve_session_file(args.session, args.sessions_folder, run_id)
     # empty here; LoadSession restores what a session saved. The system prompt explains how the
     # context works only when there is a memory to act on it with.
-    memory = Memories.of(*selected_memories(args))
+    memory = Memories.of(*prompts.memories(selected_memories(args)), frame=prompts.frame())
     system_prompt = memory.system_prompt(args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely.",
                                          args.max_tool_rounds)
     # Setup logging
@@ -171,17 +296,7 @@ def main():
         args.timeout = args.context // 10 # assuming worst case one shot at 10tokens/sec
 
     client = LlamaServer(f"http://127.0.0.1:{args.port}",timeout=args.timeout)
-    settings = Settings(
-        model=args.model,
-        temperature=args.temperature,
-        think=args.think,
-        context=args.context,
-        max_turn_tokens=args.max_turn_tokens,
-        max_tool_rounds=args.max_tool_rounds,
-        auto=args.auto,
-        checkpoint_target=args.checkpoint_target,
-        memory_target=args.memory_target,
-    )
+    settings = settings_of(args, prompts)
     inference = InferenceEngine(
         server=client,
         port=args.port,
@@ -189,7 +304,7 @@ def main():
         max_context=client.max_context()
     )
     completions_log = Logger(args.completions_log) if args.completions_log else None
-    tools = build_tools(args, inference, settings, session_file=session_file, completions_log=completions_log, des_log=des_log)
+    tools = build_tools(args, inference, settings, session_file=session_file, completions_log=completions_log, des_log=des_log, prompts=prompts)
     state = ChatState(
         settings=settings,
         inference=inference,
@@ -200,7 +315,7 @@ def main():
         session_file=session_file,
         tools=tools,
         operator=True,
-        auto_prompt=CAP_CONTINUE_MSG if args.cont else None,
+        auto_prompt=prompts.get("cap_continue") if args.cont else None,
         memory=memory,
         # the clock starts here, before the session loads and the router loads the model: both are run time
         deadline=Deadline.in_seconds(args.task_timeout) if args.task and args.task_timeout > 0 else None,

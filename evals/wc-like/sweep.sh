@@ -7,7 +7,10 @@
 #   ./sweep.sh <SETTINGS.json> <REPEATS> [NAME]   one settings file, repeated
 #
 # A sweep set names a baseline settings file and a list of sweeps, each a name, a repeat count
-# and an override merged over the baseline. Override keys must exist in the baseline, so a typo
+# and an override merged over the baseline, recursively: a set's "prompts" object adds to the
+# baseline's instead of replacing it (an @file prompt must be an absolute path: the merged settings
+# are written to the sweep folder, and @paths resolve against the file that names them).
+# Override keys must exist in the baseline, so a typo
 # fails before any inference is spent. Example:
 #   {
 #     "baseline": "settings.json",
@@ -127,7 +130,7 @@ for ((k = 0; k < count; k++)); do
   repeats="$(jq -r ".sweeps[$k].reps" "$spec")"
   sweep_dir="${set_dir}/${name}"
   mkdir -p "$sweep_dir"
-  jq --slurpfile base "$baseline" ".sweeps[$k].override // {} | \$base[0] + ." "$spec" > "${sweep_dir}/settings.json"
+  jq --slurpfile base "$baseline" ".sweeps[$k].override // {} | \$base[0] * ." "$spec" > "${sweep_dir}/settings.json"
   run_sweep "${sweep_dir}/settings.json" "$repeats" "$name" "$sweep_dir"
   sweep_dirs+=("$sweep_dir")
 done

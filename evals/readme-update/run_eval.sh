@@ -33,7 +33,7 @@
 #
 # Each run gets its own workspace under ./runs/run-<timestamp>-<hash6>/workspace.
 # The run dir ./runs/run-<timestamp>-<hash6> will contain
-# - run_settings.json: a copy of the chat-des cli args
+# - run_settings.json: the effective chat-des configuration (chat-des --print-config)
 # - run_manifest.json: a copy of the chat-des exit status and wall time
 # - stdout: stdout of the chat-des run
 # - stderr: stderr of the chat-des run
@@ -65,8 +65,6 @@ run_dir="${runs_root}/${run_id}"
 workspace="${run_dir}/workspace"
 mkdir -p "$workspace"
 
-# Save a copy of the settings into the run folder.
-cp "$SETTINGS" "${run_dir}/run_settings.json"
 
 # The workspace is the fixture branch, cloned over a real pack transfer: a plain local clone
 # hardlinks the whole object store, and every later commit would be readable by its hash.
@@ -88,67 +86,16 @@ session_file="${run_dir}/session.json"
 des_log="${run_dir}/des_log.jsonl"
 completions_log="${run_dir}/completions_log.jsonl"
 
-# --- build chat-des arguments from the flat settings -------------------------
-# jq is required.
+# --- build chat-des arguments ------------------------------------------------
+# The settings file IS a chat-des --config file: its keys are the long flag names with
+# underscores, plus a "prompts" object of instruction-prompt overrides (see --print-config).
+# chat-des checks it: an unknown key, a mistyped value or a bad prompt key stops the run before it
+# starts (a sweep once overrode "tool-cap" while the flag was "tool_cap": 45 runs at the default).
+# Only what the harness decides per run is passed as flags, which win over the file.
 if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq is required to parse the settings" >&2
   exit 2
 fi
-
-# has <key>  -> 0 if the key is present (even if null/false)
-has() { jq -e --arg k "$1" 'has($k)' "$SETTINGS" >/dev/null 2>&1; }
-
-# Every key a flag is built from is recorded here (by add_value / add_bool, which run in this
-# shell — get() runs in a command substitution, so it cannot record), and the launch refuses a
-# settings key nothing read. port and model are read directly below.
-consumed=" port model"
-
-# get <key> fails if `has <key>` is false, no default
-get() {
-  local key="$1" 
-  if has "$key"; then
-    jq -r --arg k "$key" '.[$k]' "$SETTINGS"
-  else
-    echo "error: settings key $key is missing" >&2
-    exit 2
-  fi
-}
-
-# is_true <key> -> 0 if the key is present and true, fails if key is missing
-is_true() {
-  local key="$1"
-  if has "$key"; then
-    jq -e --arg k "$key" '.[$k] == true' "$SETTINGS" >/dev/null 2>&1
-  else
-    echo "error: settings key $key is missing" >&2
-    exit 2
-  fi
-}
-
-args=()
-
-# value flags:  flag  settings-key  default
-add_value() {
-  local flag="$1" key="$2"
-  consumed="$consumed $key"
-  val="$(get "$key")"
-  args+=("$flag" "$val")
-}
-
-# boolean flags:  flag  settings-key
-add_bool() {
-  local flag="$1" key="$2"
-  consumed="$consumed $key"
-  if is_true "$key"; then
-    args+=("$flag")
-  fi
-}
-
-# force external value
-force_value() {
-  local flag="$1" value="$2"
-  args+=("$flag" "$value")
-}
 
 # erase llama-server kv cache for starting the run cold
 erase_kv_cache() {
@@ -158,52 +105,17 @@ erase_kv_cache() {
     "http://127.0.0.1:$port/slots/0?action=erase"
 }
 
-# Extract port and model for reuse in erase_kv_cache command
-port="$(get port)"
-model="$(get model)"
+args=(--config "$SETTINGS"
+      -cl "$completions_log" -s "$session_file" -dl "$des_log" -w "$workspace")
 
-# value flags
-add_value "-t"   "temperature"
-add_value "-c"   "context"
-add_value "-mt"  "max_turn_tokens"
-add_value "-mtr" "max_tool_rounds"
-add_value "-sp"  "system_prompt"
-add_value "-to"  "timeout"
-add_value "-ta"  "task"
-add_value "-tt"  "task_timeout"
-add_value "-tc"  "tool_cap"
-add_value "-ct"  "checkpoint_target"
-add_value "-mg"  "memory_target"
-add_value "--memory" "memory"
-
-# harness forced values
-force_value "-cl"  "${completions_log}"
-force_value "-s"   "${session_file}"
-force_value "-dl"  "${des_log}"
-force_value "-w"   "${workspace}"
-force_value "-p"   "${port}"
-force_value "-m"   "${model}"
-
-# boolean flags
-add_bool "-a"   "auto"
-add_bool "-co"  "cont"
-add_bool "-th"  "think"
-add_bool "-d"   "debug"
-add_bool "--read"         "read"
-add_bool "--write"        "write"
-add_bool "--edit"         "edit"
-add_bool "--bash"         "bash"
-add_bool "--delegate"     "delegate"
-add_bool "--current_time" "current_time"
-
-# A key this script never read is a typo that would otherwise run silently on the flag's default
-# (a sweep once overrode "tool-cap" while this read "tool_cap": 45 runs at the default).
-for key in $(jq -r 'keys[]' "$SETTINGS"); do
-  case " $consumed " in
-    *" $key "*) ;;
-    *) echo "error: settings key '$key' is not one run_eval.sh reads (keys map 1:1 to chat-des flags, underscores)" >&2; exit 2;;
-  esac
-done
+# The effective configuration — every option and every prompt with its text, defaults and @files
+# resolved — is the record of what the run was built with.
+if ! chat-des "${args[@]}" --print-config > "${run_dir}/run_settings.json"; then
+  echo "error: chat-des rejected the settings" >&2
+  exit 2
+fi
+port="$(jq -r '.port' "${run_dir}/run_settings.json")"
+model="$(jq -r '.model' "${run_dir}/run_settings.json")"
 
 # --- launch ----------------------------------------------------------------
 echo "run id : $run_id"

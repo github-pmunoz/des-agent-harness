@@ -198,6 +198,27 @@ class ToolRegistry:
         """register(Tool.define(fn, **overrides))."""
         return self.register(Tool.define(fn, **overrides))
 
+    def described(self, name: str, description: Optional[str] = None, params: Optional[dict[str, str]] = None) -> ToolRegistry:
+        """The registry with one tool's model-facing text replaced: its description and the
+        descriptions of the named parameters. The schema is otherwise untouched — what the tool
+        takes is derived from its signature and is not a text to override. Raises KeyError for a
+        tool that is not registered or a parameter the schema does not have."""
+        tool = self.get(name)
+        if tool is None:
+            raise KeyError(f"tool {name!r} is not registered")
+        function = dict(tool.schema["function"])
+        if description is not None:
+            function["description"] = description
+        if params:
+            properties = dict(function["parameters"].get("properties", {}))
+            for param, text in params.items():
+                if param not in properties:
+                    raise KeyError(f"tool {name!r} has no parameter {param!r}")
+                properties[param] = {**properties[param], "description": text}
+            function["parameters"] = {**function["parameters"], "properties": properties}
+        patched = replace(tool, schema={**tool.schema, "function": function})
+        return replace(self, tools=tuple(patched if t.name == name else t for t in self.tools))
+
     def get(self, name: str) -> Optional[Tool]:
         return next((t for t in self.tools if t.name == name), None)
 

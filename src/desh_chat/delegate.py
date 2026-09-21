@@ -41,7 +41,7 @@ from desh.tools import DEFAULT_RESULT_CHARS, ToolRegistry
 from desh_chat.coding import spill
 from desh_chat.state import ChatHistory, ChatState, Deadline, InferenceEngine, Settings, StopReason
 from desh_chat.events import TurnStart
-from desh_chat.memory import Memories, Memory
+from desh_chat.memory import Memories
 
 
 DELEGATE_SYSTEM_PROMPT = (
@@ -100,8 +100,13 @@ class Delegate:
     # The cap on one result, the registry's bound made known to the tool (as Workspace.result_chars
     # is): an answer over it is saved whole where the parent can Read it, and says so.
     result_chars: int = DEFAULT_RESULT_CHARS
-    # The memories every subagent starts with, empty: the ones whose tools `tools` registers.
-    memories: tuple[Memory, ...] = ()
+    # The working memory every subagent starts with: the memories whose tools `tools` registers,
+    # empty. A value, so one serves every run.
+    memory: Memories = field(default_factory=Memories)
+    # The texts a run may be built with others of (desh_chat.prompts): the subagent's system
+    # prompt, and the message a capped turn of its is continued with.
+    system_prompt: str = DELEGATE_SYSTEM_PROMPT
+    cap_continue: str = CAP_CONTINUE_MSG
 
     def delegate(self, task: str, context: str = "", gate: str = "", check: str = "", *,
                  settings: Settings | None = None, deadline: Deadline | None = None) -> str:
@@ -123,8 +128,8 @@ class Delegate:
         child_config = child_settings(settings if settings is not None else self.settings)
         # A subagent starts with its memories empty: it has none of the parent's conversation, so
         # it has none of the parent's memory either.
-        memory = Memories.of(*self.memories)
-        system_prompt = memory.system_prompt(DELEGATE_SYSTEM_PROMPT, child_config.max_tool_rounds)
+        memory = self.memory
+        system_prompt = memory.system_prompt(self.system_prompt, child_config.max_tool_rounds)
         if context:
             system_prompt += "\n\nContext from the delegating agent:\n" + context
         if gate:
@@ -140,7 +145,7 @@ class Delegate:
             session_file=session_file,
             tools=self.tools,
             operator=False,                 # nobody to prompt: a finished turn returns the run
-            auto_prompt=CAP_CONTINUE_MSG,   # checkpoint: a capped turn is continued, not returned
+            auto_prompt=self.cap_continue,  # checkpoint: a capped turn is continued, not returned
             memory=memory,
             deadline=deadline,              # the parent's, injected like settings: no child outlives the run
         )

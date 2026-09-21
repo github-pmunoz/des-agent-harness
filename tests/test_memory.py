@@ -275,6 +275,6 @@ class TestSubagentPolicy:
         inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=FakeServer(script=[]), port=PORT)
         tools = build_tools(args, inference, make_state().settings)
         delegate = tools.get("delegate").fn.__self__
-        assert delegate.memories == (PLAN,)
+        assert delegate.memory.names() == ("plan",)
         assert "plan_write" in delegate.tools and "ontology_write" not in delegate.tools
         assert "plan_write" in tools and "ontology_write" in tools

@@ -238,13 +238,14 @@ class TestChildSetup:
         """The child has the memories the delegate was built with and starts them empty: none of
         the parent's conversation, none of its memory. The mechanics prompt names the child's own
         round cap, and the memory's own prompt follows it."""
+        from desh_chat.memory import Memories
         from desh_chat.scratchpad import SCRATCHPAD, SCRATCHPAD_PROMPT, Scratchpad
         monkeypatch.setattr("desh_chat.delegate.Engine", RecordingEngine)
         RecordingEngine.states.clear()
         inference, _ = with_server(make_state, FakeServer())
         tools = SCRATCHPAD.register(ToolRegistry())
         current = replace(SETTINGS, max_tool_rounds=5)
-        Delegate(root=".", inference=inference, settings=SETTINGS, tools=tools, memories=(SCRATCHPAD,)).delegate("task", context="ctx", settings=current)
+        Delegate(root=".", inference=inference, settings=SETTINGS, tools=tools, memory=Memories.of(SCRATCHPAD)).delegate("task", context="ctx", settings=current)
         child, = RecordingEngine.states
         assert pad_of(child) == Scratchpad()
         assert SCRATCHPAD_PROMPT in child.system_prompt

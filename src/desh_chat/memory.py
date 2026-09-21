@@ -83,17 +83,32 @@ OVER_BUDGET_TEXT = ("Not recorded: <{name}> would take {tokens} tokens, over its
 
 
 @dataclass(frozen=True)
+class MemoryFrame:
+    """The texts the harness writes around the memories, as a value: the defaults are the
+    constants above, and a run built with other texts (desh_chat.prompts) carries them here. The
+    templates keep their placeholders: mechanics {max_tool_rounds} {tool_names} {sections},
+    cap_reached {tool_names}, over_budget {name} {tokens} {budget}."""
+    mechanics: str = CONTEXT_MECHANICS_PROMPT
+    block_head: str = BLOCK_HEAD
+    last_round: str = LAST_ROUND_LINE
+    cap_reached: str = CAP_REACHED_LINE
+    fold_near: str = FOLD_NEAR_LINE
+    over_budget: str = OVER_BUDGET_TEXT
+
+
+@dataclass(frozen=True)
 class Memories:
     """The memories a run registered and the value each one holds, in registration order. Lives on
     ChatState; empty means no memory is offered: no block, no mechanics in the system prompt.
     Every write goes through ExecuteToolCalls, which commits the new value on the state; nothing
     mutable survives a step, so a step the engine rolls back leaves the memory untouched."""
     slots: tuple[tuple[Memory, MemoryValue], ...] = ()
+    frame: MemoryFrame = MemoryFrame()
 
     @classmethod
-    def of(cls, *memories: Memory) -> Memories:
+    def of(cls, *memories: Memory, frame: MemoryFrame = MemoryFrame()) -> Memories:
         """Every memory registered and empty: what a run starts with (LoadSession restores on top)."""
-        return cls(tuple((m, m.empty()) for m in memories))
+        return cls(tuple((m, m.empty()) for m in memories), frame)
 
     def __bool__(self) -> bool:
         return bool(self.slots)
@@ -138,7 +153,7 @@ class Memories:
             new = m.from_dict(provided[m.name])
             tokens = estimate_tokens(new.render())
             if budget_tokens is not None and tokens > budget_tokens and tokens > estimate_tokens(old.render()):
-                return self, OVER_BUDGET_TEXT.format(name=m.name, tokens=tokens, budget=budget_tokens)
+                return self, self.frame.over_budget.format(name=m.name, tokens=tokens, budget=budget_tokens)
             out = out.with_value(m.name, new)
         return out, None
 
@@ -169,7 +184,7 @@ class Memories:
         no memory is registered — mechanics the model can do nothing about are noise."""
         if not self.slots:
             return base
-        mechanics = CONTEXT_MECHANICS_PROMPT.format(
+        mechanics = self.frame.mechanics.format(
             max_tool_rounds=max_tool_rounds,
             tool_names=", ".join(self.tool_names()),
             sections=", ".join(f"<{n}>" for n in self.names()))
@@ -187,16 +202,16 @@ class Memories:
         if not self.slots:
             return None
         header = f"Round {round[0]} of {round[1]} in this turn. " if round is not None else ""
-        lines = [f"<memory>{header}{BLOCK_HEAD}"]
+        lines = [f"<memory>{header}{self.frame.block_head}"]
         for m, v in self.slots:
             body = v.render()
             used = f' used="{estimate_tokens(body)}/{budget_tokens} tokens"' if budget_tokens is not None else ""
             lines += [f"<{m.name}{used}>", body or "(empty)", f"</{m.name}>"]
         if round is not None and round[0] == round[1]:
-            lines.append(LAST_ROUND_LINE)
+            lines.append(self.frame.last_round)
         elif round is not None and round[0] > round[1]:
-            lines.append(CAP_REACHED_LINE.format(tool_names=", ".join(self.tool_names())))
+            lines.append(self.frame.cap_reached.format(tool_names=", ".join(self.tool_names())))
         elif fold_near:
-            lines.append(FOLD_NEAR_LINE)
+            lines.append(self.frame.fold_near)
         lines.append("</memory>")
         return {"role": "user", "content": "\n".join(lines)}

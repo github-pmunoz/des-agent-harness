@@ -104,6 +104,15 @@ Do not restate the task — the task message is right before the checkpoint. Do 
 
 Keep: the one thing the assistant was about to do next, as a single concrete action, with the file paths, names and error messages that action depends on exactly as written; which files were written or edited and whether they pass, with test results as reported; what was verified versus what was only assumed. A result shown as expired was cut to fit this transcript: record what the assistant said or did about it, do not guess its content. Drop narration and superseded detail. Stay short — the checkpoint must fit in a small fraction of the context window. Do not mention this instruction."""
 
+# The user message of a summary request must not END with the transcript: a model reading raw
+# tool output up to the last token takes it for the end of a document and stops at once
+# (replayed: 0 of 8 such requests answered at temperature 0, 0.1 or 0.3; 8 of 8 with a closing
+# line). So the transcript is followed by the instruction to write, and an empty answer is
+# asked once more with a firmer one.
+SUMMARY_CLOSE = "\n\nWrite the summary now."
+CHECKPOINT_CLOSE = "\n\nWrite the checkpoint now."
+RETRY_NUDGE = "\n\nAn empty reply is not an answer: write it now."
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -124,6 +133,11 @@ class Settings:
     # rewritten every few rounds in a tight window, so it is kept smaller than a history summary.
     checkpoint_target: float = 0.15
     checkpoint_prompt: str = field(default=CHECKPOINT_PROMPT, repr=False)
+    # what follows the transcript in a summary and in a checkpoint request, and what an empty
+    # answer is asked again with
+    summary_close: str = field(default=SUMMARY_CLOSE, repr=False)
+    checkpoint_close: str = field(default=CHECKPOINT_CLOSE, repr=False)
+    retry_nudge: str = field(default=RETRY_NUDGE, repr=False)
     # The share of the context ONE memory may take (Memories.commit refuses a write past it): the
     # block is re-sent whole with every request, so a memory that grows without bound eats the
     # window its results need.
@@ -146,6 +160,9 @@ class Settings:
             "compaction_prompt": self.compaction_prompt,
             "checkpoint_target": self.checkpoint_target,
             "checkpoint_prompt": self.checkpoint_prompt,
+            "summary_close": self.summary_close,
+            "checkpoint_close": self.checkpoint_close,
+            "retry_nudge": self.retry_nudge,
             "memory_target": self.memory_target,
         }
 
@@ -170,6 +187,9 @@ class Settings:
             compaction_prompt=d.get("compaction_prompt", COMPACTION_PROMPT),
             checkpoint_target=d.get("checkpoint_target", 0.15),
             checkpoint_prompt=d.get("checkpoint_prompt", CHECKPOINT_PROMPT),
+            summary_close=d.get("summary_close", SUMMARY_CLOSE),
+            checkpoint_close=d.get("checkpoint_close", CHECKPOINT_CLOSE),
+            retry_nudge=d.get("retry_nudge", RETRY_NUDGE),
             memory_target=d.get("memory_target", 0.10),
         )
 

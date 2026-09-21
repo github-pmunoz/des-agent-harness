@@ -20,7 +20,7 @@ from desh.llama.wire import Completion, Request, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import estimate_result_tokens, estimate_tokens, turn_tokens
 from desh.tools import Tool
-from desh_chat.state import CHECKPOINT_PREFIX, SALVAGE_STOPS, ChatState, ChatHistory, PendingTurn, Round, ToolResult, StopReason
+from desh_chat.state import CHECKPOINT_CLOSE, CHECKPOINT_PREFIX, RETRY_NUDGE, SALVAGE_STOPS, SUMMARY_CLOSE, ChatState, ChatHistory, PendingTurn, Round, ToolResult, StopReason
 from desh_chat.memory import Memories
 from desh_chat.display import DisplayStats, Error, Info, Warn
 from desh_chat.session import persist
@@ -451,16 +451,6 @@ TRANSCRIPT_LEAD = "Conversation transcript:\n"
 TRANSCRIPT_MARGIN = 64      # tokens kept free in a compaction request for template overhead and estimate error
 
 
-# The user message of a summary request must not END with the transcript: a model reading raw
-# tool output up to the last token takes it for the end of a document and stops at once
-# (replayed: 0 of 8 such requests answered at temperature 0, 0.1 or 0.3; 8 of 8 with a closing
-# line). So the transcript is followed by the instruction to write, and an empty answer is
-# asked once more with a firmer one.
-SUMMARY_CLOSE = "\n\nWrite the summary now."
-CHECKPOINT_CLOSE = "\n\nWrite the checkpoint now."
-RETRY_NUDGE = "\n\nAn empty reply is not an answer: write it now."
-
-
 def complete_summary(state: ChatState, req: Request) -> tuple[list[tuple[Request, Completion]], str, list[Event]]:
     """One summary request, asked a second time with a nudge when the model answers with nothing.
     Returns every attempt (request, completion) for the log, the text, and the notes for the log."""
@@ -471,7 +461,7 @@ def complete_summary(state: ChatState, req: Request) -> tuple[list[tuple[Request
     if not summary:
         notes.append(Warn("The model returned no summary; asking again."))
         last = req.messages[-1]
-        req = replace(req, messages=req.messages[:-1] + [{**last, "content": last["content"] + RETRY_NUDGE}])
+        req = replace(req, messages=req.messages[:-1] + [{**last, "content": last["content"] + state.settings.retry_nudge}])
         completion = state.inference.server.complete(req)
         attempts.append((req, completion))
         summary = completion.content.strip()
@@ -502,7 +492,7 @@ class CompactHistory(Event):
             print(c_out(Palette.WARNING, f"Compaction is tight on room ({gen_budget} tokens computed, context={s.context}) — forcing {s.min_compaction_tokens} and the summary may come out truncated."))
             gen_budget = s.min_compaction_tokens
         req = Request(
-            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"{TRANSCRIPT_LEAD}{transcript}{SUMMARY_CLOSE}" }],
+            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"{TRANSCRIPT_LEAD}{transcript}{s.summary_close}" }],
             model=state.settings.model,
             temperature=0.0,
             max_tokens=gen_budget,
@@ -546,7 +536,7 @@ class CompactPendingTurn(Event):
             print(c_out(Palette.WARNING, f"Checkpoint is tight on room ({gen_budget} tokens computed, context={s.context}) — forcing {s.min_compaction_tokens} and the summary may come out truncated."))
             gen_budget = s.min_compaction_tokens
         req = Request(
-            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"{TRANSCRIPT_LEAD}{transcript}{CHECKPOINT_CLOSE}"}],
+            messages=[{"role": "system", "content": instruction}, {"role": "user", "content": f"{TRANSCRIPT_LEAD}{transcript}{s.checkpoint_close}"}],
             model=s.model,
             temperature=0.0,
             max_tokens=gen_budget,

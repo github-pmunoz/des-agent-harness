@@ -17,5 +17,6 @@
   "read": true, "write": true, "edit": true, "bash": true,
   "memory": "scratchpad", "current_time": false, "delegate": false,
   "port": 8012,
-  "task_timeout": 600
+  "task_timeout": 600,
+  "prompts": {}
 }

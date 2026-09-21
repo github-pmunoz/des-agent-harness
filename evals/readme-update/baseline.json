@@ -22,5 +22,6 @@
   "current_time": false,
   "delegate": true,
   "port": 8012,
-  "task_timeout": 1800
+  "task_timeout": 1800,
+  "prompts": {}
 }
