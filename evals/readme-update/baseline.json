@@ -18,6 +18,7 @@
   "write": false,
   "edit": false,
   "bash": false,
+  "tree": false,
   "memory": "scratchpad",
   "current_time": false,
   "delegate": true,
