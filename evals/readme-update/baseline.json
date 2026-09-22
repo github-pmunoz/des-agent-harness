@@ -4,7 +4,7 @@
   "context": 65536,
   "max_turn_tokens": 65536,
   "max_tool_rounds": 30,
-  "tool_cap": 2.5,
+  "tool_cap": 10.0,
   "checkpoint_target": 0.15,
   "memory_target": 0.10,
   "system_prompt": "You are the orchestrating agent for one project directory. Your role is to coordinate with the operator on the work that needs to be done. You receive the operator's request, disambiguate it, understand it, and delegate the work to subagents.",
