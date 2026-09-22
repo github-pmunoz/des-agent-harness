@@ -642,3 +642,132 @@ class TestLengthStop:
         from desh_chat.cli import task_exit_code
         from desh_chat.state import ChatState
         assert task_exit_code(type("S", (), {"history": ChatHistory().append(Turn("q", "p", stop=StopReason.LENGTH))})()) == 1
+
+
+# ---------------------
+# Loop bounds: continues, the re-read guard across a cap, memory calls and the repeat guard
+# ---------------------
+
+class TestLoopBounds:
+    SETTINGS = Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, auto=True, max_cap_continues=2)
+
+    def capped(self, n: int) -> ChatHistory:
+        h = ChatHistory().append(Turn("task", "", stop=StopReason.CAP))
+        for _ in range(n - 1):
+            h = h.append(Turn("continue", "", stop=StopReason.CAP)).compact("summary")
+        return h
+
+    def test_a_capped_task_is_continued_until_its_continues_are_spent(self, make_state):
+        for n, continued in ((1, True), (2, True), (3, False)):
+            state = make_state(history=self.capped(n), auto_prompt="go on", operator=False, settings=self.SETTINGS)
+            _, events = TurnStart().execute(state)
+            assert (len(events) == 2) == continued, n            # [Info, UserMessage] or nothing (the run returns)
+        assert self.capped(3).trailing_caps() == 3
+
+    def test_the_last_capped_turn_nothing_will_continue_is_salvaged(self, make_state):
+        pending = PendingTurn("continue").add_round(Round("", (call(),), (result(call(), "a finding"),), tokens=10))
+        final = make_state(history=self.capped(2), pending=pending, auto_prompt="go on", operator=False, settings=self.SETTINGS)
+        ended, _ = TurnEnd(assistant="", stop=StopReason.CAP).execute(final)
+        assert ended.history.turns[-1].assistant.startswith("TURN ENDED: cap") and "a finding" in ended.history.turns[-1].assistant
+        again = make_state(history=self.capped(1), pending=pending, auto_prompt="go on", operator=False, settings=self.SETTINGS)
+        ended, _ = TurnEnd(assistant="", stop=StopReason.CAP).execute(again)
+        assert ended.history.turns[-1].assistant == ""             # it will be continued: no salvage
+        with_operator = make_state(history=self.capped(2), pending=pending, operator=True, settings=self.SETTINGS)
+        ended, _ = TurnEnd(assistant="", stop=StopReason.CAP).execute(with_operator)
+        assert ended.history.turns[-1].assistant == ""             # an operator can continue it
+
+    def test_the_reread_guard_counts_through_the_capped_turns_the_task_was_continued_from(self, make_state):
+        guard = TestRereadGuard()
+        reg, seen = guard.registry()
+        rd = guard.rd
+        earlier = Turn("task", "", stop=StopReason.CAP, rounds=(Round("", (rd("a.py", 1),), (result(rd("a.py", 1), "x"),)),
+                                                                   Round("", (rd("a.py", 2),), (result(rd("a.py", 2), "x"),))))
+        history = ChatHistory().append(earlier).compact("summary")
+        state = make_state(history=history, pending=PendingTurn("continue").add_round(Round("", (rd("a.py", 3),))), tools=reg, settings=self.SETTINGS)
+        new_state, _ = ExecuteToolCalls(0).execute(state)
+        assert new_state.pending.rounds[-1].results[0].content.startswith("Not run: Read a.py has already been answered 2 times in this task")
+        assert seen == []
+
+    def test_a_looking_bash_does_not_reset_the_count_and_an_acting_call_does(self, make_state):
+        from desh.tools import ToolRegistry
+        seen = []
+        def read(file_path: str) -> str:
+            seen.append(file_path); return "x"
+        def bash(reason: str, command: str) -> str:
+            return "y"
+        def edit(file_path: str, old_string: str, new_string: str) -> str:
+            return "edited"
+        reg = (ToolRegistry().add(read, name="Read", confirm=False, target="file_path")
+                             .add(bash, name="Bash", identity=("command",), target="command", acts=False)
+                             .add(edit, name="Edit", target="file_path"))
+        rd = lambda n: call(0, name="Read", arguments='{"file_path": "a.py"}', id=f"r{n}")
+        sh = lambda n: call(0, name="Bash", arguments='{"reason": "r", "command": "grep x a.py"}', id=f"b{n}")
+        ed = call(0, name="Edit", arguments='{"file_path": "a.py", "old_string": "a", "new_string": "b"}', id="e")
+        def rounds(*calls):
+            p = PendingTurn("q")
+            for tc in calls:
+                p = p.add_round(Round("", (tc,), (result(tc, "x"),)))
+            return p.add_round(Round("", (rd(9),)))
+        looked = make_state(pending=rounds(rd(1), sh(1), rd(2), sh(2)), tools=reg, settings=self.SETTINGS)
+        assert ExecuteToolCalls(0).execute(looked)[0].pending.rounds[-1].results[0].content.startswith("Not run")
+        acted = make_state(pending=rounds(rd(1), rd(2), ed), tools=reg, settings=self.SETTINGS)
+        assert ExecuteToolCalls(0).execute(acted)[0].pending.rounds[-1].results[0].content == "x"
+
+    def test_repeated_memory_calls_do_not_end_the_turn(self, make_state):
+        from desh.tools import ToolRegistry
+        from desh_chat.memory import Memories
+        from desh_chat.scratchpad import SCRATCHPAD
+        reg = SCRATCHPAD.register(ToolRegistry())
+        w = lambda i: call(0, name="scratchpad_write", arguments='{"key": "k", "kind": "fact", "value": "v"}', id=f"w{i}")
+        p = PendingTurn("q").add_round(Round("", (w(1),), (result(w(1), "overwrote 'k' (fact)"),))).add_round(Round("", (w(2),), (result(w(2), "overwrote 'k' (fact)"),)))
+        state = make_state(pending=p, tools=reg, memory=Memories.of(SCRATCHPAD), settings=self.SETTINGS)
+        _, events = AppendRound(assistant="", tool_calls=(w(3),), tokens=5).execute(state)
+        assert [type(e).__name__ for e in events] == ["ExecuteToolCalls"]
+
+
+# ---------------------
+# One round's results must fit once a checkpoint has folded everything before them
+# ---------------------
+
+class TestRoundBudget:
+    def registry(self, chars: int):
+        from desh.tools import ToolRegistry
+        from desh_chat.scratchpad import SCRATCHPAD
+        ran = []
+        def read(file_path: str) -> str:
+            ran.append(file_path); return "x" * chars
+        reg = ToolRegistry(max_result_chars=chars).add(read, name="Read", confirm=False, target="file_path")
+        return SCRATCHPAD.register(reg), ran
+
+    def run_round(self, make_state, n_reads: int, context: int, chars: int, with_memory_call: bool = False):
+        from desh_chat.memory import Memories
+        from desh_chat.scratchpad import SCRATCHPAD
+        reg, ran = self.registry(chars)
+        calls = [call(i, name="Read", arguments=f'{{"file_path": "f{i}.py"}}', id=f"c{i}") for i in range(n_reads)]
+        if with_memory_call:
+            calls.append(call(n_reads, name="scratchpad_write", arguments='{"key": "k", "kind": "fact", "value": "v"}', id="m"))
+        settings = Settings(model=MODELS[0], temperature=0.3, think=False, context=context, max_turn_tokens=context, auto=True)
+        state = make_state(pending=PendingTurn("q").add_round(Round("", tuple(calls))), tools=reg, memory=Memories.of(SCRATCHPAD), settings=settings)
+        event = ExecuteToolCalls(0)
+        while isinstance(event, ExecuteToolCalls):
+            state, events = event.execute(state)
+            event = next((e for e in events if isinstance(e, (ExecuteToolCalls, NextRound))), None)
+        return state, ran
+
+    def test_calls_run_in_order_while_one_more_result_fits_and_the_rest_are_deferred(self, make_state):
+        state, ran = self.run_round(make_state, n_reads=6, context=16384, chars=6000, with_memory_call=True)
+        results = [r.content for r in state.pending.rounds[-1].results]
+        assert 1 <= len(ran) < 6 and ran == [f"f{i}.py" for i in range(len(ran))]      # a prefix, in order
+        deferred = results[len(ran):6]
+        assert deferred and all(r.startswith("Not run: this round's results already take") for r in deferred)
+        assert "tokens one round may hold" in deferred[0]
+        assert results[-1] == "created 'k' (fact)"                   # the memory call still ran
+        assert state.memory.get("scratchpad").render()
+
+    def test_a_large_window_runs_the_whole_round(self, make_state):
+        _, ran = self.run_round(make_state, n_reads=6, context=131072, chars=6000)
+        assert len(ran) == 6
+
+    def test_the_first_call_always_runs(self, make_state):
+        _, ran = self.run_round(make_state, n_reads=2, context=4096, chars=60000)
+        assert ran == ["f0.py"]

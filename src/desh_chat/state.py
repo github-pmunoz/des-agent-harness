@@ -143,6 +143,11 @@ class Settings:
     # block is re-sent whole with every request, so a memory that grows without bound eats the
     # window its results need.
     memory_target: float = 0.10
+    # How many times in a row a capped turn is continued with the auto prompt before the run ends
+    # on the record instead. Unbounded, a model that re-gathers what each checkpoint folds away
+    # continues forever (seen: a subagent at 16K, 304 rounds over 6 continues, ended by the
+    # repeat guard with nothing to show).
+    max_cap_continues: int = 3
 
     def to_dict(self) -> dict:
         """Plain-JSON form of every field, for the session document (format 4)."""
@@ -165,6 +170,7 @@ class Settings:
             "checkpoint_close": self.checkpoint_close,
             "retry_nudge": self.retry_nudge,
             "memory_target": self.memory_target,
+            "max_cap_continues": self.max_cap_continues,
         }
 
     @classmethod
@@ -192,6 +198,7 @@ class Settings:
             checkpoint_close=d.get("checkpoint_close", CHECKPOINT_CLOSE),
             retry_nudge=d.get("retry_nudge", RETRY_NUDGE),
             memory_target=d.get("memory_target", 0.10),
+            max_cap_continues=d.get("max_cap_continues", 3),
         )
 
 @dataclass(frozen=True)
@@ -272,6 +279,16 @@ class ChatState(State):
         # the user message is prose, the latest results are tool output: different densities
         unpriced = estimate_tokens(p.unpriced_text()) if not p.rounds else estimate_result_tokens(p.unpriced_text())
         return p.priced_tokens() + unpriced
+
+    def round_budget(self) -> int:
+        """What one round's results may take, in tokens, so that the round still fits the window
+        once a checkpoint has folded everything before it: a checkpoint keeps the last round whole,
+        so a round larger than this is an overflow no compaction can cure. The window, less the
+        room a completion needs, the prompt that is re-sent whole (system prompt, tool schemas, the
+        memory block) and the checkpoint's own share."""
+        s = self.settings
+        fixed = estimate_tokens(self.system_prompt) + self.tools_tokens() + self.memory_tokens()
+        return s.context - self.min_gen_tokens() - fixed - int(s.checkpoint_target * s.context)
 
     def memory_budget(self) -> int:
         """What one memory may take of the window, in tokens (Settings.memory_target)."""
@@ -844,6 +861,30 @@ class ChatHistory:
             if t is turn:
                 return self.turns[:i]
         return ()
+
+    def trailing_caps(self) -> int:
+        """How many turns in a row, counting back from the newest and skipping summaries, ended at
+        the round cap: the continues the current task has already had."""
+        n = 0
+        for turn in reversed(self.turns):
+            if turn.summary:
+                continue
+            if turn.stop != StopReason.CAP:
+                break
+            n += 1
+        return n
+
+    def continued_rounds(self) -> tuple[Round, ...]:
+        """The rounds of the capped turns the current task was continued from (trailing_caps),
+        oldest first: the same task's earlier work, which a loop guard must see through a cap."""
+        rounds: list[Round] = []
+        for turn in reversed(self.turns):
+            if turn.summary:
+                continue
+            if turn.stop != StopReason.CAP:
+                break
+            rounds[:0] = list(turn.rounds)
+        return tuple(rounds)
 
     def last_non_summary(self) -> Turn | None:
         """The last turn that is not a summary."""

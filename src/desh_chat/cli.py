@@ -71,7 +71,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
     if args.edit:
         tools = tools.add(ws.edit, name="Edit", preview=edit_preview, fold=fold_edited, target="file_path")
     if args.bash:
-        tools = tools.add(ws.bash, name="Bash", identity=("command",), target="command")
+        tools = tools.add(ws.bash, name="Bash", identity=("command",), target="command", acts=False)
     if args.current_time:
         tools = tools.add(current_time, name="Current time")
     if args.delegate:
@@ -79,7 +79,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         delegate_tools = (delegate_tools.add(ws.read, name="Read", confirm=False, target="file_path")
                           .add(ws.write, name="Write", fold=fold_written, target="file_path")
                           .add(ws.edit, name="Edit", preview=edit_preview, fold=fold_edited, target="file_path")
-                          .add(ws.bash, name="Bash", identity=("command",), target="command"))
+                          .add(ws.bash, name="Bash", identity=("command",), target="command", acts=False))
         # a subagent gets the run's memories that are worth having for one run (Memory.subagent)
         child_memories = tuple(m for m in memories if m.subagent == "fresh")
         for m in child_memories:
@@ -163,6 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-tc",  "--tool-cap",       type=float, default=10.0, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
     ap.add_argument("-ct",  "--checkpoint-target", type=float, default=0.15, help="share of the context a mid-turn checkpoint summary may take")
     ap.add_argument("-mg",  "--memory-target",  type=float, default=0.10, help="share of the context one memory may take; a write past it is refused")
+    ap.add_argument("-mc",  "--max-continues",  type=int, default=3, help="times in a row a capped turn is continued (--cont, and every subagent) before the run ends on its record")
     return ap
 
 
@@ -252,6 +253,7 @@ def settings_of(args: argparse.Namespace, prompts: Prompts) -> Settings:
         auto=args.auto,
         checkpoint_target=args.checkpoint_target,
         memory_target=args.memory_target,
+        max_cap_continues=args.max_continues,
         **prompts.settings(),
     )
 

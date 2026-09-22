@@ -31,7 +31,8 @@
 #     "memory": "scratchpad", "current_time": true, delegate": false
 #   }
 #
-# Each run gets its own workspace under ./runs/run-<timestamp>-<hash6>/workspace.
+# Each run gets its own workspace, outside the repository while it runs and moved to
+# ./runs/run-<timestamp>-<hash6>/workspace when it is done.
 # The run dir ./runs/run-<timestamp>-<hash6> will contain
 # - run_settings.json: the effective chat-des configuration (chat-des --print-config)
 # - run_manifest.json: a copy of the chat-des exit status and wall time
@@ -62,8 +63,13 @@ run_id="run-${timestamp}-${hash6}"
 
 runs_root="$(pwd)/runs"
 run_dir="${runs_root}/${run_id}"
-workspace="${run_dir}/workspace"
-mkdir -p "$workspace"
+# The agent works in a directory outside this repository and is moved into the run folder when
+# it is done. Nested in the repository, its absolute path named the live repo around it, and a
+# Bash `cd` there read the real git log (run 8e7447). GIT_CEILING_DIRECTORIES below keeps git
+# from discovering any repository above it as well.
+live_dir="${EVAL_WORK_ROOT:-${TMPDIR:-/tmp}/desh-eval}/${run_id}"
+workspace="${live_dir}/workspace"
+mkdir -p "$workspace" "$run_dir"
 
 
 # The workspace is the fixture branch, cloned over a real pack transfer: a plain local clone
@@ -141,11 +147,15 @@ stderr_file="${run_dir}/stderr"
 echo "running..."
 start_ns="$(date +%s%N)"
 set +e
-chat-des "${args[@]}" >"$stdout_file" 2>"$stderr_file"
+GIT_CEILING_DIRECTORIES="$live_dir" chat-des "${args[@]}" >"$stdout_file" 2>"$stderr_file"
 status=$?
 set -e
 end_ns="$(date +%s%N)"
 elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
+
+# The workspace joins the rest of the run: the grader reads it at ${run_dir}/workspace.
+mv "$workspace" "${run_dir}/workspace"
+rmdir "$live_dir" 2>/dev/null || true
 
 # Write a small run manifest into the run folder.
 manifest="${run_dir}/run_manifest.json"
@@ -155,6 +165,7 @@ jq -n \
   --arg fixture_sha "$fixture_sha" \
   --argjson status "$status" \
   --argjson elapsed_ms "$elapsed_ms" \
+  --arg workspace "$workspace" \
   --arg started "$(date -d "@$((start_ns / 1000000000))" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)" \
   --arg finished "$(date +%Y-%m-%dT%H:%M:%S%z)" \
   '{
@@ -163,6 +174,7 @@ jq -n \
     fixture_sha: $fixture_sha,
     status: $status,
     elapsed_ms: $elapsed_ms,
+    workspace: $workspace,
     started: $started,
     finished: $finished
   }' > "$manifest"

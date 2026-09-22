@@ -18,7 +18,7 @@ from desh.render import Palette, c_out, rl_prompt
 from desh.llama.stages import Seam, CodeFence, PyHighlight, Terminal, ToolProgress
 from desh.llama.wire import Completion, Request, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
-from desh.llama.tokens import estimate_result_tokens, estimate_tokens, turn_tokens
+from desh.llama.tokens import RESULT_CHARS_PER_TOKEN, estimate_result_tokens, estimate_tokens, turn_tokens
 from desh.tools import Tool
 from desh_chat.state import CHECKPOINT_CLOSE, CHECKPOINT_PREFIX, RETRY_NUDGE, SALVAGE_STOPS, SUMMARY_CLOSE, ChatState, ChatHistory, PendingTurn, Round, ToolResult, StopReason
 from desh_chat.memory import Memories
@@ -72,7 +72,8 @@ class TurnStart(Event):
         if self.message is not None:
             return opened, [UserMessage(self.message)]
         last = state.history.last_non_summary()
-        if last is not None and last.stop == StopReason.CAP and state.auto_prompt is not None:
+        if last is not None and last.stop == StopReason.CAP and state.auto_prompt is not None \
+                and state.history.trailing_caps() <= state.settings.max_cap_continues:
             return opened, [Info("Checkpoint: round cap reached, continuing the task."), UserMessage(state.auto_prompt)]
         # A turn cut at the token limit is continued once, told why: the reply it must write
         # differently is in the history. A second cut in a row is the model not taking the hint,
@@ -272,13 +273,21 @@ class AppendRound(Event):
         # Calls are compared by the registry's identity (Tool.identity), not the wire string: a call
         # that differs only in an argument the tool does not count (Bash's reason) is the same call.
         # OBS: The results comparison relies on every recorded round having one result per call
+        # Memory calls are left out on both sides: rewriting a note, or retrying a write the budget
+        # refused, costs no workspace side effect and is bounded by the round cap — ending the turn
+        # for it threw away every result the turn had (seen: a refused triplet retried twice).
+        def is_memory(tc: ToolCall) -> bool:
+            t = state.tools.get(tc.name)
+            return t is not None and state.memory.owns(t.inject)
         def shape(calls: tuple[ToolCall, ...]) -> tuple[tuple[str, str], ...]:
-            return tuple(sorted(state.tools.identity(tc.name, tc.arguments) for tc in calls))
+            return tuple(sorted(state.tools.identity(tc.name, tc.arguments) for tc in calls if not is_memory(tc)))
+        def contents(r: Round) -> list[str]:
+            return [res.content for tc, res in zip(r.tool_calls, r.results) if not is_memory(tc)]
         has_tail = sum(1 for r in state.pending.since_last_summary() if not r.summary) >= 2
-        if has_tail:
+        if has_tail and shape(self.tool_calls):
             last, before = state.pending.rounds[-1:], state.pending.rounds[-2:-1]
             if last and before and shape(self.tool_calls) == shape(last[0].tool_calls) == shape(before[0].tool_calls) \
-                    and [r.content for r in last[0].results] == [r.content for r in before[0].results]:
+                    and contents(last[0]) == contents(before[0]):
                 names = ", ".join(tc.name for tc in self.tool_calls)
                 return state, [Warn(f"Repeated round: {names} asked for a third time with identical results; ending the turn."),
                             TurnEnd(assistant=f"{self.assistant}\n[stopped: {names} repeated three times with identical results]",
@@ -293,26 +302,36 @@ class AppendRound(Event):
 # (to a checkpoint that dropped file contents). Seen at 4k: two 30-round turns of
 # nothing but the same three reads, which the two-round repeat guard could not see.
 REREAD_LIMIT = 2
-REREAD_TEXT = ("Not run: {call} has already been answered {n} times this turn with nothing written, edited or run since, "
-               "and its result has not changed. Save what you need from it to your working memory, or act on it.")
+
+# A round asks for more than the window can take back: the calls run in order while the next
+# result, at its cap, still fits what one round may hold (ChatState.round_budget), and the rest
+# are answered with this instead. The numbers are the point — they are the one place the model
+# is told what its context can still take, at the moment it asked for more.
+DEFERRED_TEXT = ("Not run: this round's results already take ~{used} of the ~{budget} tokens one round may hold at this "
+                 "context size, and this call could return up to ~{worst} more — the next checkpoint could not make room "
+                 "for them. Record what you need from the results above, then ask for it again in your next reply.")
+REREAD_TEXT = ("Not run: {call} has already been answered {n} times in this task with nothing written or edited since. "
+               "Save what you need from it to your working memory, or act on it.")
 
 
 def rereads(state: ChatState, tc: ToolCall) -> int:
-    """How many times this turn has already answered the same read-only call — same registry
-    identity — since the model last acted. A round with a confirming call (Write, Edit, Bash, a
-    delegate) is where the count stops: what was read before it was acted on. A confirming tool,
-    or an unknown one, is never counted: re-running a test is polling, not a loop."""
+    """How many times the task has already answered the same looking call — same registry
+    identity — since the model last acted. The task is this turn and the capped turns it was
+    continued from (ChatHistory.continued_rounds), checkpoints included: a checkpoint folds what
+    was read, which is exactly when a model reads it again. A round with an acting call (Write,
+    Edit, a delegate: Tool.acting) is where the count stops — what was read before it was acted
+    on. An acting tool, an unknown one or a memory tool is never counted."""
     assert state.pending is not None
     tools = state.tools
     tool = tools.get(tc.name)
-    if tool is None or tool.confirm:
+    if tool is None or tool.acting or state.memory.owns(tool.inject):
         return 0
     key = tools.identity(tc.name, tc.arguments)
     n = 0
-    for round in reversed(state.pending.rounds):
+    for round in reversed(state.history.continued_rounds() + state.pending.rounds):
         if round.summary:
             continue
-        if any((t := tools.get(c.name)) is not None and t.confirm for c in round.tool_calls):
+        if any((t := tools.get(c.name)) is not None and t.acting for c in round.tool_calls):
             break
         n += sum(1 for c, _ in zip(round.tool_calls, round.results) if tools.identity(c.name, c.arguments) == key)
     return n
@@ -334,6 +353,20 @@ class ExecuteToolCalls(Event):
         round = state.pending.rounds[-1]
         tc = round.tool_calls[self.index]
         tool = state.tools.get(tc.name)
+        last = self.index + 1 == len(round.tool_calls)
+        # The round's own results must fit once everything before them is folded (round_budget).
+        # The first call always runs, or a round could make no progress at all; a memory call
+        # always runs, since it is what the note below asks for; after that, a call runs only
+        # while one more result at its cap still fits.
+        if self.index > 0 and not (tool is not None and state.memory.owns(tool.inject)):
+            used = estimate_result_tokens("".join(r.content for r in round.results))
+            worst = int(state.tools.max_result_chars / RESULT_CHARS_PER_TOKEN)
+            budget = state.round_budget()
+            if used + worst > budget:
+                deferred = ToolResult(tc.id, tc.name, DEFERRED_TEXT.format(used=used, budget=budget, worst=worst))
+                return (replace(state, pending=state.pending.add_results(deferred)),
+                        [Warn(f"✗ {tc.name} deferred: the round's results take ~{used} of ~{budget} tokens"),
+                         NextRound() if last else ExecuteToolCalls(self.index + 1)])
         print(describe_call(tc, tool))
         if state.settings.auto:
             answer = Answer("yes")      # auto mode: confirmed tools run without asking
@@ -359,7 +392,6 @@ class ExecuteToolCalls(Event):
                 shown.append(Warn(f"  {len(skipped)} later call(s) not run: {', '.join(r.name for r in skipped)}"))
             return replace(state, pending=state.pending.add_results(denied, *skipped)), shown + [DisplayStats(colour=Palette.TOOL_STATS), NextRound()]
 
-        last = self.index + 1 == len(round.tool_calls)
         if (n := rereads(state, tc)) >= REREAD_LIMIT:
             # answered with the notice instead of the result: the turn goes on, and the model reads
             # why. Two such notices and a third identical round are the repeat guard's business.
@@ -450,7 +482,12 @@ class TurnEnd(Event):
     def execute(self, state: ChatState) -> tuple[ChatState, list[Event]]:
         assert state.pending is not None
         assistant, shown = self.assistant, []
-        if self.stop in SALVAGE_STOPS:
+        # A capped turn is salvaged too when nothing will continue it and no operator can: the
+        # auto prompt is off, or the task has had its continues (Settings.max_cap_continues). Its
+        # record is then all the run, or the delegating agent, will ever get.
+        final_cap = (self.stop == StopReason.CAP and not state.operator
+                     and (state.auto_prompt is None or state.history.trailing_caps() + 1 > state.settings.max_cap_continues))
+        if self.stop in SALVAGE_STOPS or final_cap:
             # The turn ends without an answer: what it got down stands as the answer, below any
             # text the model did produce (a deadline keeps the model's text so far). Bounded like
             # a checkpoint — it is one, written by the harness — so history and a parent's tool

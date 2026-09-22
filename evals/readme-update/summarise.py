@@ -40,6 +40,7 @@ METRICS = (
     ("sub_capped", ("stats", "sub", "capped")),
     ("sub_repeat_stops", ("stats", "sub", "repeat_stops")),
     ("sub_length_stops", ("stats", "sub", "length_stops")),
+    ("calls_deferred", ("stats", "calls_deferred")),
     ("main_length_turns", ("stats", "main", "length_turns")),
     ("sub_salvaged", ("stats", "sub", "salvaged")),
     ("sub_checks_failed", ("stats", "sub", "checks_failed")),
@@ -83,6 +84,8 @@ def counts(result: dict | None, run_manifest: dict | None) -> bool:
     """
     if run_manifest is None or result is None:
         return False
+    if not result.get("leak", {}).get("ok", True):
+        return False        # the agent reached outside its workspace: the score is not the task's
     status = run_manifest.get("status")
     return status == 0 or (status == 1 and result["stats"]["stop"] == "overflow")
 
