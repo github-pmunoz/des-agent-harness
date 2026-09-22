@@ -45,6 +45,26 @@ def spill(root: str, prefix: str, key: str, text: str) -> str:
     return rel
 
 
+# What a file tree of the project leaves out: the directories no brief should point into, and the
+# files no brief needs (logs, session and telemetry records, the harness's own spill).
+TREE_SKIP_DIRS = frozenset(("venv", ".venv", ".git", "__pycache__", ".pytest_cache", ".desh", "sandbox", "node_modules"))
+TREE_SKIP_SUFFIXES = (".log", ".jsonl", ".json", ".bad", ".egg-info", ".pyc")
+
+
+def project_tree(root: str) -> str:
+    """The project's files, one relative path per line, sorted: the map an orchestrating agent
+    names paths from, so it never invents one. Generated at launch, so it cannot go stale."""
+    paths = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in TREE_SKIP_DIRS and not d.endswith(".egg-info"))
+        rel = os.path.relpath(dirpath, root)
+        for f in filenames:
+            if f.endswith(TREE_SKIP_SUFFIXES):
+                continue
+            paths.append(f if rel == "." else os.path.join(rel, f))
+    return "\n".join(sorted(paths))
+
+
 @dataclass(frozen=True)
 class Workspace:
     """One project root. The tool methods below are what the model calls.

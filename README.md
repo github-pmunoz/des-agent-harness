@@ -77,6 +77,7 @@ The most useful options are:
 | `--scratchpad` | off | Same as `--memory scratchpad`. |
 | `--memory-target` | `0.10` | Share of the context one memory may take; a write past it is refused. |
 | `--think` | off | Ask the server to enable reasoning/thinking. |
+| `--tree` | off | Append the workspace's file tree to the system prompt, generated at launch (venv, .git, caches, logs and JSON records left out): the map the model names paths from. |
 | `--read` | off | Offer the `Read` tool. Toolset flags are additive; none of them means no tools. |
 | `--write` | off | Offer the `Write` tool. |
 | `--edit` | off | Offer the `Edit` tool. |

@@ -23,7 +23,7 @@ from desh_chat.display import DisplayBanner
 from desh_chat.state import ChatHistory, Deadline, Settings, InferenceEngine, StopReason
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
-from desh_chat.coding import Workspace, edit_preview, fold_edited, fold_written
+from desh_chat.coding import Workspace, edit_preview, fold_edited, fold_written, project_tree
 from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG, fold_brief
 from desh_chat.memory import Memories, Memory
 from desh_chat.ontology import ONTOLOGY
@@ -141,6 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-mtr", "--max-tool-rounds",type=int, default=10, help="max tool rounds per turn")
     ap.add_argument("-sp",  "--system-prompt",  default="You are a helpful assistant. Reply concisely.", help="default: a plain assistant prompt, or the coding-agent prompt with --coding")
     ap.add_argument("-th",  "--think",          action="store_true", help="enable thinking")
+    ap.add_argument("--tree",      action="store_true", help="append the workspace's file tree to the system prompt, generated at launch: the map the model names paths from")
     ap.add_argument("-cl",  "--completions-log", default="", help="JSONL telemetry file")
     ap.add_argument("-dl",  "--des-log",        default="", help="DES engine log")
     ap.add_argument("-to",  "--timeout",        default=0, type=float)
@@ -164,6 +165,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-mg",  "--memory-target",  type=float, default=0.10, help="share of the context one memory may take; a write past it is refused")
     return ap
 
+
+TREE_HEADER = "\n\nProject file tree (paths relative to the project root; name files by these paths, never by an absolute path):\n"
 
 # what a config file may not carry: the flags that are about the config itself
 NOT_IN_CONFIG = ("config", "prompt", "print_config", "help")
@@ -283,8 +286,12 @@ def run(args: argparse.Namespace, prompts: Prompts):
     # empty here; LoadSession restores what a session saved. The system prompt explains how the
     # context works only when there is a memory to act on it with.
     memory = Memories.of(*prompts.memories(selected_memories(args)), frame=prompts.frame())
-    system_prompt = memory.system_prompt(args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely.",
-                                         args.max_tool_rounds)
+    base_prompt = args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely."
+    if args.tree:
+        # after the role, before the mechanics: a stable prefix (the tree changes only when files
+        # are added), so the cached part of every request stays long
+        base_prompt += TREE_HEADER + project_tree(args.workspace)
+    system_prompt = memory.system_prompt(base_prompt, args.max_tool_rounds)
     # Setup logging
     if args.des_log:
         if(d := os.path.dirname(args.des_log)):

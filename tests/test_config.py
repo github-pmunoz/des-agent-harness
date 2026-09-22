@@ -194,3 +194,30 @@ class TestPrintConfig:
         doc = effective_config(args, prompts)
         again_args, again_prompts = parse_args(["--config", write_config(tmp_path, doc)])
         assert effective_config(again_args, again_prompts) == doc
+
+
+# ---------------------
+# --tree
+# ---------------------
+
+class TestTree:
+    def test_the_tree_lists_the_projects_files_and_skips_what_no_brief_needs(self, tmp_path):
+        from desh_chat.coding import project_tree
+        (tmp_path / "src").mkdir(); (tmp_path / "src" / "a.py").write_text("")
+        (tmp_path / "README.md").write_text("")
+        (tmp_path / "venv").mkdir(); (tmp_path / "venv" / "x.py").write_text("")
+        (tmp_path / ".desh").mkdir(); (tmp_path / ".desh" / "out.txt").write_text("")
+        (tmp_path / "run.log").write_text(""); (tmp_path / "s.json").write_text("")
+        assert project_tree(str(tmp_path)) == "README.md\nsrc/a.py"
+
+    def test_the_flag_appends_the_tree_after_the_role_and_before_the_mechanics(self, tmp_path):
+        from desh_chat.cli import TREE_HEADER
+        (tmp_path / "x.py").write_text("")
+        args, prompts = parse_args(["-w", str(tmp_path), "--tree", "--memory", "scratchpad", "-sp", "ROLE"])
+        # the run's system prompt is assembled in run(); rebuild it the same way here
+        from desh_chat.cli import selected_memories
+        from desh_chat.coding import project_tree
+        memory = Memories.of(*prompts.memories(selected_memories(args)), frame=prompts.frame())
+        text = memory.system_prompt("ROLE" + TREE_HEADER + project_tree(args.workspace), args.max_tool_rounds)
+        assert text.startswith("ROLE" + TREE_HEADER + "x.py") and text.index("x.py") < text.index("How your context works")
+        assert args.tree is True and parse_args(["-w", str(tmp_path)])[0].tree is False
