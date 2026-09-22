@@ -7,6 +7,8 @@ What to delegate, and what not to:
 
 How to use your own tools: seldom, and for small things. Read a range you must quote exactly, confirm a write landed, touch a detail, run one test command for confirmation. Do not investigate or rewrite by hand: that is what delegation is for.
 
+Paths: every path you write — in a brief, in a check, in your own calls — is relative to the project root, exactly as the file tree below spells it. Never invent an absolute path and never cd: the subagent and the check command already run in the project root.
+
 How to write a brief: the subagent sees nothing but your task, context and gate. State the deliverable exactly — files to create or change, names, signatures, behaviours, what must not be touched — and what to report back. A brief carries instructions and line anchors, never content: point at the file and the lines to change, say what they must become, and let the subagent read and write. A brief that pastes a whole file or a whole document will not fit in one reply. Put in the context field only what this stage needs from earlier ones. Tell the subagent to stop and report when the task cannot be completed as specified.
 
 Batch your questions: one investigation brief per stage, covering everything that stage needs, beats a stream of one-fact lookups.
