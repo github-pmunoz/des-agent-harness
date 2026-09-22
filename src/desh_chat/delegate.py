@@ -56,6 +56,13 @@ CAP_CONTINUE_MSG = ("Checkpoint: the tool round cap was reached. Any memory call
                     "If the task is not finished, continue from here and ask again for any call you still need. "
                     "If it is finished, reply with your final answer.")
 
+# The message a turn cut at the token limit is continued with (ChatState.length_prompt): the note
+# the turn ends with says what it was writing.
+LENGTH_CONTINUE_MSG = ("Your last reply was cut at the token limit before it finished; its closing note says what it was "
+                       "writing. A reply must fit in one completion: a tool call whose argument carries a whole file or a "
+                       "long document does not — give instructions and line anchors instead of content, or split the work. "
+                       "Continue from here: ask again for what you still need, or reply with your final answer.")
+
 BRIEF_HEAD_CHARS = 400
 
 
@@ -107,6 +114,7 @@ class Delegate:
     # prompt, and the message a capped turn of its is continued with.
     system_prompt: str = DELEGATE_SYSTEM_PROMPT
     cap_continue: str = CAP_CONTINUE_MSG
+    length_continue: str = LENGTH_CONTINUE_MSG
 
     def delegate(self, task: str, context: str = "", gate: str = "", check: str = "", *,
                  settings: Settings | None = None, deadline: Deadline | None = None) -> str:
@@ -146,6 +154,7 @@ class Delegate:
             tools=self.tools,
             operator=False,                 # nobody to prompt: a finished turn returns the run
             auto_prompt=self.cap_continue,  # checkpoint: a capped turn is continued, not returned
+            length_prompt=self.length_continue,
             memory=memory,
             deadline=deadline,              # the parent's, injected like settings: no child outlives the run
         )
@@ -209,6 +218,7 @@ def answer(state: ChatState) -> str:
                            the model's text so far is the answer
       DEADLINE             the run's wall-clock budget ran out; the model's text so far is the answer
       REPEAT               the repeated-round guard ended the turn
+      LENGTH               the reply hit the token limit twice running; the text so far and the record are the answer
       ANSWER               the answer, verbatim ("(no answer)" when the model said nothing)
     Every case must come back as text the parent can act on — it cannot see the child's history.
     A turn that ended by overflow, deadline, error or repeat carries what it got down as its answer
@@ -229,6 +239,7 @@ def answer(state: ChatState) -> str:
         StopReason.ERROR: "[Subagent hit an error]",
         StopReason.CAP: "[Subagent hit the tool round cap]",
         StopReason.REPEAT: "[Subagent ran into a repeat loop]",
+        StopReason.LENGTH: "[Subagent's reply was cut at the token limit]",
     }
     if turn.stop in notes:
         return f"{child_msg}\n{notes[turn.stop]}"

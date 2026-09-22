@@ -380,6 +380,8 @@ def session_stats(session: dict | None) -> dict:
         "turns": len(turns),
         "rounds": sum(len(t.get("rounds", [])) for t in turns),
         "capped_turns": sum(1 for t in turns if t.get("stop") == "cap"),
+        # replies cut at the token limit: the turn ended on its record and, with the length prompt, was continued once
+        "length_turns": sum(1 for t in turns if t.get("stop") == "length"),
         "summary_turns": len(turns) - len(real),
         # results the cap cut: the registry's blind cut, Read's line cut, Bash's spill
         "cut_results": sum(1 for c in results if any(m in c for m in CUT_MARKERS)),
@@ -499,6 +501,7 @@ def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifes
         "errors": sum(1 for d in delegations if d["stop"] == "error"),
         "capped": sum(1 for d in delegations if d["stop"] == "cap"),
         "repeat_stops": sum(1 for d in delegations if d["stop"] == "repeat"),
+        "length_stops": sum(1 for d in delegations if d["stop"] == "length"),
         "salvaged": total("salvaged_turns"),
         "answered": sum(1 for d in delegations if d["final_answer"]),
         "checks_failed": sum(1 for d in delegations if d["check_exit"] not in (None, 0)),
@@ -567,7 +570,7 @@ def summary(r: dict) -> str:
         f" other files {d['other_files_touched']} committed={d['committed']}   leak_ok={r['leak']['ok']}",
         f"  run: stop={s['stop']!r} final answer: {s['final_answer']}  exit {s['exit_status']}  wall {s['wall_ms']} ms"
         f"  tokens prompt {s['prompt_tokens']} (cached {s['prompt_tokens_cached']}) completion {s['completion_tokens']}",
-        f"  main: {m['turns']} turns ({m['capped_turns']} capped, {m['summary_turns']} summaries) {m['rounds']} rounds,"
+        f"  main: {m['turns']} turns ({m['capped_turns']} capped, {m['length_turns']} length-cut, {m['summary_turns']} summaries) {m['rounds']} rounds,"
         f" peak {m['prompt_tokens_peak']}, {m['compactions']} compactions, {m['checkpoints']} checkpoints,"
         f" {m['salvaged_turns']} salvaged, tools {m['tool_mix']}   not run: {m['calls_not_run']}",
         f"  main scratchpad: writes {m['scratchpad_kinds']} (before first fold: {m['scratchpad_writes_before_first_fold']}),"
@@ -578,7 +581,7 @@ def summary(r: dict) -> str:
         "  orchestration: {delegations} delegations ({work} work, {transport} transport, {verify} verify, {repeated_briefs} repeated, "
         "{with_check} with a check); main {main_rounds} rounds = {main_delegate_rounds} delegate, {main_spill_reads} spill reads, "
         "{main_memory_only_rounds} memory-only".format(**s["orchestration"]),
-        f"  subagents: {sub['count']} runs, {sub['answered']} answered, {sub['overflows']} overflow, {sub['capped']} cap, {sub['repeat_stops']} repeat-stop,"
+        f"  subagents: {sub['count']} runs, {sub['answered']} answered, {sub['overflows']} overflow, {sub['capped']} cap, {sub['repeat_stops']} repeat-stop, {sub['length_stops']} length,"
         f" {sub['deadlines']} deadline, {sub['errors']} error, {sub['salvaged']} salvaged, {sub['checks_failed']} checks failed,"
         f" peak {sub['prompt_tokens_peak']}",
         f"  {'#':>3} {'stop':<9}{'rnds':>5}{'peak':>7}{'cmp':>4}{'ckp':>4}{'slv':>4}{'cut':>4}{'rep':>4}{'rrd':>4}{'pad':>4}{'chk':>5}{'ans':>7}{'lost':>6}{'s':>6}  brief",

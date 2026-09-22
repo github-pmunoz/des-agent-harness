@@ -74,6 +74,13 @@ class TurnStart(Event):
         last = state.history.last_non_summary()
         if last is not None and last.stop == StopReason.CAP and state.auto_prompt is not None:
             return opened, [Info("Checkpoint: round cap reached, continuing the task."), UserMessage(state.auto_prompt)]
+        # A turn cut at the token limit is continued once, told why: the reply it must write
+        # differently is in the history. A second cut in a row is the model not taking the hint,
+        # and the run ends on the record rather than spend a third completion.
+        if last is not None and last.stop == StopReason.LENGTH and state.length_prompt is not None:
+            previous = [t for t in state.history.before(last) if not t.summary]
+            if not previous or previous[-1].stop != StopReason.LENGTH:
+                return opened, [Info("Reply cut at the token limit, continuing the task."), UserMessage(state.length_prompt)]
         if state.operator:
             return opened, [DisplayStats(), PromptUser()]
         return state, []
@@ -205,6 +212,16 @@ class StreamCompletion(Event):
         tokens = turn_tokens(completion.usage, last_input, completion.content, completion.reasoning, self.prior_tokens)
         if cancelled:
             new_events.append(TurnEnd(assistant=completion.content, tokens=tokens, stop=StopReason.CANCELLED))
+        elif completion.finish_reason == "length":
+            # The reply hit max_tokens: whatever call it was writing is unclosed and never ran, and
+            # the text is not an answer either. The turn ends on its record, with a note the model
+            # reads back — what it was writing, and how much — so the length prompt can continue it
+            # with the cause in view (seen: a 26K-token delegate brief carrying a whole README).
+            names = ", ".join(tc.name for tc in completion.tool_calls) or "no tool"
+            generated = (completion.usage or {}).get("completion_tokens") or self.request.max_tokens
+            new_events.append(Warn(f"Reply cut at the token limit ({generated} tokens) while calling {names}; the call did not run."))
+            note = f"[cut at the token limit after {generated} tokens while writing a call to {names}]"
+            new_events.append(TurnEnd(assistant=f"{completion.content.rstrip()}\n{note}".strip(), tokens=tokens, stop=StopReason.LENGTH))
         elif completion.finish_reason == "tool_calls" and completion.tool_calls:
             new_events.append(AppendRound(assistant=completion.content, tool_calls=tuple(completion.tool_calls), tokens=tokens))
         else:

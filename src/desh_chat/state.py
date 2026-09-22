@@ -21,6 +21,7 @@ class StopReason(StrEnum):
     DEADLINE = "deadline"       # the run's wall-clock budget ran out; the model's text so far is the answer, and unlike CAP the turn is never continued
     ERROR = "error"             # a mid-turn exception
     REPEAT = "repeat"           # the same calls asked a third time with identical results
+    LENGTH = "length"           # the completion hit its token limit before it finished (a tool call left unclosed, say); the text so far and a note are the answer, and the length prompt may continue the turn once
     CANCELLED = "cancelled"     # the operator pressed ESC or cancelled at a confirmation prompt
     INTERRUPT = "interrupt"     # Ctrl+C in auto mode
     SETTING = "setting"         # not a conversation turn: a settings change made by a /command
@@ -233,6 +234,10 @@ class ChatState(State):
     # with before either — None means a capped turn is never continued automatically.
     operator: bool = True
     auto_prompt: str | None = None
+    # The message a turn cut at the token limit (StopReason.LENGTH) is continued with, once: the
+    # model wrote past what a reply may hold — a call carrying a whole file, most often — and is
+    # told so. None means such a turn is never continued automatically. Two in a row end the run.
+    length_prompt: str | None = None
     # The model's working memory: the memories the run registered and the value each holds; empty
     # when none is offered. Every write goes through ExecuteToolCalls, which commits the new value
     # here; a memory tool only sees a dict built from its slot for the one call. Rendered last in
@@ -379,9 +384,10 @@ class ToolResult:
 # purpose: the stubbed prefix of a request must not change from one round to the next, or the server re-prefills it.
 EXPIRED_RESULT = "[expired: this result is no longer in context]"
 # The stops a turn can end by without an answer, where the record is the answer (PendingTurn.salvage):
-# the window overflowed, the run's deadline passed, an error cut the turn, a repeated round. A capped turn is not one —
+# the window overflowed, the run's deadline passed, an error cut the turn, a repeated round, a
+# completion cut at its token limit. A capped turn is not one —
 # the cap message continues it — and an interrupt is the operator's, who wants no answer.
-SALVAGE_STOPS = frozenset((StopReason.OVERFLOW, StopReason.DEADLINE, StopReason.ERROR, StopReason.REPEAT))
+SALVAGE_STOPS = frozenset((StopReason.OVERFLOW, StopReason.DEADLINE, StopReason.ERROR, StopReason.REPEAT, StopReason.LENGTH))
 # The stops that keep a turn out of the conversation (Turn.visible): it is on the record and in the
 # session file, but not in the view, the token totals or the compaction transcript.
 HIDDEN_STOPS = frozenset((StopReason.CANCELLED, StopReason.INTERRUPT, StopReason.ERROR, StopReason.OVERFLOW, StopReason.REPEAT))
@@ -830,6 +836,14 @@ class ChatHistory:
             else:
                 sections.append(Section((t.transcript(rounds=False),)))
         return fit_transcript(sections, budget_tokens, unit="turns")
+
+    def before(self, turn: Turn) -> tuple[Turn, ...]:
+        """The turns that precede `turn` (by identity), for a policy that asks what the turn before
+        the last one did. () when the turn is not in the history."""
+        for i, t in enumerate(self.turns):
+            if t is turn:
+                return self.turns[:i]
+        return ()
 
     def last_non_summary(self) -> Turn | None:
         """The last turn that is not a summary."""

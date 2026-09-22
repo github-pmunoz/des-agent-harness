@@ -590,3 +590,55 @@ class TestRereadGuard:
         state = make_state(pending=pending, tools=reg, settings=Settings(model=MODELS[0], temperature=0.3, think=False, context=16384, max_turn_tokens=8192, auto=True))
         new_state, _ = ExecuteToolCalls(0).execute(state)
         assert seen == [] and new_state.pending.rounds[-1].results[0].content.startswith("Not run: Read a.py")
+
+
+# ---------------------
+# A reply cut at the token limit
+# ---------------------
+
+class TestLengthStop:
+    """finish_reason "length": the reply hit max_tokens, so whatever call it was writing is unclosed
+    and never ran (seen: a 26K-token delegate brief carrying a whole README). The turn ends on its
+    record with a note saying what was being written, and the length prompt continues it once."""
+    def cut(self, make_state, **overrides):
+        server = FakeServer(script=[{"content": "Now I'll write the README.", "finish_reason": "length",
+                                     "tool_calls": [{"name": "delegate", "arguments": '{"task": "write README.md with'}],
+                                     "usage": {"completion_tokens": 26214, "prompt_tokens": 100}}])
+        state = with_server(make_state, server, pending=PendingTurn("q"), **overrides)
+        req = Request(messages=[{"role": "user", "content": "q"}], model=MODELS[0], temperature=0.3, max_tokens=26214, think=False, stream=True)
+        _, events = StreamCompletion(request=req).execute(state)
+        end = next(e for e in events if isinstance(e, TurnEnd))
+        return state, events, end
+
+    def test_the_turn_ends_by_length_with_a_note_naming_the_call_and_the_size(self, make_state, no_esc_watcher):
+        state, events, end = self.cut(make_state)
+        assert end.stop == StopReason.LENGTH and not any(isinstance(e, AppendRound) for e in events)
+        assert end.assistant == "Now I'll write the README.\n[cut at the token limit after 26214 tokens while writing a call to delegate]"
+        assert any(isinstance(e, Warn) and "26214 tokens" in e.text and "delegate" in e.text for e in events)
+        ended, _ = end.execute(state)
+        turn = ended.history.turns[-1]
+        assert turn.stop == StopReason.LENGTH and turn.visible
+        assert turn.assistant.startswith("Now I'll write the README.") and turn.assistant.endswith("TURN ENDED: length")
+        assert "while writing a call to delegate" in turn.assistant     # the model reads the note back, then the record
+
+    def test_the_length_prompt_continues_the_turn_once(self, make_state):
+        cut = Turn("q", "partial", stop=StopReason.LENGTH)
+        state = make_state(history=ChatHistory().append(cut), length_prompt="Your reply was cut.", operator=False)
+        opened, events = TurnStart().execute(state)
+        assert opened.pending is not None and [type(e).__name__ for e in events] == ["Info", "UserMessage"]
+        assert events[1].message == "Your reply was cut."
+        twice = make_state(history=ChatHistory().append(cut).append(Turn("Your reply was cut.", "partial again", stop=StopReason.LENGTH)),
+                           length_prompt="Your reply was cut.", operator=False)
+        assert TurnStart().execute(twice) == (twice, [])         # a run without an operator returns
+        answered_between = make_state(history=ChatHistory().append(cut).append(Turn("c", "a", stop=StopReason.ANSWER))
+                                      .append(Turn("q2", "partial", stop=StopReason.LENGTH)), length_prompt="Your reply was cut.", operator=False)
+        assert len(TurnStart().execute(answered_between)[1]) == 2     # not in a row: continued
+
+    def test_without_a_length_prompt_the_turn_is_not_continued(self, make_state):
+        state = make_state(history=ChatHistory().append(Turn("q", "partial", stop=StopReason.LENGTH)), operator=False)
+        assert TurnStart().execute(state) == (state, [])
+
+    def test_a_length_stop_is_a_failed_task_exit(self):
+        from desh_chat.cli import task_exit_code
+        from desh_chat.state import ChatState
+        assert task_exit_code(type("S", (), {"history": ChatHistory().append(Turn("q", "p", stop=StopReason.LENGTH))})()) == 1

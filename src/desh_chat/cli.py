@@ -88,7 +88,8 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         delegate = Delegate(root=ws.root, inference=inference, settings=settings, tools=delegate_tools,
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug,
                             result_chars=max_result_chars, memory=Memories.of(*child_memories, frame=prompts.frame()),
-                            system_prompt=prompts.get("delegate.system"), cap_continue=prompts.get("cap_continue"))
+                            system_prompt=prompts.get("delegate.system"), cap_continue=prompts.get("cap_continue"),
+                            length_continue=prompts.get("length_continue"))
         # the parent's CURRENT settings travel with every call; the child derives its own from them
         tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief, target="task")
     # the working memory itself lives on ChatState; its tools only get a dict for the call
@@ -316,6 +317,7 @@ def run(args: argparse.Namespace, prompts: Prompts):
         tools=tools,
         operator=True,
         auto_prompt=prompts.get("cap_continue") if args.cont else None,
+        length_prompt=prompts.get("length_continue") if args.cont else None,
         memory=memory,
         # the clock starts here, before the session loads and the router loads the model: both are run time
         deadline=Deadline.in_seconds(args.task_timeout) if args.task and args.task_timeout > 0 else None,
