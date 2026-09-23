@@ -26,7 +26,7 @@ def read_json(path: Path) -> dict | None:
 def row(summary: dict) -> dict:
     """The columns of one sweep in the comparison table, from its summary.json.
 
-    `summary["metrics"]` maps each metric name (held_out_score, wall_ms, main_prompt_peak,
+    `summary["metrics"]` maps each metric name (score, held_out_score, wall_ms, main_prompt_peak,
     sub_prompt_peak, delegations, ...) to {n, mean, min, max, stdev}; `summary["stop"]` tallies
     stop reasons over all runs; `summary["counted"]` / `summary["excluded"]` say how many runs
     entered the aggregates. Column order here is column order in the table.
@@ -48,6 +48,8 @@ def row(summary: dict) -> dict:
         return f"{mean:.2f}±{stdev * scale:.2f}"
 
     return {
+        # score is the fact score zeroed on a damaged README; held_out_score is the facts alone
+        "score": spread("score"),
         "held_out_score": spread("held_out_score"),
         "wall_s": spread("wall_ms", scale=0.001),
         "scored": f"{counted}/{total}",

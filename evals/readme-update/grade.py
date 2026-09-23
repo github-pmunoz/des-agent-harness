@@ -18,6 +18,8 @@ salvaged, where compactions and checkpoints fall, and what the scratchpad was us
 stats are split per agent, and the summary prints one line per delegation.
 
 Checks:
+    score      the held-out fact score, zeroed when the damage check fails: facts added to a README
+               that lost sections, shrank or came with stray files are not the task done
     held_out   the fact checklist (facts.py, never copied into the workspace) against README.md
     damage     README.md changed, kept its headings and its length; nothing else touched; not committed
     leak       no path-carrying tool call reaches outside the workspace or names the answer commit
@@ -145,6 +147,12 @@ def check_damage(workspace: str, fixture_sha: str | None) -> dict:
         "committed": bool(fixture_sha) and git(workspace, "rev-parse", "HEAD").strip() != fixture_sha,
         "ok": now != base and lines >= 0.8 * base_lines and not lost and not others,
     }
+
+
+def score_of(held_out: dict, damage: dict) -> float:
+    """The run's score: the fact score of an undamaged README, 0 otherwise. The fact score alone
+    rewards a rewrite that adds the new facts and drops sections a reader relied on."""
+    return held_out["score"] if damage["ok"] else 0.0
 
 
 def check_leak(workspace: str, completions: list[dict], live: str | None = None) -> dict:
@@ -552,13 +560,16 @@ def grade(run_dir: str) -> dict:
     readme_path = os.path.join(workspace, "README.md")
     readme = open(readme_path, encoding="utf-8").read() if os.path.exists(readme_path) else ""
 
+    held_out = check_facts(readme)
+    damage = check_damage(workspace, (manifest or {}).get("fixture_sha"))
     result = {
         "run_id": os.path.basename(run_dir),
         "settings": read_json(os.path.join(run_dir, "run_settings.json")),
         # the frozen code the run executed (harness_snapshot.sh), None for runs launched before it
         "harness": (manifest or {}).get("harness"),
-        "held_out": check_facts(readme),
-        "damage": check_damage(workspace, (manifest or {}).get("fixture_sha")),
+        "score": score_of(held_out, damage),
+        "held_out": held_out,
+        "damage": damage,
         "leak": check_leak(workspace, completions, (manifest or {}).get("workspace")),
         "stats": stats_of(run_dir, completions, des_log, manifest, session),
     }
@@ -573,7 +584,7 @@ def summary(r: dict) -> str:
     groups = "  ".join(f"{name} {g['passed']}/{g['total']}" for name, g in h["groups"].items())
     lines = [
         f"{r['run_id']}  model={s['model']}  context={(r['settings'] or {}).get('context')}",
-        f"  facts {h['passed']}/{h['total']} ({groups})",
+        f"  score {r['score']:.2f}{'' if d['ok'] else ' (damaged)' if d['changed'] else ' (unchanged)'}  facts {h['passed']}/{h['total']} ({groups})",
         f"  readme: changed={d['changed']} lines {d['base_lines']}->{d['lines']} headings lost {len(d['headings_lost'])}"
         f" other files {d['other_files_touched']} committed={d['committed']}   leak_ok={r['leak']['ok']}",
         f"  run: stop={s['stop']!r} final answer: {s['final_answer']}  exit {s['exit_status']}  wall {s['wall_ms']} ms"

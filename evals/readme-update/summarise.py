@@ -22,6 +22,8 @@ RUNS = HERE / "runs"
 
 # Metrics aggregated per run: (name, path into result.json).
 METRICS = (
+    # the fact score zeroed on a damaged README; held_out_score is the fact score alone
+    ("score", ("score",)),
     ("held_out_score", ("held_out", "score")),
     ("wall_ms", ("stats", "wall_ms")),
     ("prompt_tokens", ("stats", "prompt_tokens")),
