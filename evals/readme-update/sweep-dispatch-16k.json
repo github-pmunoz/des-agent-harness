@@ -1,0 +1,45 @@
+{
+  "baseline": "baseline.json",
+  "sweeps": [
+    {
+      "name": "orchestrator-v3-16k",
+      "reps": 8,
+      "override": {
+        "context": 16384,
+        "max_turn_tokens": 16384,
+        "write": true,
+        "edit": true,
+        "bash": true,
+        "tree": true,
+        "memory": "scratchpad",
+        "system_prompt": "@/home/pmunoz/llm/apps/des-agent-harness/evals/readme-update/prompts/orchestrator.system.v3.txt",
+        "prompts": {
+          "delegate.system": "@/home/pmunoz/llm/apps/des-agent-harness/evals/readme-update/prompts/orchestrator.delegate.system.txt",
+          "tool.delegate.description": "@/home/pmunoz/llm/apps/des-agent-harness/evals/readme-update/prompts/orchestrator.delegate.description.txt",
+          "tool.delegate.param.task": "What the subagent must do and what it must report back, complete and specific: files by path and line, names, behaviours, what must not be touched. Instructions and anchors, never the content of a file.",
+          "tool.delegate.param.check": "A shell command the harness runs after the subagent finishes, with the project root as its working directory: use paths relative to the root, never cd and never an absolute path. Its exit code and last output lines are appended to the answer you receive. Put every verification here — a test run, a grep — instead of delegating it or reading the result yourself."
+        }
+      }
+    },
+    {
+      "name": "orchestrator-v4-16k",
+      "reps": 8,
+      "override": {
+        "context": 16384,
+        "max_turn_tokens": 16384,
+        "write": true,
+        "edit": true,
+        "bash": true,
+        "tree": true,
+        "memory": "scratchpad",
+        "system_prompt": "@/home/pmunoz/llm/apps/des-agent-harness/evals/readme-update/prompts/orchestrator.system.v4.txt",
+        "prompts": {
+          "delegate.system": "@/home/pmunoz/llm/apps/des-agent-harness/evals/readme-update/prompts/orchestrator.delegate.system.txt",
+          "tool.delegate.description": "@/home/pmunoz/llm/apps/des-agent-harness/evals/readme-update/prompts/orchestrator.delegate.description.txt",
+          "tool.delegate.param.task": "What the subagent must do and what it must report back, complete and specific: files by path and line, names, behaviours, what must not be touched. Instructions and anchors, never the content of a file.",
+          "tool.delegate.param.check": "A shell command the harness runs after the subagent finishes, with the project root as its working directory: use paths relative to the root, never cd and never an absolute path. Its exit code and last output lines are appended to the answer you receive. Put every verification here — a test run, a grep — instead of delegating it or reading the result yourself."
+        }
+      }
+    }
+  ]
+}
