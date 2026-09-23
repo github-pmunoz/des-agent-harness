@@ -555,6 +555,8 @@ def grade(run_dir: str) -> dict:
     result = {
         "run_id": os.path.basename(run_dir),
         "settings": read_json(os.path.join(run_dir, "run_settings.json")),
+        # the frozen code the run executed (harness_snapshot.sh), None for runs launched before it
+        "harness": (manifest or {}).get("harness"),
         "held_out": check_facts(readme),
         "damage": check_damage(workspace, (manifest or {}).get("fixture_sha")),
         "leak": check_leak(workspace, completions, (manifest or {}).get("workspace")),

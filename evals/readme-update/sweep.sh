@@ -80,6 +80,14 @@ if [[ ! -f "$spec" ]]; then
 fi
 stamp="$(date +%Y%m%d-%H%M%S)"
 
+# One frozen copy of the harness for the whole set (../harness_snapshot.sh): every run executes
+# it, whatever happens to src/ while the sweep runs. run_eval.sh reads it from DESH_HARNESS.
+freeze_harness() {
+  "${here}/../harness_snapshot.sh" "$1/harness"
+  export DESH_HARNESS="$(cd "$1/harness" && pwd)"
+  echo "harness: $(jq -r '.commit[:7] + (if .dirty then "+dirty" else "" end)' "$1/harness/harness.json") frozen at $1/harness"
+}
+
 # --- single settings file, repeated ------------------------------------------
 if ! jq -e 'has("sweeps")' "$spec" >/dev/null; then
   [[ $# -ge 2 && $# -le 3 ]] || usage
@@ -92,6 +100,7 @@ if ! jq -e 'has("sweeps")' "$spec" >/dev/null; then
   sweep_dir="sweeps/${name}-${stamp}"
   mkdir -p "$sweep_dir"
   cp "$spec" "${sweep_dir}/settings.json"
+  freeze_harness "$sweep_dir"
   run_sweep "${sweep_dir}/settings.json" "$repeats" "$name" "$sweep_dir"
   exit 0
 fi
@@ -122,6 +131,7 @@ set_name="$(basename "$spec" .json)"
 set_dir="sweeps/${set_name}-${stamp}"
 mkdir -p "$set_dir"
 cp "$spec" "${set_dir}/sweep.json"
+freeze_harness "$set_dir"
 
 sweep_dirs=()
 count="$(jq '.sweeps | length' "$spec")"

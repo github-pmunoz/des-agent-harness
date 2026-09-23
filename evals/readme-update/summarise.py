@@ -117,8 +117,13 @@ def summarise(sweep_dir: Path) -> dict:
         run_dir = RUNS / run_id
         result = read_json(run_dir / "result.json")
         run_manifest = read_json(run_dir / "run_manifest.json")
+        harness = (run_manifest or {}).get("harness") or {}
         row = {
             "run_id": run_id,
+            # which frozen code the run executed: the commit, "+dirty" with uncommitted changes,
+            # and the content hash that tells two dirty snapshots apart; None before snapshots
+            "harness": (f"{harness['commit'][:7]}{'+dirty' if harness.get('dirty') else ''} {harness['content_sha256'][:8]}"
+                        if harness else None),
             "exit_status": run_manifest.get("status") if run_manifest else None,
             "stop": dig(result or {}, ("stats", "stop")),
             "final_answer": dig(result or {}, ("stats", "final_answer")),
@@ -142,6 +147,7 @@ def summarise(sweep_dir: Path) -> dict:
         "stop": tally([r["stop"] for r in rows + excluded]),
         "exit_status": tally([r["exit_status"] for r in rows + excluded]),
         "final_answer": tally([r["final_answer"] for r in rows + excluded]),
+        "harness": tally([r["harness"] for r in rows + excluded]),
         "metrics": metrics,
         "runs": rows,
     }
@@ -150,6 +156,8 @@ def summarise(sweep_dir: Path) -> dict:
 def print_table(summary: dict) -> None:
     print(f"{summary['name']}  ({summary['counted']} counted, {len(summary['excluded'])} excluded of {summary['repeats']})")
     print(f"  stop: {summary['stop']}   exit: {summary['exit_status']}   final answer: {summary['final_answer']}")
+    harness = summary.get("harness", {})
+    print(f"  harness: {harness}" + ("   WARNING: runs executed different code" if len(harness) > 1 else ""))
     print(f"  {'metric':<20}{'n':>3}{'mean':>12}{'min':>10}{'max':>10}{'stdev':>10}")
     for name, agg in summary["metrics"].items():
         if agg["n"] == 0:

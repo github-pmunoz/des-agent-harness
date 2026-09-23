@@ -64,6 +64,20 @@ live_dir="${EVAL_WORK_ROOT:-${TMPDIR:-/tmp}/desh-eval}/${run_id}"
 workspace="${live_dir}/workspace"
 mkdir -p "$workspace" "$run_dir"
 
+# The harness code the run executes, frozen (../harness_snapshot.sh): the venv installs it in
+# editable mode, so a plain `chat-des` would run whatever src/ holds when each run starts, and a
+# sweep that outlives an edit would run its later arms on other code. A sweep passes its one
+# snapshot in DESH_HARNESS so every run of the set executes the same copy; a run launched on its
+# own makes its own. The manifest records which (harness.json: commit, dirty flag, content hash).
+evals_root="$(cd "$(dirname "$0")/.." && pwd)"
+harness="${DESH_HARNESS:-}"
+if [[ -z "$harness" ]]; then
+  harness="${run_dir}/harness"
+  "${evals_root}/harness_snapshot.sh" "$harness"
+fi
+python="${DESH_PYTHON:-$(git -C "$evals_root" rev-parse --show-toplevel)/venv/bin/python}"
+chat_des=(env PYTHONPATH="${harness}/src" "$python" -m desh_chat.cli)
+
 
 # Copy work material into workspace
 cp task.txt "${workspace}/task.txt"
@@ -98,7 +112,7 @@ args=(--config "$SETTINGS"
 
 # The effective configuration — every option and every prompt with its text, defaults and @files
 # resolved — is the record of what the run was built with.
-if ! chat-des "${args[@]}" --print-config > "${run_dir}/run_settings.json"; then
+if ! "${chat_des[@]}" "${args[@]}" --print-config > "${run_dir}/run_settings.json"; then
   echo "error: chat-des rejected the settings" >&2
   exit 2
 fi
@@ -109,6 +123,7 @@ model="$(jq -r '.model' "${run_dir}/run_settings.json")"
 echo "run id : $run_id"
 echo "settings : $SETTINGS"
 echo "workspace: $workspace"
+echo "harness: ${harness} ($(jq -r '.commit[:7] + (if .dirty then "+dirty" else "" end)' "${harness}/harness.json"))"
 echo "cmd    : chat-des ${args[*]}"
 echo "----------------------------------------"
 
@@ -129,7 +144,7 @@ stderr_file="${run_dir}/stderr"
 echo "running..."
 start_ns="$(date +%s%N)"
 set +e
-GIT_CEILING_DIRECTORIES="$live_dir" chat-des "${args[@]}" >"$stdout_file" 2>"$stderr_file"
+GIT_CEILING_DIRECTORIES="$live_dir" "${chat_des[@]}" "${args[@]}" >"$stdout_file" 2>"$stderr_file"
 status=$?
 set -e
 end_ns="$(date +%s%N)"
@@ -147,6 +162,7 @@ jq -n \
   --argjson status "$status" \
   --argjson elapsed_ms "$elapsed_ms" \
   --arg workspace "$workspace" \
+  --argjson harness "$(cat "${harness}/harness.json")" \
   --arg started "$(date -d "@$((start_ns / 1000000000))" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)" \
   --arg finished "$(date +%Y-%m-%dT%H:%M:%S%z)" \
   '{
@@ -155,6 +171,7 @@ jq -n \
     status: $status,
     elapsed_ms: $elapsed_ms,
     workspace: $workspace,
+    harness: $harness,
     started: $started,
     finished: $finished
   }' > "$manifest"
