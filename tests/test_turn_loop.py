@@ -662,7 +662,29 @@ class TestLoopBounds:
             state = make_state(history=self.capped(n), auto_prompt="go on", operator=False, settings=self.SETTINGS)
             _, events = TurnStart().execute(state)
             assert (len(events) == 2) == continued, n            # [Info, UserMessage] or nothing (the run returns)
-        assert self.capped(3).trailing_caps() == 3
+        assert self.capped(3).trailing_continues() == 3
+
+    def test_a_repeat_stopped_task_is_continued_once_and_counts_as_a_continue(self, make_state):
+        looped = ChatHistory().append(Turn("task", "[stopped: Bash repeated three times with identical results]", stop=StopReason.REPEAT))
+        state = make_state(history=looped, repeat_prompt="loop stopped", operator=False, settings=self.SETTINGS)
+        opened, events = TurnStart().execute(state)
+        assert opened.pending is not None and [type(e).__name__ for e in events] == ["Info", "UserMessage"]
+        assert events[1].message == "loop stopped"
+        twice = make_state(history=looped.append(Turn("loop stopped", "again", stop=StopReason.REPEAT)),
+                           repeat_prompt="loop stopped", operator=False, settings=self.SETTINGS)
+        assert TurnStart().execute(twice) == (twice, [])         # two in a row: the run returns
+        spent = make_state(history=self.capped(2).append(Turn("go on", "", stop=StopReason.REPEAT)),
+                           repeat_prompt="loop stopped", auto_prompt="go on", operator=False, settings=self.SETTINGS)
+        assert spent.history.trailing_continues() == 3
+        assert TurnStart().execute(spent) == (spent, [])         # the caps before it spent the continues
+
+    def test_without_a_repeat_prompt_a_repeat_stop_ends_the_run(self, make_state):
+        state = make_state(history=ChatHistory().append(Turn("task", "looped", stop=StopReason.REPEAT)), operator=False)
+        assert TurnStart().execute(state) == (state, [])
+
+    def test_the_loop_guard_sees_the_rounds_of_a_repeat_stopped_turn(self):
+        looped = Turn("task", "looped", stop=StopReason.REPEAT, rounds=(Round("", (call(),), (result(call(), "x"),)),))
+        assert len(ChatHistory().append(looped).continued_rounds()) == 1
 
     def test_the_last_capped_turn_nothing_will_continue_is_salvaged(self, make_state):
         pending = PendingTurn("continue").add_round(Round("", (call(),), (result(call(), "a finding"),), tokens=10))

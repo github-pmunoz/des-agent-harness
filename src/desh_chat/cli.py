@@ -89,7 +89,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug,
                             result_chars=max_result_chars, memory=Memories.of(*child_memories, frame=prompts.frame()),
                             system_prompt=prompts.get("delegate.system"), cap_continue=prompts.get("cap_continue"),
-                            length_continue=prompts.get("length_continue"))
+                            length_continue=prompts.get("length_continue"), repeat_continue=prompts.get("repeat_continue"))
         # the parent's CURRENT settings travel with every call; the child derives its own from them
         tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief, target="task")
     # the working memory itself lives on ChatState; its tools only get a dict for the call
@@ -163,7 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-tc",  "--tool-cap",       type=float, default=10.0, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
     ap.add_argument("-ct",  "--checkpoint-target", type=float, default=0.15, help="share of the context a mid-turn checkpoint summary may take")
     ap.add_argument("-mg",  "--memory-target",  type=float, default=0.10, help="share of the context one memory may take; a write past it is refused")
-    ap.add_argument("-mc",  "--max-continues",  type=int, default=3, help="times in a row a capped turn is continued (--cont, and every subagent) before the run ends on its record")
+    ap.add_argument("-mc",  "--max-continues",  type=int, default=3, help="times in a row a capped or repeat-stopped turn is continued (--cont, and every subagent) before the run ends on its record")
     return ap
 
 
@@ -327,6 +327,7 @@ def run(args: argparse.Namespace, prompts: Prompts):
         operator=True,
         auto_prompt=prompts.get("cap_continue") if args.cont else None,
         length_prompt=prompts.get("length_continue") if args.cont else None,
+        repeat_prompt=prompts.get("repeat_continue") if args.cont else None,
         memory=memory,
         # the clock starts here, before the session loads and the router loads the model: both are run time
         deadline=Deadline.in_seconds(args.task_timeout) if args.task and args.task_timeout > 0 else None,

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 
 from desh.tools import ToolRegistry
 from desh_chat import memory as mem
-from desh_chat.delegate import CAP_CONTINUE_MSG, DELEGATE_SYSTEM_PROMPT, LENGTH_CONTINUE_MSG
+from desh_chat.delegate import CAP_CONTINUE_MSG, DELEGATE_SYSTEM_PROMPT, LENGTH_CONTINUE_MSG, REPEAT_CONTINUE_MSG
 from desh_chat.memory import Memory, MemoryFrame
 from desh_chat.state import CHECKPOINT_CLOSE, CHECKPOINT_PROMPT, COMPACTION_PROMPT, RETRY_NUDGE, SUMMARY_CLOSE
 
@@ -19,6 +19,7 @@ from desh_chat.state import CHECKPOINT_CLOSE, CHECKPOINT_PROMPT, COMPACTION_PROM
 #   delegate.system                      Delegate.system_prompt
 #   cap_continue                         ChatState.auto_prompt (with --cont) and Delegate.cap_continue
 #   length_continue                      ChatState.length_prompt (with --cont) and Delegate.length_continue
+#   repeat_continue                      ChatState.repeat_prompt (with --cont) and Delegate.repeat_continue
 #   compaction, checkpoint               Settings.compaction_prompt, Settings.checkpoint_prompt
 #   compaction.close, checkpoint.close,  Settings.summary_close, Settings.checkpoint_close,
 #   summary.retry                        Settings.retry_nudge
@@ -40,6 +41,7 @@ STATIC: dict[str, tuple[str, tuple[str, ...]]] = {
     "delegate.system": (DELEGATE_SYSTEM_PROMPT, ()),
     "cap_continue": (CAP_CONTINUE_MSG, ()),
     "length_continue": (LENGTH_CONTINUE_MSG, ()),
+    "repeat_continue": (REPEAT_CONTINUE_MSG, ()),
     "compaction": (COMPACTION_PROMPT, ()),
     "checkpoint": (CHECKPOINT_PROMPT, ()),
     "compaction.close": (SUMMARY_CLOSE, ()),

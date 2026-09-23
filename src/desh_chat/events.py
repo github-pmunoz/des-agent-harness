@@ -54,8 +54,9 @@ class MaybeRegenerate(Event):
 class TurnStart(Event):
     """Opens the next turn. The only creator of state.pending: the turn exists, empty, before its
     message is known, and the message source fills it (UserMessage). Which source is this event's
-    policy, read from the state: a capped turn is continued with `auto_prompt` when one is set;
-    otherwise an operator is prompted, or a run without one returns.
+    policy, read from the state: a capped turn is continued with `auto_prompt` when one is set, a
+    turn cut at the token limit or ended by the repeat guard with `length_prompt` or
+    `repeat_prompt`, once; otherwise an operator is prompted, or a run without one returns.
 
     `message` is the seed form: a caller that already has the first message (a delegated task, a
     queue-fed harness) opens the turn and delivers it in one step, skipping the policy.
@@ -73,15 +74,23 @@ class TurnStart(Event):
             return opened, [UserMessage(self.message)]
         last = state.history.last_non_summary()
         if last is not None and last.stop == StopReason.CAP and state.auto_prompt is not None \
-                and state.history.trailing_caps() <= state.settings.max_cap_continues:
+                and state.history.trailing_continues() <= state.settings.max_cap_continues:
             return opened, [Info("Checkpoint: round cap reached, continuing the task."), UserMessage(state.auto_prompt)]
         # A turn cut at the token limit is continued once, told why: the reply it must write
         # differently is in the history. A second cut in a row is the model not taking the hint,
         # and the run ends on the record rather than spend a third completion.
+        previous = [t for t in state.history.before(last) if not t.summary] if last is not None else []
         if last is not None and last.stop == StopReason.LENGTH and state.length_prompt is not None:
-            previous = [t for t in state.history.before(last) if not t.summary]
             if not previous or previous[-1].stop != StopReason.LENGTH:
                 return opened, [Info("Reply cut at the token limit, continuing the task."), UserMessage(state.length_prompt)]
+        # A turn the repeat guard ended is continued the same way, once, from its salvaged record:
+        # a loop on one detail is not the end of the task (seen: an orchestrator with every
+        # investigation in hand, lost to a grep asked three times). It counts as a continue, so a
+        # task that alternates caps and loops still runs out of them.
+        if last is not None and last.stop == StopReason.REPEAT and state.repeat_prompt is not None \
+                and state.history.trailing_continues() <= state.settings.max_cap_continues:
+            if not previous or previous[-1].stop != StopReason.REPEAT:
+                return opened, [Info("Repeated round stopped, continuing the task."), UserMessage(state.repeat_prompt)]
         if state.operator:
             return opened, [DisplayStats(), PromptUser()]
         return state, []
@@ -486,7 +495,7 @@ class TurnEnd(Event):
         # auto prompt is off, or the task has had its continues (Settings.max_cap_continues). Its
         # record is then all the run, or the delegating agent, will ever get.
         final_cap = (self.stop == StopReason.CAP and not state.operator
-                     and (state.auto_prompt is None or state.history.trailing_caps() + 1 > state.settings.max_cap_continues))
+                     and (state.auto_prompt is None or state.history.trailing_continues() + 1 > state.settings.max_cap_continues))
         if self.stop in SALVAGE_STOPS or final_cap:
             # The turn ends without an answer: what it got down stands as the answer, below any
             # text the model did produce (a deadline keeps the model's text so far). Bounded like

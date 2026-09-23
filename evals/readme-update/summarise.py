@@ -77,6 +77,12 @@ def dig(d: dict, path: tuple[str, ...]):
     return d
 
 
+# The failed-run stops (exit 1) that are the agent's own doing, so the run counts with the score it
+# earned, 0 most often: the window filled, the repeat guard ended the run, a reply was cut twice.
+# The others are not the task's outcome: an error (the server, the harness), an interrupt, no turn.
+AGENT_STOPS = ("overflow", "repeat", "length")
+
+
 def counts(result: dict | None, run_manifest: dict | None) -> bool:
     """Whether a run enters the aggregates.
 
@@ -89,7 +95,7 @@ def counts(result: dict | None, run_manifest: dict | None) -> bool:
     if not result.get("leak", {}).get("ok", True):
         return False        # the agent reached outside its workspace: the score is not the task's
     status = run_manifest.get("status")
-    return status == 0 or (status == 1 and result["stats"]["stop"] == "overflow")
+    return status == 0 or (status == 1 and result["stats"]["stop"] in AGENT_STOPS)
 
 
 def aggregate(values: list[float]) -> dict:

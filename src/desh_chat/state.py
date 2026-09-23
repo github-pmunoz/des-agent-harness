@@ -20,7 +20,7 @@ class StopReason(StrEnum):
     OVERFLOW = "overflow"       # no room left for a completion
     DEADLINE = "deadline"       # the run's wall-clock budget ran out; the model's text so far is the answer, and unlike CAP the turn is never continued
     ERROR = "error"             # a mid-turn exception
-    REPEAT = "repeat"           # the same calls asked a third time with identical results
+    REPEAT = "repeat"           # the same calls asked a third time with identical results; the record is the answer, and the repeat prompt may continue the turn once
     LENGTH = "length"           # the completion hit its token limit before it finished (a tool call left unclosed, say); the text so far and a note are the answer, and the length prompt may continue the turn once
     CANCELLED = "cancelled"     # the operator pressed ESC or cancelled at a confirmation prompt
     INTERRUPT = "interrupt"     # Ctrl+C in auto mode
@@ -144,7 +144,7 @@ class Settings:
     # window its results need.
     memory_target: float = 0.10
     # How many times in a row a capped turn is continued with the auto prompt before the run ends
-    # on the record instead. Unbounded, a model that re-gathers what each checkpoint folds away
+    # on the record instead; a turn continued after the repeat guard counts as one. Unbounded, a model that re-gathers what each checkpoint folds away
     # continues forever (seen: a subagent at 16K, 304 rounds over 6 continues, ended by the
     # repeat guard with nothing to show).
     max_cap_continues: int = 3
@@ -245,6 +245,10 @@ class ChatState(State):
     # model wrote past what a reply may hold — a call carrying a whole file, most often — and is
     # told so. None means such a turn is never continued automatically. Two in a row end the run.
     length_prompt: str | None = None
+    # The message a turn ended by the repeat guard (StopReason.REPEAT) is continued with, once:
+    # the calls it looped on will not say anything new, and the task goes on from the record.
+    # None means such a turn is never continued. Two in a row end the run.
+    repeat_prompt: str | None = None
     # The model's working memory: the memories the run registered and the value each holds; empty
     # when none is offered. Every write goes through ExecuteToolCalls, which commits the new value
     # here; a memory tool only sees a dict built from its slot for the one call. Rendered last in
@@ -406,8 +410,12 @@ EXPIRED_RESULT = "[expired: this result is no longer in context]"
 # the cap message continues it — and an interrupt is the operator's, who wants no answer.
 SALVAGE_STOPS = frozenset((StopReason.OVERFLOW, StopReason.DEADLINE, StopReason.ERROR, StopReason.REPEAT, StopReason.LENGTH))
 # The stops that keep a turn out of the conversation (Turn.visible): it is on the record and in the
-# session file, but not in the view, the token totals or the compaction transcript.
-HIDDEN_STOPS = frozenset((StopReason.CANCELLED, StopReason.INTERRUPT, StopReason.ERROR, StopReason.OVERFLOW, StopReason.REPEAT))
+# session file, but not in the view, the token totals or the compaction transcript. A repeat stop
+# is not one: the turn it continues into reads the task and the salvaged record from it.
+HIDDEN_STOPS = frozenset((StopReason.CANCELLED, StopReason.INTERRUPT, StopReason.ERROR, StopReason.OVERFLOW))
+# The stops a task goes on from in a new turn of its own, which count against
+# Settings.max_cap_continues together (ChatHistory.trailing_continues).
+CONTINUED_STOPS = frozenset((StopReason.CAP, StopReason.REPEAT))
 
 CHECKPOINT_PREFIX = "Checkpoint of this turn so far, in place of the rounds before it: "
 
@@ -862,26 +870,27 @@ class ChatHistory:
                 return self.turns[:i]
         return ()
 
-    def trailing_caps(self) -> int:
+    def trailing_continues(self) -> int:
         """How many turns in a row, counting back from the newest and skipping summaries, ended at
-        the round cap: the continues the current task has already had."""
+        the round cap or the repeat guard (CONTINUED_STOPS): the continues the current task has
+        already had."""
         n = 0
         for turn in reversed(self.turns):
             if turn.summary:
                 continue
-            if turn.stop != StopReason.CAP:
+            if turn.stop not in CONTINUED_STOPS:
                 break
             n += 1
         return n
 
     def continued_rounds(self) -> tuple[Round, ...]:
-        """The rounds of the capped turns the current task was continued from (trailing_caps),
+        """The rounds of the turns the current task was continued from (trailing_continues),
         oldest first: the same task's earlier work, which a loop guard must see through a cap."""
         rounds: list[Round] = []
         for turn in reversed(self.turns):
             if turn.summary:
                 continue
-            if turn.stop != StopReason.CAP:
+            if turn.stop not in CONTINUED_STOPS:
                 break
             rounds[:0] = list(turn.rounds)
         return tuple(rounds)

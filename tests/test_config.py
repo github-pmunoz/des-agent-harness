@@ -159,6 +159,8 @@ class TestLanding:
         _, _, plain = tools_of(["-w", str(tmp_path), "--delegate"])
         default: Delegate = plain.get("delegate").fn.__self__
         assert (default.system_prompt, default.cap_continue) == (DELEGATE_SYSTEM_PROMPT, CAP_CONTINUE_MSG)
+        _, _, overridden = tools_of(["-w", str(tmp_path), "--delegate", "--prompt", "repeat_continue=MOVE ON"])
+        assert overridden.get("delegate").fn.__self__.repeat_continue == "MOVE ON"
 
     def test_the_compaction_texts_reach_the_request(self, make_state):
         prompts = Prompts.resolve(({"checkpoint": "FOLD THESE", "checkpoint.close": "\n\nGO."}, "."))

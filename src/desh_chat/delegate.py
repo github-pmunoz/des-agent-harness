@@ -63,6 +63,13 @@ LENGTH_CONTINUE_MSG = ("Your last reply was cut at the token limit before it fin
                        "long document does not — give instructions and line anchors instead of content, or split the work. "
                        "Continue from here: ask again for what you still need, or reply with your final answer.")
 
+# The message a turn the repeat guard ended is continued with (ChatState.repeat_prompt): the stop
+# note names the calls, and the record below it is what the turn got done.
+REPEAT_CONTINUE_MSG = ("Your last turn was stopped: it asked for the same tool calls a third time with identical results, "
+                       "and its stop note names them. Asking again will not tell you anything new, and the record below the "
+                       "note is what you have. Continue the task from there with a different next step, or reply with your "
+                       "final answer.")
+
 BRIEF_HEAD_CHARS = 400
 
 
@@ -115,6 +122,7 @@ class Delegate:
     system_prompt: str = DELEGATE_SYSTEM_PROMPT
     cap_continue: str = CAP_CONTINUE_MSG
     length_continue: str = LENGTH_CONTINUE_MSG
+    repeat_continue: str = REPEAT_CONTINUE_MSG
 
     def delegate(self, task: str, context: str = "", gate: str = "", check: str = "", *,
                  settings: Settings | None = None, deadline: Deadline | None = None) -> str:
@@ -155,6 +163,7 @@ class Delegate:
             operator=False,                 # nobody to prompt: a finished turn returns the run
             auto_prompt=self.cap_continue,  # checkpoint: a capped turn is continued, not returned
             length_prompt=self.length_continue,
+            repeat_prompt=self.repeat_continue,
             memory=memory,
             deadline=deadline,              # the parent's, injected like settings: no child outlives the run
         )

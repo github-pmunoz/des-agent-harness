@@ -373,13 +373,13 @@ class TestTurnEnd:
         note = "[stopped: Bash repeated three times with identical results]"
         new_state, events = TurnEnd(assistant=note, tokens=0, stop=StopReason.REPEAT).execute(state)
         turn = new_state.history.turns[-1]
-        assert turn.stop == StopReason.REPEAT and turn.visible is False      # on the record, out of the view
+        assert turn.stop == StopReason.REPEAT and turn.visible              # in the view: the continued turn reads it
         assert turn.assistant.startswith(note + "\n\n")                       # the guard's note comes first...
         assert "TURN ENDED: repeat" in turn.assistant                         # ...and the record below it
         assert "edited wc.py; next: rerun the tests" in turn.assistant       # the checkpoint
         assert "cause: off-by-one in count_lines" in turn.assistant          # the scratchpad
         assert "35 passed" in turn.assistant and "3 failed" not in turn.assistant    # the round after the checkpoint only
-        assert new_state.history.view_turns(budget=10**6) == []
+        assert new_state.history.view_turns(budget=10**6) == [turn]
         assert isinstance(events[0], Warn) and "repeat" in events[0].text and "salvaged" in events[0].text
 
 
