@@ -271,7 +271,7 @@ class TestSubagentPolicy:
         from conftest import MAX_CONTEXT, PORT, FakeServer
         from desh_chat.state import InferenceEngine
         args = argparse.Namespace(workspace=str(tmp_path), read=True, write=False, edit=False, bash=False, current_time=False,
-                                  delegate=True, debug=False, scratchpad=False, memory="plan,ontology", tool_cap=10.0)
+                                  delegate=True, delegate_records=False, debug=False, scratchpad=False, memory="plan,ontology", tool_cap=10.0)
         inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=FakeServer(script=[]), port=PORT)
         tools = build_tools(args, inference, make_state().settings)
         delegate = tools.get("delegate").fn.__self__

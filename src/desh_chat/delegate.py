@@ -25,6 +25,7 @@ work the parent never saw stays inspectable.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import subprocess
 import sys
@@ -72,6 +73,25 @@ REPEAT_CONTINUE_MSG = ("Your last turn was stopped: it asked for the same tool c
 
 BRIEF_HEAD_CHARS = 400
 
+# Where a delegation's record lives, under the root so Read reaches it (Delegate.records): one
+# folder per brief, holding the brief as the subagent got it and the answer as it came back.
+RECORD_DIR = ".desh/delegates"
+
+
+def record_dir(args: dict) -> str:
+    """The folder of the delegation these arguments make, relative to the root. Named by a hash of
+    the brief — task, context, gate and check — so the fold of the call, which sees only its
+    arguments, names the same folder the call wrote; the same brief sent again is the same record."""
+    brief = [args.get(k, "") for k in ("task", "context", "gate", "check")]
+    key = hashlib.sha1(json.dumps(brief, ensure_ascii=False).encode()).hexdigest()[:8]
+    return os.path.join(RECORD_DIR, key)
+
+
+def brief_text(task: str, context: str, gate: str, check: str) -> str:
+    """The brief as a document: every part the model wrote, each under its own heading."""
+    parts = [("Task", task), ("Context", context), ("Success criterion", gate), ("Check", f"`{check}`" if check else "")]
+    return "\n\n".join(f"# {title}\n{text}" for title, text in parts if text) + "\n"
+
 
 def fold_brief(args: dict) -> dict:
     """The echoed form of an answered delegate call (Tool.fold): the head of the task and a note
@@ -82,6 +102,15 @@ def fold_brief(args: dict) -> dict:
     if not isinstance(task, str) or len(json.dumps(args, ensure_ascii=False)) <= BRIEF_HEAD_CHARS:
         return args
     return {"task": task[:BRIEF_HEAD_CHARS] + "...", "folded": "context, gate and check omitted; see the result"}
+
+
+def fold_brief_to_record(args: dict) -> dict:
+    """fold_brief for a run that keeps delegation records: what the fold drops is on disk, and the
+    note says where, so the model can point a later brief at it or send it again."""
+    folded = fold_brief(args)
+    if folded is args:
+        return args
+    return {**folded, "folded": f"whole brief at {os.path.join(record_dir(args), 'brief.md')}"}
 
 def child_settings(parent: Settings) -> Settings:
     """The subagent's settings: the parent's, as they are. Compaction stays on: the round cap is the
@@ -123,6 +152,10 @@ class Delegate:
     cap_continue: str = CAP_CONTINUE_MSG
     length_continue: str = LENGTH_CONTINUE_MSG
     repeat_continue: str = REPEAT_CONTINUE_MSG
+    # Keep every delegation's brief and whole answer under RECORD_DIR and end each answer with
+    # their paths: a later brief can point at findings instead of retyping them, and a brief the
+    # fold dropped can be sent again. Off, only an answer over the cap is saved (_spilled).
+    records: bool = False
 
     def delegate(self, task: str, context: str = "", gate: str = "", check: str = "", *,
                  settings: Settings | None = None, deadline: Deadline | None = None) -> str:
@@ -151,6 +184,10 @@ class Delegate:
         if gate:
             system_prompt += "\n\nSuccess criterion:\n" + gate
         session_file = child_session_file(self.session_file)
+        # the brief is on disk before the child runs: a run that dies mid-task still leaves it
+        record = record_dir({"task": task, "context": context, "gate": gate, "check": check}) if self.records else None
+        if record is not None:
+            self._write(os.path.join(record, "brief.md"), brief_text(task, context, gate, check))
         child = ChatState(
             settings=child_config,
             inference=self.inference,
@@ -180,7 +217,23 @@ class Delegate:
         last = final.history.last_non_summary()
         has_answer = last is not None and last.visible and last.assistant != ""
         text = answer(final)
-        return self._spilled(self._checked(text, check) if has_answer else text, task)
+        text = self._checked(text, check) if has_answer else text
+        return self._recorded(text, record) if record is not None else self._spilled(text, task)
+
+    def _write(self, rel: str, text: str) -> None:
+        full = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def _recorded(self, text: str, record: str) -> str:
+        """The answer saved whole beside its brief, and a last line naming both: the registry's cut
+        keeps the tail, so the paths survive whatever it drops, and an answer over the cap says so."""
+        brief, whole = os.path.join(record, "brief.md"), os.path.join(record, "answer.md")
+        self._write(whole, text)
+        cut = (f"; the answer is {len(text)} characters, cut to {self.result_chars} — Read the file with offset and limit"
+               if len(text) > self.result_chars else "")
+        return text + f"\n[brief {brief} · answer {whole}{cut}]"
 
     def _spilled(self, text: str, task: str) -> str:
         """An answer over the cap goes whole to a file the parent can Read by range, and its last

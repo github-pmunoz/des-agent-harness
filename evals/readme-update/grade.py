@@ -49,6 +49,8 @@ DELEGATE_PROMPT_HEAD = "You are a coding agent working inside one project direct
 # What a cut result carries, one marker per way of cutting (desh.tools.ToolRegistry.bound, Workspace.read, Workspace.bash).
 CUT_MARKERS = ("characters truncated", "[showing lines", "the whole of it is saved at")
 SPILL_DIR = ".desh/out"
+# where --delegate-records keeps each delegation's brief and answer (desh_chat.delegate.RECORD_DIR)
+RECORD_DIR = ".desh/delegates"
 FOLD_EVENTS = ("CompactHistory", "CompactPendingTurn")
 # The answer the repeated-round guard leaves (desh_chat.events.AppendRound).
 REPEAT_STOP = re.compile(r"\[stopped: .* repeated three times with identical results\]\s*$")
@@ -280,7 +282,7 @@ def usage_stats(completions: list[dict], fold_ts: list[float] | None = None) -> 
     timings = [((r.get("response") or {}).get("timings") or {}) for r in completions]
     tools: dict[str, int] = {}
     kinds: dict[str, int] = {}          # what the model wrote to the scratchpad, by kind
-    offset_reads = spill_reads = early_writes = 0
+    offset_reads = spill_reads = record_reads = early_writes = 0
     issued: dict[str, int] = {}         # identical calls (name and arguments), over the agent's whole run
     for r in completions:
         for call in tool_calls_of(r):
@@ -291,6 +293,8 @@ def usage_stats(completions: list[dict], fold_ts: list[float] | None = None) -> 
             if call["name"] == "Read":
                 offset_reads += int((call["args"].get("offset") or 1) > 1)
                 spill_reads += int(str(call["args"].get("file_path", "")).startswith(SPILL_DIR))
+            if call["name"] in ("Read", "Bash"):
+                record_reads += int(RECORD_DIR in str(call["args"].get("file_path") or call["args"].get("command") or ""))
             if call["name"] == "scratchpad_write":
                 kind = str(call["args"].get("kind"))
                 kinds[kind] = kinds.get(kind, 0) + 1
@@ -309,6 +313,7 @@ def usage_stats(completions: list[dict], fold_ts: list[float] | None = None) -> 
         "most_repeated_call": max(issued.values(), default=0),
         "offset_reads": offset_reads,      # did the model follow a cut's pointer: a Read by range,
         "spill_reads": spill_reads,         # a Read of a Bash spill
+        "record_reads": record_reads,       # a Read or Bash call on a delegation record (brief or answer)
         "scratchpad_writes": sum(kinds.values()),
         "scratchpad_kinds": kinds,
         # notes taken before the first compaction or checkpoint are the ones that survive it; None when nothing folded
@@ -498,6 +503,8 @@ def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifes
             "brief": " ".join((turns[0].get("user") or "").split())[:120] if turns else "",
             "brief_head": " ".join((turns[0].get("user") or "").split())[:400] if turns else "",
             "kind": brief_kind(turns[0].get("user") or "") if turns else "work",
+            # the brief points at an earlier delegation's record instead of retyping its findings
+            "points_to_record": bool(turns) and RECORD_DIR in (turns[0].get("user") or ""),
             "wall_ms": round((child["end"] - child["start"]) * 1000) if child["end"] else None,
             "check_exit": check_exit_of(result),
             "answer_chars": len(answer),
@@ -525,6 +532,8 @@ def stats_of(run_dir: str, completions: list[dict], des_log: list[dict], manifes
         "compactions": total("compactions"),
         "checkpoints": total("checkpoints"),
         "scratchpad_writes": total("scratchpad_writes"),
+        "record_reads": total("record_reads"),
+        "briefs_to_records": sum(1 for d in delegations if d["points_to_record"]),
     }
     main = agent_stats(main_completions, main_rows, main_session)
     everything = usage_stats(completions) | engine_stats([e for r in runs for e in r["rows"]])
@@ -603,6 +612,7 @@ def summary(r: dict) -> str:
         f"  subagents: {sub['count']} runs, {sub['answered']} answered, {sub['overflows']} overflow, {sub['capped']} cap, {sub['repeat_stops']} repeat-stop, {sub['length_stops']} length,"
         f" {sub['deadlines']} deadline, {sub['errors']} error, {sub['salvaged']} salvaged, {sub['checks_failed']} checks failed,"
         f" peak {sub['prompt_tokens_peak']}",
+        f"  records: {sub['briefs_to_records']} briefs point at one, read {m['record_reads']} times by main, {sub['record_reads']} by subagents",
         f"  {'#':>3} {'stop':<9}{'rnds':>5}{'peak':>7}{'cmp':>4}{'ckp':>4}{'slv':>4}{'cut':>4}{'rep':>4}{'rrd':>4}{'pad':>4}{'chk':>5}{'ans':>7}{'lost':>6}{'s':>6}  brief",
     ]
     for i, x in enumerate(s["delegations"]):

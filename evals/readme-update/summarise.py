@@ -50,6 +50,10 @@ METRICS = (
     ("sub_answer_chars_lost", ("stats", "sub", "answer_chars_lost")),
     ("sub_compactions", ("stats", "sub", "compactions")),
     ("sub_checkpoints", ("stats", "sub", "checkpoints")),
+    # --delegate-records: briefs that point at an earlier delegation's findings, and reads of them
+    ("briefs_to_records", ("stats", "sub", "briefs_to_records")),
+    ("main_record_reads", ("stats", "main", "record_reads")),
+    ("sub_record_reads", ("stats", "sub", "record_reads")),
     # over every agent of the run
     ("summary_retries", ("stats", "summary_retries")),
     ("fallback_summaries", ("stats", "fallback_summaries")),

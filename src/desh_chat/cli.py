@@ -24,7 +24,7 @@ from desh_chat.state import ChatHistory, Deadline, Settings, InferenceEngine, St
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
 from desh_chat.coding import Workspace, edit_preview, fold_edited, fold_written, project_tree
-from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG, fold_brief
+from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG, fold_brief, fold_brief_to_record
 from desh_chat.memory import Memories, Memory
 from desh_chat.ontology import ONTOLOGY
 from desh_chat.plan import PLAN
@@ -89,9 +89,11 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
                             session_file=session_file, completions_log=completions_log, des_log=des_log, debug=args.debug,
                             result_chars=max_result_chars, memory=Memories.of(*child_memories, frame=prompts.frame()),
                             system_prompt=prompts.get("delegate.system"), cap_continue=prompts.get("cap_continue"),
-                            length_continue=prompts.get("length_continue"), repeat_continue=prompts.get("repeat_continue"))
+                            length_continue=prompts.get("length_continue"), repeat_continue=prompts.get("repeat_continue"),
+                            records=args.delegate_records)
         # the parent's CURRENT settings travel with every call; the child derives its own from them
-        tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"), fold=fold_brief, target="task")
+        tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"),
+                          fold=fold_brief_to_record if args.delegate_records else fold_brief, target="task")
     # the working memory itself lives on ChatState; its tools only get a dict for the call
     for m in memories:
         tools = m.register(tools)
@@ -157,6 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--edit",      action="store_true", help="offer the Edit tool")
     ap.add_argument("--bash",      action="store_true", help="offer the Bash tool")
     ap.add_argument("--delegate",  action="store_true", help="offer delegate: subagents with the same tools and settings")
+    ap.add_argument("--delegate-records", action="store_true", help="keep every delegation's brief and whole answer under .desh/delegates and name them on the answer's last line, so a later brief can point at them")
     ap.add_argument("--memory",    default="", help=f"memory tools to offer, comma-separated: {', '.join(MEMORIES)}")
     ap.add_argument("--scratchpad", action="store_true", help="same as --memory scratchpad")
     ap.add_argument("--current_time", action="store_true", help="offer the current time")

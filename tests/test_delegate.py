@@ -95,7 +95,7 @@ class TestCliWiring:
         from desh.llama.logger import Logger
         from desh_chat.cli import build_tools
         args = argparse.Namespace(workspace=str(tmp_path), read=True, write=False, edit=False, bash=False,
-                                  current_time=False, delegate=True, system_prompt="sp", debug=False,
+                                  current_time=False, delegate=True, delegate_records=False, system_prompt="sp", debug=False,
                                   session="", sessions_folder=str(tmp_path), completions_log="c.jsonl", des_log="d.jsonl", scratchpad=False,
                                   tool_cap=12.5)
         inference = InferenceEngine(models=MODELS, max_context=MAX_CONTEXT, server=FakeServer(script=[]), port=PORT)
@@ -613,3 +613,57 @@ class TestAnswerSpill:
         inference, _ = with_server(make_state, FakeServer())
         assert Delegate(root=str(tmp_path), inference=inference, settings=SETTINGS, result_chars=1000).delegate("task") == "42"
         assert not (tmp_path / SPILL_DIR).exists()
+
+
+class TestDelegationRecords:
+    """--delegate-records: every brief and whole answer on disk, named on the answer's last line,
+    and the fold of the call pointing at the same brief file."""
+    BRIEF = {"task": "Investigate the CLI. " * 30, "context": "src/desh_chat only", "gate": "every flag named", "check": "true"}
+
+    def recorded(self, make_state, monkeypatch, tmp_path, engine=RecordingEngine, **brief):
+        from desh_chat.delegate import record_dir
+        monkeypatch.setattr("desh_chat.delegate.Engine", engine)
+        inference, _ = with_server(make_state, FakeServer())
+        d = Delegate(root=str(tmp_path), inference=inference, settings=SETTINGS, result_chars=1000, records=True)
+        return d.delegate(**brief), tmp_path / record_dir(brief)
+
+    def test_the_brief_and_the_answer_are_saved_and_named_on_the_last_line(self, make_state, monkeypatch, capsys, tmp_path):
+        from desh_chat.coding import SPILL_DIR
+        result, folder = self.recorded(make_state, monkeypatch, tmp_path, **self.BRIEF)
+        brief = (folder / "brief.md").read_text()
+        assert brief.startswith("# Task\n" + self.BRIEF["task"]) and "# Context\nsrc/desh_chat only" in brief
+        assert "# Success criterion\nevery flag named" in brief and "# Check\n`true`" in brief
+        answer_text = (folder / "answer.md").read_text()
+        assert answer_text.startswith("42") and "[check `true`: exit 0]" in answer_text
+        rel = os.path.relpath(folder, tmp_path)
+        assert result == answer_text + f"\n[brief {rel}/brief.md · answer {rel}/answer.md]"
+        assert not (tmp_path / SPILL_DIR).exists()           # the record replaces the spill
+
+    def test_an_answer_over_the_cap_says_so_and_the_paths_survive_the_cut(self, make_state, monkeypatch, capsys, tmp_path):
+        result, folder = self.recorded(make_state, monkeypatch, tmp_path, engine=LongAnswerEngine, task="task")
+        assert (folder / "answer.md").read_text() == LongAnswerEngine.ANSWER
+        bounded = ToolRegistry(max_result_chars=1000).bound(result)
+        assert "MIDDLE-FACT" not in bounded
+        assert f"answer.md; the answer is {len(LongAnswerEngine.ANSWER)} characters, cut to 1000" in bounded
+
+    def test_the_fold_points_at_the_brief_the_call_wrote(self, make_state, monkeypatch, capsys, tmp_path):
+        from desh_chat.delegate import fold_brief_to_record
+        _, folder = self.recorded(make_state, monkeypatch, tmp_path, **self.BRIEF)
+        folded = fold_brief_to_record(dict(self.BRIEF))
+        assert folded["task"] == self.BRIEF["task"][:BRIEF_HEAD_CHARS] + "..."
+        assert folded["folded"] == f"whole brief at {os.path.relpath(folder, tmp_path)}/brief.md"
+        assert (tmp_path / folded["folded"].removeprefix("whole brief at ")).exists()
+
+    def test_a_brief_that_fits_is_kept_whole_and_an_omitted_part_hashes_as_empty(self):
+        from desh_chat.delegate import fold_brief_to_record, record_dir
+        args = {"task": "count the files"}
+        assert fold_brief_to_record(args) is args
+        assert record_dir(args) == record_dir({"task": "count the files", "context": "", "gate": "", "check": ""})
+        assert record_dir(args) != record_dir({"task": "count the files", "context": "src only"})
+
+    def test_off_by_default(self, make_state, monkeypatch, capsys, tmp_path):
+        from desh_chat.delegate import RECORD_DIR
+        monkeypatch.setattr("desh_chat.delegate.Engine", RecordingEngine)
+        inference, _ = with_server(make_state, FakeServer())
+        assert Delegate(root=str(tmp_path), inference=inference, settings=SETTINGS).delegate("task") == "42"
+        assert not (tmp_path / RECORD_DIR).exists()
