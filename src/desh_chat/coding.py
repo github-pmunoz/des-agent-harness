@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 
 from desh.render import Palette, c_out
-from desh.tools import DEFAULT_RESULT_CHARS, ToolRegistry
+from desh.tools import DEFAULT_RESULT_CHARS, ToolRegistry, parameters_schema
 
 
 SPILL_DIR = ".desh/out"     # under the root, so Read can reach it; ignored by git
@@ -144,44 +144,51 @@ class Workspace:
             f.write(content)
         return f"wrote {len(content)} characters to {file_path}"
 
-    def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
-        """Replace text in an existing file by exact string match.
+    def edit(self, file_path: str, edits: list[dict]) -> str:
+        """Replace text in an existing file by exact string match: one replacement or several in one
+        call, applied in order and all or none. Prefer it to rewriting a file: each edit carries only
+        the lines it changes.
 
         Args:
             file_path: Path of the file to edit, relative to the project root.
-            old_string: The exact text to replace. Must match the file verbatim, including indentation.
-            new_string: The text that replaces it.
-            replace_all: Replace every occurrence. Default False: old_string must occur exactly once.
+            edits: The replacements, applied in order, each to the file as the earlier ones left it. Each is {"old_string": exact text to replace, "new_string": its replacement, "replace_all": optional, default false}. Unless replace_all is true, old_string must occur exactly once. If any edit fails, none is applied and every failure is reported.
         """
-        # Check if the string is empty
-        if not old_string:
-            return "old_string cannot be empty."
-
-        if old_string == new_string:
-            return "(no change: old_string and new_string are identical)"
-
-        # Check if the file exists
+        # All or none: a partial application would leave the file in a state the model never
+        # described, and the retry would have to guess which edits already landed. Each edit is
+        # checked against the text the earlier ones produced, which is also how it is applied. Read
+        # straight from disk: read() is the model's view, cut to the cap, and an edit written back
+        # through it would cut the file.
         full = self.path(file_path)
         if not os.path.exists(full):
             return f"File {file_path} does not exist."
-        
-        # Check how many times the string appears in the file. Read straight from disk: read() is
-        # the model's view, cut to the cap, and an edit written back through it would cut the file.
+        if not isinstance(edits, list) or not edits:
+            return "edits must be a non-empty list of {old_string, new_string} objects."
         with open(full, "r", encoding="utf-8") as f:
-            file_content = f.read()
-        old_string_matches = file_content.count(old_string)
-        if old_string_matches == 0:
-            return f"`old_string` not found in file."
-        if old_string_matches == 1: # replace_all has no effect in this branch
-            with open(full, "w", encoding="utf-8") as f:
-                f.write(file_content.replace(old_string, new_string))
-            return f"One occurrence of `old_string` replaced."
-        elif old_string_matches > 1 and not replace_all:
-            return f"`old_string` appears {old_string_matches} times in file. Use replace_all=True to replace all occurrences."
-        else:
-            with open(full, "w", encoding="utf-8") as f:
-                f.write(file_content.replace(old_string, new_string, old_string_matches))
-            return f"{old_string_matches} occurrences of string `old_string` replaced in file."
+            original = f.read()
+        text, problems, replaced = original, [], 0
+        for i, e in enumerate(edits, start=1):
+            if not isinstance(e, dict):
+                problems.append(f"edit {i}: not an object"); continue
+            old, new, every = e.get("old_string"), e.get("new_string"), bool(e.get("replace_all", False))
+            if not isinstance(old, str) or not isinstance(new, str):
+                problems.append(f"edit {i}: old_string and new_string must both be strings"); continue
+            if not old:
+                problems.append(f"edit {i}: old_string cannot be empty"); continue
+            if old == new:
+                problems.append(f"edit {i}: old_string and new_string are identical"); continue
+            n = text.count(old)
+            if n == 0:
+                problems.append(f"edit {i}: old_string not found" + (" (an earlier edit may have changed it)" if original.count(old) else "")); continue
+            if n > 1 and not every:
+                problems.append(f"edit {i}: old_string occurs {n} times; make it unique or set replace_all"); continue
+            text = text.replace(old, new)
+            replaced += n
+        if problems:
+            return f"No edit applied ({len(problems)} of {len(edits)} failed):\n" + "\n".join(problems)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(text)
+        return (f"{len(edits)} edit{'s' if len(edits) != 1 else ''} applied to {file_path} "
+                f"({replaced} replacement{'s' if replaced != 1 else ''}; {original.count(chr(10))} -> {text.count(chr(10))} lines).")
 
     def bash(self, reason: str, command: str, timeout: int = 60) -> str:
         """Run a shell command in the project root and return its output.
@@ -238,22 +245,50 @@ def fold_written(args: dict) -> dict:
     return {**folded, "folded": f"{len(content)} characters written; Read the file to see it"}
 
 
+def edit_parameters(ws: "Workspace") -> dict:
+    """Edit's schema: derived from the method, with the shape of one edit spelled out — a derived
+    list[dict] says only "array of objects", and a model given that guesses the keys."""
+    schema = parameters_schema(ws.edit)
+    edits = schema["properties"]["edits"]
+    schema["properties"]["edits"] = {**edits, "minItems": 1, "items": {
+        "type": "object",
+        "properties": {"old_string": {"type": "string", "description": "Exact text to replace, verbatim including indentation."},
+                       "new_string": {"type": "string", "description": "The text that replaces it."},
+                       "replace_all": {"type": "boolean", "description": "Replace every occurrence. Default false: old_string must occur exactly once."}},
+        "required": ["old_string", "new_string"]}}
+    return schema
+
+
 def fold_edited(args: dict) -> dict:
-    """The echoed form of an answered Edit: the path and the sizes of old_string and new_string,
-    once the pair is longer than a short excerpt. What was replaced is in the file."""
-    old, new = args.get("old_string"), args.get("new_string")
-    if not (isinstance(old, str) and isinstance(new, str)) or len(old) + len(new) <= 2 * FOLD_CHARS:
+    """The echoed form of an answered Edit: the path, how many edits and their sizes, once they
+    are longer than a short excerpt. What was replaced is in the file."""
+    edits = args.get("edits")
+    if not isinstance(edits, list) or not all(isinstance(e, dict) for e in edits):
         return args
-    folded = {k: v for k, v in args.items() if k not in ("old_string", "new_string")}
-    return {**folded, "folded": f"old_string of {len(old)} and new_string of {len(new)} characters; the file holds the new text"}
+    old = sum(len(e.get("old_string") or "") for e in edits)
+    new = sum(len(e.get("new_string") or "") for e in edits)
+    if old + new <= 2 * FOLD_CHARS:
+        return args
+    folded = {k: v for k, v in args.items() if k != "edits"}
+    return {**folded, "folded": f"{len(edits)} edit{'s' if len(edits) != 1 else ''} replacing {old} characters with {new}; the file holds the new text"}
 
 
 def edit_preview(args: dict) -> str:
-    old = args.get("old_string")
-    new = args.get("new_string")
-    assert isinstance(old, str) and isinstance(new, str)
+    """Every edit of the call as its own diff, numbered, under the file's name."""
+    edits = args.get("edits") if isinstance(args.get("edits"), list) else []
+    parts = [c_out(Palette.DIFF_CTX, f"{args.get('file_path', '') or '(no file)'} — {len(edits)} edit{'s' if len(edits) != 1 else ''}")]
+    for i, e in enumerate(edits, start=1):
+        if not isinstance(e, dict) or not isinstance(e.get("old_string"), str) or not isinstance(e.get("new_string"), str):
+            parts.append(c_out(Palette.DIFF_CTX, f"edit {i}: (malformed)")); continue
+        parts.append(replacement_diff(f"edit {i}", e))
+    return "\n".join(parts)
+
+
+def replacement_diff(label: str, e: dict) -> str:
+    """One replacement as a diff under its label: removed lines, added lines, unchanged context."""
+    old, new = e["old_string"], e["new_string"]
     diff = difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", fromfile="old", tofile="new")
-    lines = [c_out(Palette.DIFF_CTX, args.get("file_path", "") or "(no file)")]
+    lines = [c_out(Palette.DIFF_CTX, label)]
     for line in diff:
         if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
             continue
@@ -263,8 +298,8 @@ def edit_preview(args: dict) -> str:
             lines.append(c_out(Palette.DIFF_DEL, line))
         else:
             lines.append(c_out(Palette.DIFF_CTX, line))
-    if args.get("replace_all"):
-        lines.append(c_out(Palette.DIFF_CTX, "(replace_all: true)")) 
+    if e.get("replace_all"):
+        lines.append(c_out(Palette.DIFF_CTX, "(replace_all: true)"))
     return "\n".join(lines)
 
 
@@ -274,5 +309,5 @@ def coding_registry(root: str = ".", result_chars: int = DEFAULT_RESULT_CHARS) -
     return (ToolRegistry(max_result_chars=result_chars)
             .add(ws.read, name="Read", confirm=False, target="file_path")
             .add(ws.write, name="Write", fold=fold_written, target="file_path")
-            .add(ws.edit, name="Edit", preview=edit_preview, fold=fold_edited, target="file_path")
+            .add(ws.edit, name="Edit", parameters=edit_parameters(ws), preview=edit_preview, fold=fold_edited, target="file_path")
             .add(ws.bash, name="Bash", identity=("command",), target="command"))

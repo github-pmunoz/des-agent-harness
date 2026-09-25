@@ -8,8 +8,12 @@ import pytest
 
 from desh.llama.wire import ToolCall
 from desh.tools import Tool, ToolRegistry
-from desh_chat.coding import Workspace, coding_registry, edit_preview
+from desh_chat.coding import Workspace, coding_registry, edit_preview, replacement_diff
 from desh_chat.gate import describe_call, shorten
+
+
+def e(old, new, **kw):
+    return {"old_string": old, "new_string": new, **kw}
 
 
 @pytest.fixture
@@ -86,8 +90,8 @@ class TestReadWrite:
         text = "".join(f"line {i:03d}\n" for i in range(1, 101))
         (tmp_path / "big.py").write_text(text)
         ws = Workspace(str(tmp_path), result_chars=200)
-        assert ws.edit("big.py", "line 099", "LINE 099") == "One occurrence of `old_string` replaced."
-        assert ws.edit("big.py", "line 001", "LINE 001") == "One occurrence of `old_string` replaced."
+        assert ws.edit("big.py", [e("line 099", "LINE 099")]).startswith("1 edit applied")
+        assert ws.edit("big.py", [e("line 001", "LINE 001")]).startswith("1 edit applied")
         assert (tmp_path / "big.py").read_text() == text.replace("line 099", "LINE 099").replace("line 001", "LINE 001")
 
     def test_read_missing_file_raises_for_invoke_to_report(self, ws):
@@ -109,45 +113,45 @@ class TestReadWrite:
 
 class TestEdit:
     def test_unique_match_is_replaced_and_the_rest_of_the_file_is_untouched(self, ws):
-        out = ws.edit("src/a.py", "line 2", "LINE TWO")
+        out = ws.edit("src/a.py", [e("line 2", "LINE TWO")])
         assert ws.read("src/a.py") == "line 1\nLINE TWO\nline 3\n"
-        assert "replaced" in out
+        assert out == "1 edit applied to src/a.py (1 replacement; 3 -> 3 lines)."
         assert "line 2" not in out          # the model already has old_string; do not send it back
 
     def test_multi_line_match_with_indentation(self, ws):
         ws.write("src/b.py", "def f():\n    return 1\n\n\ndef g():\n    return 1\n")
-        ws.edit("src/b.py", "def f():\n    return 1\n", "def f():\n    return 2\n")
+        ws.edit("src/b.py", [e("def f():\n    return 1\n", "def f():\n    return 2\n")])
         assert ws.read("src/b.py") == "def f():\n    return 2\n\n\ndef g():\n    return 1\n"
 
     def test_no_match_says_so_and_changes_nothing(self, ws):
-        out = ws.edit("src/a.py", "line 9", "x")
+        out = ws.edit("src/a.py", [e("line 9", "x")])
         assert "not found" in out
         assert ws.read("src/a.py") == "line 1\nline 2\nline 3\n"
 
     def test_ambiguous_match_refuses_and_reports_the_count(self, ws):
-        out = ws.edit("src/a.py", "line", "row")
+        out = ws.edit("src/a.py", [e("line", "row")])
         assert "3" in out and "replace_all" in out
         assert ws.read("src/a.py") == "line 1\nline 2\nline 3\n"
 
     def test_replace_all_replaces_every_occurrence(self, ws):
-        out = ws.edit("src/a.py", "line", "row", replace_all=True)
+        out = ws.edit("src/a.py", [e("line", "row", replace_all=True)])
         assert ws.read("src/a.py") == "row 1\nrow 2\nrow 3\n"
         assert "3" in out
 
     def test_missing_file_is_reported_not_created(self, ws, tmp_path):
-        out = ws.edit("nope.py", "a", "b")
+        out = ws.edit("nope.py", [e("a", "b")])
         assert "does not exist" in out
         assert not (tmp_path / "nope.py").exists()
 
     def test_empty_old_string_is_refused(self, ws):
         # "".count("") is len+1, and replace("", x) would interleave x between every character
-        out = ws.edit("src/a.py", "", "x")
+        out = ws.edit("src/a.py", [e("", "x")])
         assert ws.read("src/a.py") == "line 1\nline 2\nline 3\n"
         assert "empty" in out.lower()
 
     def test_confinement_applies(self, ws):
         with pytest.raises(ValueError, match="outside"):
-            ws.edit("../x", "a", "b")
+            ws.edit("../x", [e("a", "b")])
 
 
 # ---------------------
@@ -201,7 +205,7 @@ class TestBash:
         """What a digest line says a call was about (Tool.target)."""
         registry = coding_registry(str(tmp_path))
         assert registry.target("Read", '{"file_path": "src/a.py", "offset": 10}') == "src/a.py"
-        assert registry.target("Edit", '{"file_path": "src/a.py", "old_string": "x", "new_string": "y"}') == "src/a.py"
+        assert registry.target("Edit", '{"file_path": "src/a.py", "edits": [{"old_string": "x", "new_string": "y"}]}') == "src/a.py"
         assert registry.target("Write", '{"file_path": "src/a.py", "content": "..."}') == "src/a.py"
         assert registry.target("Bash", '{"reason": "look", "command": "ls -la"}') == "ls -la"
 
@@ -222,7 +226,7 @@ class TestCodingRegistry:
         assert list(props) == ["file_path", "offset", "limit"]
         assert r.get("Read").parameters["required"] == ["file_path"]
         assert "project root" in props["file_path"]["description"]
-        assert r.get("Edit").parameters["properties"]["replace_all"] == {"type": "boolean", "description": "Replace every occurrence. Default False: old_string must occur exactly once."}
+        assert r.get("Edit").parameters["properties"]["edits"]["items"]["required"] == ["old_string", "new_string"]
 
     def test_invoke_reports_confinement_and_io_errors_as_text(self, tmp_path):
         r = coding_registry(str(tmp_path))
@@ -250,12 +254,13 @@ class TestCodingRegistry:
 
 
 # ---------------------
-# Edit preview: what the operator sees for an Edit at the gate (colour is off under pytest)
+# Edit preview: what the operator sees for an Edit at the gate (colour is off under pytest).
+# Each replacement is one diff under its label; the call's preview numbers them under the path.
 # ---------------------
 
 class TestEditPreview:
     def preview(self, old, new, **extra):
-        return edit_preview({"file_path": "x.py", "old_string": old, "new_string": new, **extra}).splitlines()
+        return replacement_diff("x.py", e(old, new, **extra)).splitlines()
 
     def test_one_line_change_is_a_minus_and_a_plus_under_the_path(self):
         assert self.preview("    return a - b", "    return a + b") == ["x.py", "-    return a - b", "+    return a + b"]
@@ -275,20 +280,20 @@ class TestEditPreview:
         assert self.preview("a", "b", replace_all=True)[-1] == "(replace_all: true)"
         assert "(replace_all" not in "\n".join(self.preview("a", "b"))
 
-    def test_missing_path_is_named(self):
-        assert edit_preview({"old_string": "a", "new_string": "b"}).splitlines()[0] == "(no file)"
+    def test_the_call_numbers_each_edit_under_the_path(self):
+        assert edit_preview({"file_path": "x.py", "edits": [e("a", "b")]}).splitlines() == ["x.py — 1 edit", "edit 1", "-a", "+b"]
 
-    def test_malformed_call_raises_and_the_gate_falls_back(self, tmp_path):
-        with pytest.raises(Exception):
-            edit_preview({"file_path": "x.py"})
-        tool = coding_registry(str(tmp_path)).get("Edit")
-        tc = ToolCall(index=0, id="c", type="function", name="Edit", arguments='{"file_path": "x.py"}')
-        assert describe_call(tc, tool) == '→ Edit\n  file_path: "x.py"'
+    def test_missing_path_is_named(self):
+        assert edit_preview({"edits": [e("a", "b")]}).splitlines()[0] == "(no file) — 1 edit"
+
+    def test_a_malformed_call_is_previewed_not_raised(self, tmp_path):
+        assert edit_preview({"file_path": "x.py"}) == "x.py — 0 edits"
+        assert edit_preview({"file_path": "x.py", "edits": [{"old_string": "a"}]}).splitlines() == ["x.py — 1 edit", "edit 1: (malformed)"]
 
     def test_colour_wraps_only_when_stdout_is_a_tty(self, monkeypatch):
         from desh import render
         monkeypatch.setattr(render.c_out, "enabled", True)
-        out = edit_preview({"file_path": "x.py", "old_string": "a", "new_string": "b"})
+        out = edit_preview({"file_path": "x.py", "edits": [e("a", "b")]})
         assert "\033[31m-a\033[0m" in out and "\033[32m+b\033[0m" in out
 
 
@@ -369,12 +374,11 @@ class TestWrittenFold:
         assert fold_written({"file_path": "a", "content": "short"}) == {"file_path": "a", "content": "short"}
         assert fold_written({"file_path": "a"}) == {"file_path": "a"}
 
-    def test_a_long_edit_folds_both_strings(self):
+    def test_a_long_edit_folds_its_edits(self):
         from desh_chat.coding import fold_edited
-        args = {"file_path": "a", "old_string": "o" * 500, "new_string": "n" * 500, "replace_all": False}
-        folded = fold_edited(args)
-        assert folded == {"file_path": "a", "replace_all": False, "folded": "old_string of 500 and new_string of 500 characters; the file holds the new text"}
-        assert fold_edited({"file_path": "a", "old_string": "x", "new_string": "y"}) == {"file_path": "a", "old_string": "x", "new_string": "y"}
+        folded = fold_edited({"file_path": "a", "edits": [e("o" * 500, "n" * 500)]})
+        assert folded == {"file_path": "a", "folded": "1 edit replacing 500 characters with 500; the file holds the new text"}
+        assert fold_edited({"file_path": "a", "edits": [e("x", "y")]}) == {"file_path": "a", "edits": [e("x", "y")]}
 
     def test_the_round_records_the_fold_after_the_call_ran(self, tmp_path, make_state):
         """The full arguments run; the round echoes the fold from then on (as a delegate brief does)."""

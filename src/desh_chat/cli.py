@@ -23,7 +23,7 @@ from desh_chat.display import DisplayBanner
 from desh_chat.state import ChatHistory, Deadline, Settings, InferenceEngine, StopReason
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
-from desh_chat.coding import Workspace, edit_preview, fold_edited, fold_written, project_tree
+from desh_chat.coding import Workspace, edit_parameters, edit_preview, fold_edited, fold_written, project_tree
 from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG, fold_brief, fold_brief_to_record
 from desh_chat.memory import Memories, Memory
 from desh_chat.ontology import ONTOLOGY
@@ -68,8 +68,11 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         tools = tools.add(ws.read, name="Read", confirm=False, target="file_path")
     if args.write:
         tools = tools.add(ws.write, name="Write", fold=fold_written, target="file_path")
+    # one replacement or several in one file in one call, all or none: what a rewrite of a whole
+    # file does, carrying only the lines that change
+    edit = dict(name="Edit", parameters=edit_parameters(ws), preview=edit_preview, fold=fold_edited, target="file_path")
     if args.edit:
-        tools = tools.add(ws.edit, name="Edit", preview=edit_preview, fold=fold_edited, target="file_path")
+        tools = tools.add(ws.edit, **edit)
     if args.bash:
         tools = tools.add(ws.bash, name="Bash", identity=("command",), target="command", acts=False)
     if args.current_time:
@@ -78,7 +81,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         delegate_tools = ToolRegistry(debug=args.debug, max_result_chars=max_result_chars)
         delegate_tools = (delegate_tools.add(ws.read, name="Read", confirm=False, target="file_path")
                           .add(ws.write, name="Write", fold=fold_written, target="file_path")
-                          .add(ws.edit, name="Edit", preview=edit_preview, fold=fold_edited, target="file_path")
+                          .add(ws.edit, **edit)
                           .add(ws.bash, name="Bash", identity=("command",), target="command", acts=False))
         # a subagent gets the run's memories that are worth having for one run (Memory.subagent)
         child_memories = tuple(m for m in memories if m.subagent == "fresh")
@@ -156,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     # toolsets are additive flags: any combination, none means the model is offered no tools
     ap.add_argument("--read",      action="store_true", help="offer the Read tool")
     ap.add_argument("--write",     action="store_true", help="offer the Write tool")
-    ap.add_argument("--edit",      action="store_true", help="offer the Edit tool")
+    ap.add_argument("--edit",      action="store_true", help="offer the Edit tool: one replacement or several in one file in one call, all or none")
     ap.add_argument("--bash",      action="store_true", help="offer the Bash tool")
     ap.add_argument("--delegate",  action="store_true", help="offer delegate: subagents with the same tools and settings")
     ap.add_argument("--delegate-records", action="store_true", help="keep every delegation's brief and whole answer under .desh/delegates and name them on the answer's last line, so a later brief can point at them")
