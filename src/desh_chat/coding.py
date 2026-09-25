@@ -132,13 +132,15 @@ class Workspace:
         return content + trailer(last, False)
 
     def write(self, file_path: str, content: str) -> str:
-        """Create or overwrite a text file with the given content, creating parent directories.
+        """Create a text file with the given content, creating parent directories. Rejects if the file exists (use Edit instead).
 
         Args:
             file_path: Path of the file to write, relative to the project root.
             content: The full new contents of the file.
         """
         full = self.path(file_path)
+        if os.path.exists(full):
+            return f"File {file_path} already exists, use Edit to change it. Nothing was written."
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)

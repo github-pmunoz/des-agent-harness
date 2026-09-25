@@ -103,8 +103,7 @@ class TestReadWrite:
         assert ws.read("new/dir/f.txt") == "hi\n"
 
     def test_write_overwrites(self, ws):
-        ws.write("src/a.py", "x")
-        assert ws.read("src/a.py") == "x"
+        assert "Nothing was written" in ws.write("src/a.py", "x")
 
 
 # ---------------------
