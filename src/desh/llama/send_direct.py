@@ -9,6 +9,8 @@ code yellow, and a --- seam; without it the final content is printed once.
 import argparse
 import json
 import sys
+import base64
+import os
 from urllib.parse import urlparse
 
 from desh.llama.logger import Logger
@@ -23,6 +25,30 @@ def prompt_from_file(path: str) -> str:
         lines = f.read().rstrip("\n").split("\n")
     body = "\n".join(f"{i+1}\t{l}" for i, l in enumerate(lines))
     return f'<file: "{path.split("/")[-1]}">:\n{body}\n</file>'
+
+def image_to_base64(image_path: str) -> str:
+    """Loads a local image and converts it into an OpenAI-compatible Base64 data URI string."""
+    # Determine the file extension to construct the correct media type
+    _, ext = os.path.splitext(image_path.lower())
+
+    if ext == ".png":
+        media_type = "image/png"
+    elif ext in [".jpg", ".jpeg"]:
+        media_type = "image/jpeg"
+    elif ext == ".webp":
+        media_type = "image/webp"
+    else:
+        # Default fallback, though standard types are preferred
+        media_type = "image/jpeg"
+
+    # Read the binary data of the image
+    with open(image_path, "rb") as image_file:
+        binary_data = image_file.read()
+        # Encode the binary data into a base64 bytes string, then decode to ascii text
+        base64_encoded = base64.b64encode(binary_data).decode("utf-8")
+
+    # Combine into the standardized Data URI format required by the API
+    return f"data:{media_type};base64,{base64_encoded}"
 
 
 def main(argv=None) -> int:
@@ -41,13 +67,22 @@ def main(argv=None) -> int:
     ap.add_argument("-s", "--stream", action="store_true")
     ap.add_argument("-l", "--log", default="", help="JSONL telemetry file")
     ap.add_argument("-m", "--model", help="model id (router mode)")
+    ap.add_argument("-i", "--img", default="", help="path to image to send")
     a = ap.parse_args(argv)
 
-    req = Request.single(
-        user=prompt_from_file(a.prompt_file) if a.prompt_file else a.user_prompt,
-        system=a.system_prompt, model=a.model, temperature=a.temperature,
-        max_tokens=a.max_tokens, think=a.think, stream=a.stream,
-    )
+    if not a.img:
+        req = Request.single(
+            user=prompt_from_file(a.prompt_file) if a.prompt_file else a.user_prompt,
+            system=a.system_prompt, model=a.model, temperature=a.temperature,
+            max_tokens=a.max_tokens, think=a.think, stream=a.stream,
+        )
+    else:
+        img_b64 = image_to_base64(a.img)
+        req = Request.single(
+            user=prompt_from_file(a.prompt_file) if a.prompt_file else a.user_prompt,
+            system=a.system_prompt, image=img_b64, model=a.model, temperature=a.temperature,
+            max_tokens=a.max_tokens, think=a.think, stream=a.stream,
+        )
     if a.no_op:
         print(json.dumps(req.payload(), indent=2))
         return 0

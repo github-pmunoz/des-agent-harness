@@ -33,10 +33,13 @@ class Request:
     seed: Optional[int] = None                        # None -> server picks; 0 is a valid seed
 
     @classmethod
-    def single(cls, user: str, system: str = "", **params) -> "Request":
+    def single(cls, user: str, system: str = "", image: str | None = None, **params) -> "Request":
         """Build a request with a single user message and optional system prompt."""
-        messages = [{"role": "system", "content": system}] if system else []
-        messages.append({"role": "user", "content": user})
+        messages : list[dict] = [{"role": "system", "content": system}] if system else []
+        if image is None:
+            messages.append({"role": "user", "content": user})
+        else:
+            messages.append({"role": "user", "content": [{"type": "text", "text": user}, {"type": "image_url", "image_url": {"url":image}}]})
         return cls(messages=messages, **params)
 
     def payload(self) -> dict:
