@@ -18,4 +18,8 @@ evals/readme-update/runs/
 evals/readme-update/sweeps/
 !evals/readme-update/baseline.json
 !evals/readme-update/contexts.json
+evals/geom-perception/runs/
+evals/geom-perception/sweeps/
+!evals/geom-perception/baseline.json
+!evals/geom-perception/sweep-*.json
 .desh/

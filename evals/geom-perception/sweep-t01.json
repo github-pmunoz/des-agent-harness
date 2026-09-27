@@ -1,0 +1,9 @@
+{
+  "baseline": "baseline.json",
+  "sweeps": [
+    {"name": "think",       "reps": 3, "override": {"temperature": 0.1}},
+    {"name": "think-grid",  "reps": 3, "override": {"temperature": 0.1, "grid": true}},
+    {"name": "think-400px", "reps": 3, "override": {"temperature": 0.1, "image_px": 400}},
+    {"name": "nothink",     "reps": 3, "override": {"temperature": 0.1, "think": false}}
+  ]
+}

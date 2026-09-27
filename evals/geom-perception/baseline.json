@@ -1,0 +1,11 @@
+{
+  "model": "Qwen3.8-27B-UD-Q4_K_M-256K-mmproj",
+  "port": 8012,
+  "think": true,
+  "temperature": 0.7,
+  "max_tokens": 32768,
+  "timeout": 900,
+  "grid": false,
+  "image_px": 800,
+  "cases": []
+}

@@ -1,0 +1,9 @@
+{
+  "baseline": "baseline.json",
+  "sweeps": [
+    {"name": "think",         "reps": 3, "override": {}},
+    {"name": "think-grid",    "reps": 3, "override": {"grid": true}},
+    {"name": "nothink",       "reps": 3, "override": {"think": false}},
+    {"name": "nothink-grid",  "reps": 3, "override": {"think": false, "grid": true}}
+  ]
+}

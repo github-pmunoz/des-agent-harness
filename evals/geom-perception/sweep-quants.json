@@ -1,0 +1,11 @@
+{
+  "baseline": "baseline.json",
+  "sweeps": [
+    {"name": "q8",       "reps": 3, "override": {"temperature": 0.1, "model": "Qwen3.8-27B-UD-Q8_K_L-64K-mmproj"}},
+    {"name": "q6",       "reps": 3, "override": {"temperature": 0.1, "model": "Qwen3.8-27B-UD-Q6_K_L-64K-mmproj"}},
+    {"name": "q4",       "reps": 3, "override": {"temperature": 0.1, "model": "Qwen3.8-27B-UD-Q4_K_M-256K-mmproj"}},
+    {"name": "q4-400px", "reps": 3, "override": {"temperature": 0.1, "model": "Qwen3.8-27B-UD-Q4_K_M-256K-mmproj", "image_px": 400}},
+    {"name": "q4-200px", "reps": 3, "override": {"temperature": 0.1, "model": "Qwen3.8-27B-UD-Q4_K_M-256K-mmproj", "image_px": 200}},
+    {"name": "q2",       "reps": 3, "override": {"temperature": 0.1, "model": "Qwen3.8-27B-UD-Q2_K_XL-256K-mmproj"}}
+  ]
+}

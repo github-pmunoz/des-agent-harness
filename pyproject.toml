@@ -18,6 +18,7 @@
 
   [project.optional-dependencies]
   dev = ["pytest>=8"]
+  geom = ["numpy>=2", "pillow>=11"]
 
   [tool.pytest.ini_options]
   testpaths = ["tests"]
