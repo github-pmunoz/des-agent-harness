@@ -220,3 +220,45 @@ def test_render_diff_colours():
     assert tuple(im[5, 5]) == (230, 120, 0)                           # missing
     assert tuple(im[5, 15]) == (170, 170, 170)                        # match
     assert tuple(im[5, 25]) == (0, 90, 200)                           # extra
+
+
+def test_origin_is_a_display_convention():
+    L = Layout(100, 50)
+    L.layer("M1", (255, 0, 0))
+    L.add("M1", Rect(0, 0, 10, 10))                                   # at y = 0
+    up = np.array(render(L, image_px=100))
+    down = np.array(render(L, image_px=100, origin="top-left"))
+    assert tuple(up[49, 0]) == (255, 0, 0) and tuple(up[0, 0]) == (255, 255, 255)     # bottom row
+    assert tuple(down[0, 0]) == (255, 0, 0) and tuple(down[49, 0]) == (255, 255, 255)  # top row
+    assert np.array_equal(np.flipud(up), down)
+    with pytest.raises(GeometryError, match="origin"):
+        render(L, origin="centre")
+
+
+def test_pixel_mapping_matches_the_render():
+    from desgeo.render import pixel_mapping
+    L = Layout(800, 800)
+    L.layer("M1", (0, 0, 0))
+    L.add("M1", Rect(354, 143, 163, 192))
+    for origin in ("bottom-left", "top-left"):
+        for kw in ({}, {"window": (340, 130, 530, 350)}, {"ticks": 100}):
+            im = np.array(render(L, origin=origin, **kw).convert("L")) < 128
+            m = pixel_mapping(800, 800, origin=origin, **kw)
+            x0, y0, x1, y1 = kw.get("window", (0, 0, 800, 800))
+            ph = round((y1 - y0) * m["scale"])
+            plot = im[m["top"]:m["top"] + ph, m["left"]:m["left"] + round((x1 - x0) * m["scale"])]
+            rows = np.nonzero(plot.any(1))[0] + m["top"]
+            # the edges of the shape's pixel rows, mapped back: the rect's y extent
+            ys = [m["y_top"] + (-1 if m["y_up"] else 1) * (r - m["top"]) / m["scale"] for r in (rows.min(), rows.max() + 1)]
+            assert round(min(ys)) == 143 and round(max(ys)) == 335
+
+
+def test_labels_sit_outside_their_shape():
+    from desgeo import Metrology
+    L = Layout(400, 400)
+    L.layer("M1", (0, 0, 0))
+    L.add("M1", Rect(100, 100, 200, 200))
+    im = np.array(render(L, image_px=400, labels=Metrology(L).labels()))
+    inside = im[101:299, 101:299]
+    assert (inside == 0).all()                                         # nothing drawn over the shape
+    assert ((im[:, :, 0] == 255) & (im[:, :, 1] == 215) & (im[:, :, 2] == 0)).any()

@@ -18,8 +18,17 @@ from a number to a region or back.
 
 Canonical form: commutative operators are flattened and their operands sorted by structural
 digest; | and & drop duplicate operands; size 0, move 0 and scale 1 vanish; identical
-subexpressions are shared. Program.cost is the number of distinct nodes reachable from the
-outputs, so a spelling difference never changes it but a redundant operation does.
+subexpressions are shared. Two costs are read off the DAG of what the outputs use, each shared
+node counted once, so a spelling difference never changes them but a redundant operation does:
+
+    ops         operations: 1 per leaf (rect, poly, input layer) and per operator; an n-ary
+                | & ^ counts n - 1, as it is written with binary operators
+    variables   the numbers and names a program must fix: a rect 5 (a name, the origin, the size),
+                a poly 3 + 2 per delta (a name, the origin, each step), an input layer 1, a boolean
+                1 per binary operator, size 1 + its amounts (1, or 2 when dx != dy), move 3,
+                scale 1 + 1 (a whole factor) or 2 (a fraction)
+
+So `rect - rect` is 3 ops and 11 variables, and an 8-vertex poly is 1 op and 17 variables.
 """
 from __future__ import annotations
 
@@ -79,8 +88,12 @@ class Program:
     dead: list[str] = field(default_factory=list)   # "name (line n)" of statements no output uses
 
     @property
-    def cost(self) -> int:
-        return len(self.order)
+    def ops(self) -> int:
+        return sum(_ops(n) for n in self.order)
+
+    @property
+    def variables(self) -> int:
+        return sum(_variables(n) for n in self.order)
 
     def evaluate(self, engine, layout: Layout | None = None) -> dict[str, Any]:
         """Evaluate every output on the engine; each shared node is computed once."""
@@ -362,6 +375,30 @@ def _eval(n: Node, val: dict, engine, layout: Layout | None):
     if n.op == "sub":
         return engine.subtract(a[0], a[1])
     return getattr(engine, n.op)(*a)                # size, move, scale
+
+
+def _ops(n: Node) -> int:
+    return len(n.args) - 1 if n.op in COMMUTATIVE else 1
+
+
+def _variables(n: Node) -> int:
+    if n.op == "rect":
+        return 5
+    if n.op == "poly":
+        return 3 + 2 * len(n.args[1])
+    if n.op == "layer":
+        return 1
+    if n.op in COMMUTATIVE:
+        return len(n.args) - 1
+    if n.op == "sub":
+        return 1
+    if n.op == "size":
+        return 2 if n.args[1] == n.args[2] else 3
+    if n.op == "move":
+        return 3
+    if n.op == "scale":
+        return 2 if n.args[2] == 1 else 3
+    raise AssertionError(f"no variable count for {n.op}")
 
 
 def _text(n: Node, ids: dict[str, str]) -> str:

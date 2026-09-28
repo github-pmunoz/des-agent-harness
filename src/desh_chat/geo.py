@@ -18,7 +18,10 @@ else it gets is the arm, chosen by which tools are registered (--geo-tools), nev
 
 Instruments read the target by default (it is what the agent must perceive) or the current
 submission. The grid and tick overlays are the operator's, per run (--geo-grid, --geo-ticks);
-the model cannot turn them on. --geo-ruler-bias k is the causal-audit arm: every length an
+the model cannot turn them on. So is the origin (--geo-origin): bottom-left (y up, the EDA
+convention) or top-left (y down, as image pixels count); the geometry is the same under both, and
+only renders, the prompt's orientation sentence and the words top and bottom follow it. Every
+render result states how its pixels map to layout units. --geo-ruler-bias k is the causal-audit arm: every length an
 instrument reports is off by k, so a final answer that follows the instrument can be told from
 one that ignores it.
 
@@ -34,26 +37,36 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from desgeo import DslError, GeometryError, Layout, Metrology, RasterEngine, Rect, Ruler, render, render_diff, run
+from desgeo.render import pixel_mapping
 from desh.tools import ToolOutput, ToolRegistry
 
 GEO_TOOLS = ("render", "measure", "auto_measure", "inspect")
+# The display convention (--geo-origin): how y is drawn and named. Geometry is the same under both.
+ORIENTATION = {
+    "bottom-left": "The origin (0, 0) is the bottom-left corner; x grows to the right and y grows upward.",
+    "top-left": "The origin (0, 0) is the top-left corner; x grows to the right and y grows downward.",
+}
 FEEDBACK = ("iou", "mismatch")
 MAX_MISMATCH_RECTS = 8
+# What a run is told when it answers with no accepted submission (GeoSession.unfinished).
+NOT_SUBMITTED = ("You have not submitted an accepted program: the task is only done once geo_submit accepts "
+                 "one, and the last accepted submission is the answer. Submit your best program now.")
 
-GEO_PROMPT = """You are working on a 2D layout of {width} x {height} layout units (1 unit = {resolution} nm). The origin (0, 0) is the bottom-left corner; x grows to the right and y grows upward. All geometry is axis-aligned on the integer grid.
+GEO_PROMPT = """You are working on a 2D layout of {width} x {height} layout units (1 unit = {resolution} nm). {orientation} All geometry is axis-aligned on the integer grid.
 Layers: {layers}.{inputs}
 Your answer is a program in the layout language, submitted with geo_submit. It must assign the output layer{s} {outputs}. Submit whenever you want feedback; the last submission is your answer.
 
 The layout language: one statement per line, `name = expression`. Only these forms exist:
   w = 40                          numbers: integers with + - * / (a division must be exact)
-  a = rect(x, y, w, h)            lower-left corner (x, y), width w, height h
+  a = rect(x, y, w, h)            {corner} corner (x, y), width w, height h
   p = poly((x, y), [(dx, dy), ...])   a rectilinear outline: a start point and axis-aligned steps, closing back to the start
   c = a | b                       union      c = a & b    intersection
   c = a - b                       difference c = a ^ b    xor
   d = size(a, 5)                  grow every edge outward by 5 (negative: shrink); size(a, dx, dy) per axis
   e = move(a, dx, dy)             translate
   f = scale(a, 2) or scale(a, 3, 2)   scale about the origin by an integer or a fraction
-A layer name{input_note} is a region like any other name; assigning an output layer name writes that layer. Prefer the shortest program that is exact: fewer operations is better."""
+A layer name{input_note} is a region like any other name; assigning an output layer name writes that layer.
+Each submission reports two costs: operations (each rect, poly, input layer and operator) and variables (the numbers and names the program fixes: 5 per rect, 3 + 2 per step of a poly, 1 per operator plus its numeric arguments). Among exact programs, lower costs are better."""
 
 
 @dataclass(frozen=True)
@@ -88,10 +101,11 @@ class GeoTask:
     def input_layers(self) -> tuple[str, ...]:
         return tuple(n for n in self.layers if n not in self.outputs and self.inputs and n in _assigned(self.inputs))
 
-    def prompt_text(self) -> str:
+    def prompt_text(self, origin: str = "bottom-left") -> str:
         ins = self.input_layers()
         return GEO_PROMPT.format(
             width=self.width, height=self.height, resolution=self.resolution,
+            orientation=ORIENTATION[origin], corner="top-left" if origin == "top-left" else "lower-left",
             layers=", ".join(self.layers),
             inputs=f" Input layer{'s' if len(ins) > 1 else ''} {', '.join(ins)} {'are' if len(ins) > 1 else 'is'} given and can be read by name." if ins else "",
             s="s" if len(self.outputs) > 1 else "", outputs=", ".join(self.outputs),
@@ -106,6 +120,11 @@ class GeoSettings:
     grid: int = 0                           # overlay spacing in units; 0 = none (the operator's choice)
     ticks: int = 0                          # labelled tick spacing in units; 0 = none
     ruler_bias: int = 0                     # causal-audit arm: added to every reported length
+    origin: str = "bottom-left"             # display convention: bottom-left (y up) or top-left (y down)
+
+    @property
+    def y_up(self) -> bool:
+        return self.origin == "bottom-left"
 
 
 @dataclass
@@ -172,8 +191,10 @@ class GeoSession:
                          f"; extra {x}{_rect_list(self.engine.rects(extra))}")
             lines.append(line)
         p = res.program
-        tail = f"cost {p.cost} operation{'s' if p.cost != 1 else ''}" + (f"; unused statements: {', '.join(p.dead)}" if p.dead else "")
-        record.update(ok=True, exact=exact, layers=layers, cost=p.cost, dead=p.dead, canonical=p.canonical())
+        tail = (f"cost: {p.ops} operation{'s' if p.ops != 1 else ''}, {p.variables} variables"
+                + (f"; unused statements: {', '.join(p.dead)}" if p.dead else ""))
+        record.update(ok=True, exact=exact, layers=layers, ops=p.ops, variables=p.variables, dead=p.dead,
+                      canonical=p.canonical())
         self._log(record)
         return f"submission {n}: " + ("ALL EXACT. " if exact else "") + "\n".join(lines) + f"\n{tail}"
 
@@ -194,7 +215,8 @@ class GeoSession:
             return "window must be [x0, y0, x1, y1]"
         s = self.settings
         rulers = [((r.a.x, r.a.y), (r.b.x, r.b.y), self._label(r)) for r in self.rulers]
-        overlay = dict(window=win, image_px=s.image_px, grid=s.grid or None, ticks=s.ticks or None, rulers=rulers)
+        overlay = dict(window=win, image_px=s.image_px, grid=s.grid or None, ticks=s.ticks or None, rulers=rulers,
+                       origin=s.origin)
         try:
             if view == "diff":
                 name = layer or self.task.outputs[0]
@@ -212,8 +234,10 @@ class GeoSession:
         path = os.path.join(self.out_dir, f"render-{self.renders:03d}-{view}.png")
         im.save(path)
         x0, y0, x1, y1 = win or (0, 0, self.task.width, self.task.height)
+        m = pixel_mapping(self.task.width, self.task.height, window=win, image_px=s.image_px,
+                          ticks=s.ticks or None, origin=s.origin)
         return ToolOutput(f"{view} rendered: x {x0}..{x1}, y {y0}..{y1}, {im.size[0]} x {im.size[1]} px"
-                          + (f", {len(rulers)} ruler(s)" if rulers else ""), (path,))
+                          + (f", {len(rulers)} ruler(s)" if rulers else "") + ".\n" + _mapping_text(m), (path,))
 
     def measure(self, x1: int, y1: int, x2: int, y2: int, on: Literal["target", "current"] = "target",
                 layer: str = "") -> str:
@@ -237,11 +261,11 @@ class GeoSession:
         by = r.b.y + (k if r.b.y >= r.a.y else -k) if r.dy else r.b.y
         dx, dy = abs(bx - r.a.x), abs(by - r.a.y)
         lines = [f"ruler {len(self.rulers)} on {on}:",
-                 f"  from {r.a.describe()}",
-                 f"  to   {_describe_at(r.b, bx, by)}",
+                 f"  from {r.a.describe(self.settings.y_up)}",
+                 f"  to   {_describe_at(r.b, bx, by, self.settings.y_up)}",
                  f"  dx = {dx}, dy = {dy}" + (f", distance = {(dx * dx + dy * dy) ** 0.5:.1f}" if dx and dy else "")]
         if r.others:
-            lines.append("  ambiguous, also in range: " + "; ".join(o.describe() for o in r.others))
+            lines.append("  ambiguous, also in range: " + "; ".join(o.describe(self.settings.y_up) for o in r.others))
         return "\n".join(lines)
 
     def auto_measure(self, x: int, y: int, on: Literal["target", "current"] = "target", layer: str = "") -> str:
@@ -272,7 +296,9 @@ class GeoSession:
                 ends = [f"shape {i}" if i else "nothing" for i in s["between"]]
                 text += f", between {ends[0]} and {ends[1]}"
                 if s["open"]:
-                    text += f"; reaches the frame on the {' and '.join(s['open'])} side"
+                    size = self.task.width if axis == "x" else self.task.height
+                    edges = [f"{axis}={0 if side == 'low' else size}" for side in s["open"]]
+                    text += f"; reaches the frame edge at {' and '.join(edges)}"
             lines.append(text)
         return "\n".join(lines)
 
@@ -296,6 +322,11 @@ class GeoSession:
             out.append(f"{h['layer']} shape {h['shape']}: bbox [{b.x}, {b.y}, {b.w}, {b.h}], area {h['area']}, "
                        f"{h['vertices']} vertices, rects{_rect_list(h['rects'], cap=16)}")
         return "\n".join(out)
+
+    def unfinished(self) -> str | None:
+        """The run's task check (ChatState.task_check): what is missing, or None when a submission
+        was accepted. Whether it was exact is the grader's business, not the check's."""
+        return None if self.current is not None else NOT_SUBMITTED
 
     # ---- plumbing ------------------------------------------------------------------------------
 
@@ -350,9 +381,32 @@ def _rect_list(rects: list[Rect], cap: int = MAX_MISMATCH_RECTS) -> str:
     return f" in {len(rects)} rect{'s' if len(rects) > 1 else ''} [x, y, w, h]: {shown}{more}"
 
 
-def _describe_at(s, x: int, y: int) -> str:
+def _mapping_text(m: dict) -> str:
+    """The pixel -> layout rule for one image, in the fewest terms that state it exactly."""
+    s = m["scale"]
+    per = "" if s == 1 else f" / {s:.4g}"
+
+    def rel(p: str, offset: int) -> str:
+        if not offset:
+            return f"{p}{per}"
+        return f"{p} - {offset}" if not per else f"({p} - {offset}){per}"
+
+    px, py = rel("px", m["left"]), rel("py", m["top"])
+    x = px if not m["x_left"] else f"{m['x_left']} + {px}"
+    if m["y_up"]:
+        y = f"{m['y_top']} - {py}" if "(" in py or not m["top"] else f"{m['y_top']} - ({py})"
+    else:
+        y = py if not m["y_top"] else f"{m['y_top']} + {py}"
+    scale = "" if s == 1 else f" 1 layout unit = {s:.4g} px."
+    top = (f"The plot's top row (pixel row {m["top"]}) is layout y = {m['y_top']}."
+           if m["top"] else f"The image's top edge is layout y = {m['y_top']}.")
+    return (f"Image pixel (px, py), counted from the image's top-left corner, is layout x = {x}, y = {y}."
+            f"{scale} {top}")
+
+
+def _describe_at(s, x: int, y: int, y_up: bool = True) -> str:
     """A snap described at the (possibly biased) position the ruler reports."""
-    d = s.describe()
+    d = s.describe(y_up)
     return d.replace(f"({s.x}, {s.y})", f"({x}, {y})", 1) if (x, y) != (s.x, s.y) else d
 
 
@@ -366,8 +420,11 @@ def session_from_args(args) -> GeoSession | None:
                                        f"{time.strftime('%Y%m%d-%H%M%S')}-{task.id}")
     if args.geo_feedback not in FEEDBACK:
         raise SystemExit(f"--geo-feedback must be one of {', '.join(FEEDBACK)}")
+    if args.geo_origin not in ORIENTATION:
+        raise SystemExit(f"--geo-origin must be one of {', '.join(ORIENTATION)}")
     settings = GeoSettings(feedback=args.geo_feedback, snap=args.geo_snap, image_px=args.geo_image_px,
-                           grid=args.geo_grid, ticks=args.geo_ticks, ruler_bias=args.geo_ruler_bias)
+                           grid=args.geo_grid, ticks=args.geo_ticks, ruler_bias=args.geo_ruler_bias,
+                           origin=args.geo_origin)
     return GeoSession(task, os.path.abspath(os.path.expanduser(out)), settings)
 
 

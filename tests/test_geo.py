@@ -9,7 +9,7 @@ from test_turn_loop import run_chat
 
 from desgeo import Layout, Metrology, Rect
 from desh.tools import ToolOutput, ToolRegistry
-from desh_chat.geo import GeoSession, GeoSettings, GeoTask
+from desh_chat.geo import NOT_SUBMITTED, GeoSession, GeoSettings, GeoTask
 from desh_chat.state import EXPIRED_RESULT, Round, ToolResult
 from desh.llama.wire import ToolCall
 
@@ -117,9 +117,9 @@ class TestGeoSession:
     def test_exact_submission_is_logged_with_cost(self, tmp_path):
         s = GeoSession(u_task(), str(tmp_path))
         out = s.submit(U_EXACT)
-        assert out.startswith("submission 1: ALL EXACT.") and "cost 3 operations" in out
+        assert out.startswith("submission 1: ALL EXACT.") and "cost: 3 operations, 11 variables" in out
         rec = json.loads((tmp_path / "submissions.jsonl").read_text().splitlines()[0])
-        assert rec["exact"] and rec["cost"] == 3 and rec["layers"]["M1"]["iou"] == 1.0
+        assert rec["exact"] and (rec["ops"], rec["variables"]) == (3, 11) and rec["layers"]["M1"]["iou"] == 1.0
 
     def test_feedback_levels(self, tmp_path):
         near = "M1 = rect(240, 140, 320, 410) - rect(310, 260, 170, 300)"
@@ -172,6 +172,26 @@ class TestGeoSession:
         with pytest.raises(ValueError, match="unknown geo tool"):
             s.register(ToolRegistry(), ("zoom",))
 
+    def test_origin_changes_the_picture_the_prompt_and_the_words_not_the_geometry(self, tmp_path):
+        down = GeoSession(u_task(), str(tmp_path / "d"), GeoSettings(origin="top-left"))
+        up = GeoSession(u_task(), str(tmp_path / "u"))
+        assert "y grows downward" in u_task().prompt_text("top-left") and "top-left corner (x, y)" in u_task().prompt_text("top-left")
+        assert "y grows upward" in u_task().prompt_text()
+        assert down.submit(U_EXACT).startswith("submission 1: ALL EXACT")
+        a = Image.open(up.render_view("target").images[0])
+        b = Image.open(down.render_view("target").images[0])
+        assert a.transpose(Image.FLIP_TOP_BOTTOM).tobytes() == b.tobytes()
+        assert "bottom edge y=143" in up.measure(300, 146, 300, 150)
+        assert "top edge y=143" in down.measure(300, 146, 300, 150)
+
+    def test_render_text_states_the_pixel_mapping(self, tmp_path):
+        s = GeoSession(u_task(), str(tmp_path))
+        assert "layout x = px, y = 800 - py" in s.render_view("target").text
+        zoom = s.render_view("target", window=[200, 100, 600, 500]).text
+        assert "x = 200 + px / 2, y = 500 - py / 2" in zoom and "1 layout unit = 2 px" in zoom
+        down = GeoSession(u_task(), str(tmp_path / "d"), GeoSettings(origin="top-left", ticks=100))
+        assert "x = px - 44, y = py - 14" in down.render_view("target").text
+
     def test_prompt_states_frame_outputs_and_inputs_but_no_image(self):
         text = via_task().prompt_text()
         assert "600 x 400" in text and "output layer VIA" in text and "Input layer M1 is given" in text
@@ -203,3 +223,40 @@ class TestGeoLoop:
             assert tool_msg["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
         # once the turn is history, the result is a stub and the pixels are gone
         assert all(m.get("content") == EXPIRED_RESULT for m in turn.messages() if m["role"] == "tool")
+
+
+class TestTaskCheck:
+    def run_task(self, make_state, script, tmp_path, **overrides):
+        from conftest import FakeServer
+        from test_turn_loop import with_server
+        from desh.engine import Engine
+        from desh_chat.events import TurnStart
+        s = GeoSession(u_task(), str(tmp_path))
+        server = FakeServer(script=script)
+        state = with_server(make_state, server, tools=s.register(ToolRegistry(), ()), operator=False,
+                            task_check=s.unfinished, **overrides)
+        return Engine[type(state)]().run(state, seed=[TurnStart("reproduce M1")]), server
+
+    def test_an_answer_with_nothing_submitted_is_nudged_until_the_budget_runs_out(self, make_state, no_esc_watcher, tmp_path):
+        script = [{"content": "It is a U."},
+                  {"tool_calls": [{"name": "geo_submit", "arguments": json.dumps({"program": U_EXACT})}]},
+                  {"content": "Done."}]
+        final, server = self.run_task(make_state, script, tmp_path, max_nudges=1)
+        assert [t.user for t in final.history.turns] == ["reproduce M1", NOT_SUBMITTED]
+        assert final.nudges == 1 and "ALL EXACT" in final.history.turns[1].rounds[0].results[0].content
+
+    def test_no_nudge_without_budget_or_once_submitted(self, make_state, no_esc_watcher, tmp_path):
+        final, _ = self.run_task(make_state, [{"content": "It is a U."}], tmp_path / "a", max_nudges=0)
+        assert len(final.history.turns) == 1
+        script = [{"tool_calls": [{"name": "geo_submit", "arguments": json.dumps({"program": "M1 = rect(0, 0, 10, 10)"})}]},
+                  {"content": "Close enough."}]
+        final, _ = self.run_task(make_state, script, tmp_path / "b", max_nudges=2)
+        assert len(final.history.turns) == 1 and final.nudges == 0
+
+    def test_unfinished_counts_only_accepted_submissions(self, tmp_path):
+        s = GeoSession(u_task(), str(tmp_path))
+        assert s.unfinished() == NOT_SUBMITTED
+        s.submit("M1 = rect(1, 1, 1)")
+        assert s.unfinished() == NOT_SUBMITTED
+        s.submit("M1 = rect(0, 0, 10, 10)")
+        assert s.unfinished() is None

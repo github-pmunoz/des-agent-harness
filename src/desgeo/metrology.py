@@ -36,12 +36,17 @@ class Edge:
     at: int
     lo: int                     # the span along the other axis
     hi: int
-    side: str                   # where the shape is: left / right of a vertical edge, below / above a horizontal one
+    side: str                   # where the shape is: left / right of a vertical edge (smaller / larger x),
+                                # below / above a horizontal one (smaller / larger y, whichever way y is drawn)
 
-    def describe(self) -> str:
+    def describe(self, y_up: bool = True) -> str:
+        """The edge as the shape's own side: its left/right edge, and its bottom/top edge in the
+        display convention (with y down, the edge that has the shape at larger y is its top)."""
         if self.axis == "x":
             return f"{'right' if self.side == 'left' else 'left'} edge x={self.at} (y {self.lo}..{self.hi})"
-        return f"{'bottom' if self.side == 'above' else 'top'} edge y={self.at} (x {self.lo}..{self.hi})"
+        low_edge = self.side == "above"             # the shape lies at larger y
+        name = ("bottom" if low_edge else "top") if y_up else ("top" if low_edge else "bottom")
+        return f"{name} edge y={self.at} (x {self.lo}..{self.hi})"
 
 
 @dataclass(frozen=True)
@@ -54,10 +59,10 @@ class Snap:
     edge: Edge | None = None
     distance: float = 0.0       # from the pointed-at position
 
-    def describe(self) -> str:
+    def describe(self, y_up: bool = True) -> str:
         if self.kind == "free":
             return f"({self.x}, {self.y}) free, nothing within range"
-        what = "vertex" if self.kind == "vertex" else self.edge.describe()
+        what = "vertex" if self.kind == "vertex" else self.edge.describe(y_up)
         return f"({self.x}, {self.y}) {self.layer} shape {self.shape} {what}"
 
 

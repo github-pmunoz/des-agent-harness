@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 desgeo DSL by example: named statements compiled to a canonical DAG and evaluated on the raster
-oracle. Each example prints its canonical form, cost and area; PNGs go to the output directory.
+oracle. Each example prints its canonical form, its two costs and area; PNGs go to the output directory.
 
     PYTHONPATH=src venv/bin/python examples/desgeo-dsl.py [OUT_DIR]      (default ./desgeo-out)
 
@@ -33,7 +33,8 @@ def show(title: str, src: str, layout: Layout | None = None, outputs=None, png: 
     print("--- canonical")
     print(res.program.canonical())
     areas = ", ".join(f"{n}={eng.area(r)}" for n, r in res.regions.items())
-    print(f"--- cost {res.program.cost}, area {areas}, dead {res.program.dead or 'none'}")
+    print(f"--- ops {res.program.ops}, variables {res.program.variables}, area {areas}, "
+          f"dead {res.program.dead or 'none'}")
     if png:
         OUT.mkdir(parents=True, exist_ok=True)
         render(res.layout, ticks=50).save(OUT / png)          # inputs and outputs
@@ -54,7 +55,8 @@ U = left | right | bottom
 """)
     eng = RasterEngine(W, H)
     same = eng.equal(minus.regions["U"], union.regions["U"])
-    print(f"--- same region: {same}; cost minus {minus.program.cost} vs union {union.program.cost}")
+    print(f"--- same region: {same}; ops minus {minus.program.ops} vs union {union.program.ops}, "
+          f"variables {minus.program.variables} vs {union.program.variables}")
 
 
 def canonical():
@@ -63,7 +65,7 @@ def canonical():
     b = compile("c = rect(60, 0, 20, 20)\nb = rect(25, 25, 50, 50)\n"
                 "r = c | (b | rect(0, 0, 50, 50)) | c")
     print("\n=== 2 canonical: (a | b) | c  vs  c | (b | a) | c")
-    print(f"--- identical: {a.canonical() == b.canonical()}, costs {a.cost} and {b.cost}")
+    print(f"--- identical: {a.canonical() == b.canonical()}, ops {a.ops} and {b.ops}")
     show("2b dead statements", """
 a = rect(0, 0, 50, 50)
 b = rect(25, 25, 50, 50)

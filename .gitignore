@@ -23,3 +23,5 @@ evals/geom-perception/sweeps/
 !evals/geom-perception/baseline.json
 !evals/geom-perception/sweep-*.json
 .desh/
+evals/desgeo-track-A/runs/
+evals/desgeo-track-A/sweeps/

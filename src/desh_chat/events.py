@@ -91,6 +91,13 @@ class TurnStart(Event):
                 and state.history.trailing_continues() <= state.settings.max_cap_continues:
             if not previous or previous[-1].stop != StopReason.REPEAT:
                 return opened, [Info("Repeated round stopped, continuing the task."), UserMessage(state.repeat_prompt)]
+        # A turn that answered is checked against the task, when the run has a check and no
+        # operator: an answer that leaves the task undone (a geo task with nothing submitted) is
+        # continued with what is missing, a bounded number of times in the run.
+        if last is not None and last.stop == StopReason.ANSWER and not state.operator \
+                and state.task_check is not None and state.nudges < state.max_nudges:
+            if (nudge := state.task_check()) is not None:
+                return replace(opened, nudges=state.nudges + 1), [Info("Task check: not done, continuing the task."), UserMessage(nudge)]
         if state.operator:
             return opened, [DisplayStats(), PromptUser()]
         return state, []

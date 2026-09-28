@@ -178,6 +178,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--geo-grid",  type=int, default=0, help="grid overlay spacing on renders, in layout units; 0 = none")
     ap.add_argument("--geo-ticks", type=int, default=0, help="labelled tick spacing on renders, in layout units; 0 = none")
     ap.add_argument("--geo-ruler-bias", type=int, default=0, help="causal-audit arm: add this to every length the instruments report")
+    ap.add_argument("--geo-origin", default="bottom-left", help="display convention: bottom-left (y up, EDA) or top-left (y down, as image pixels); geometry is the same under both")
+    ap.add_argument("--max-nudges", type=int, default=0, help="a --task run with a task check (--geo: nothing submitted yet) is continued this many times when it answers with the task undone")
     ap.add_argument("--geo-out",   default="", help="where renders and submissions.jsonl go (default: WORKSPACE/.desh/geo/<time>-<task id>)")
     ap.add_argument("-tc",  "--tool-cap",       type=float, default=10.0, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
     ap.add_argument("-ct",  "--checkpoint-target", type=float, default=0.15, help="share of the context a mid-turn checkpoint summary may take")
@@ -310,7 +312,7 @@ def run(args: argparse.Namespace, prompts: Prompts):
     base_prompt = args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely."
     geo = session_from_args(args)
     if geo is not None:
-        base_prompt += "\n\n" + geo.task.prompt_text()
+        base_prompt += "\n\n" + geo.task.prompt_text(geo.settings.origin)
         if not args.task:
             args.task = geo.task.prompt
     if args.tree:
@@ -353,6 +355,8 @@ def run(args: argparse.Namespace, prompts: Prompts):
         length_prompt=prompts.get("length_continue") if args.cont else None,
         repeat_prompt=prompts.get("repeat_continue") if args.cont else None,
         memory=memory,
+        task_check=geo.unfinished if geo is not None else None,
+        max_nudges=args.max_nudges,
         # the clock starts here, before the session loads and the router loads the model: both are run time
         deadline=Deadline.in_seconds(args.task_timeout) if args.task and args.task_timeout > 0 else None,
     )

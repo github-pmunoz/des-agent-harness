@@ -29,7 +29,7 @@ def prog(body: str, **kw):
 def test_spellings_share_one_canonical_form(x, y):
     px, py = prog(x), prog(y)
     assert px.canonical() == py.canonical()
-    assert px.cost == py.cost
+    assert (px.ops, px.variables) == (py.ops, py.variables)
 
 
 def test_canonical_form_ignores_statement_order():
@@ -48,10 +48,23 @@ def test_polygon_spellings_are_one_node():
 
 def test_cost_counts_distinct_nodes_and_reports_dead_statements():
     p = prog("r = a - b\nunused = a & c\nout = r | size(r, 2)")
-    assert p.cost == 5                        # a, b, a-b, size, |
+    assert p.ops == 5                         # a, b, a-b, size, |
+    assert p.variables == 5 + 5 + 1 + 2 + 1
     assert list(p.outputs) == ["out"]
     assert p.dead == ["c (line 3)", "unused (line 5)"]
-    assert prog("r = (a - b) | (a - b)").cost == 3
+    assert prog("r = (a - b) | (a - b)").ops == 3
+
+
+@pytest.mark.parametrize("src, ops, variables", [
+    ("r = rect(0, 0, 10, 10) - rect(2, 2, 4, 4)", 3, 11),
+    ("r = poly((0, 0), [(40, 0), (0, 40), (-10, 0), (0, -30), (-20, 0), (0, 30), (-10, 0)])", 1, 17),
+    ("r = rect(0, 0, 5, 5) | rect(10, 0, 5, 5) | rect(20, 0, 5, 5)", 5, 17),
+    ("a = rect(0, 0, 5, 5)\nr = a | move(a, 10, 0)", 3, 5 + 3 + 1),
+    ("a = rect(10, 10, 5, 5)\nr = size(a, 2) | size(a, 2, 3) | scale(a, 2) | scale(a, 3, 2)", 8, 5 + 2 + 3 + 2 + 3 + 3),
+])
+def test_two_costs(src, ops, variables):
+    p = compile(src)
+    assert (p.ops, p.variables) == (ops, variables)
 
 
 def test_subtraction_is_not_commutative():

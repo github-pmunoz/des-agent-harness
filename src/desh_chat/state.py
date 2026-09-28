@@ -256,6 +256,13 @@ class ChatState(State):
     # here; a memory tool only sees a dict built from its slot for the one call. Rendered last in
     # every request, and snapshotted onto each finished Turn so a session restores it.
     memory: Memories = field(default_factory=Memories)
+    # A task-level check for a run without an operator: after a turn that ends with an answer,
+    # TurnStart asks it whether the task is done. A message back means it is not, and the task is
+    # continued with that message, at most max_nudges times in the run. Supplied by a plugin that
+    # knows what done means (a geo task: an accepted submission); None means the answer is final.
+    task_check: Callable[[], str | None] | None = field(default=None, repr=False)
+    max_nudges: int = 0
+    nudges: int = 0
     # What MaybeRegenerate does when the queue runs dry: 'prompt' opens the next turn (the
     # interactive loop); 'exit' ends the run (a one-shot --task run).
     idle_policy: str = "prompt"

@@ -4,8 +4,14 @@ target-vs-current diff.
 
 Rendering rasterises shapes itself (through the raster engine), so it takes shapes, not an
 engine's regions: any engine's canonical rects render the same. White background; a pixel covered
-by several layers takes the mean of their colours, so overlaps read as a blend. Masks are
-bottom-up and images top-down, so every image is flipped on the way out.
+by several layers takes the mean of their colours, so overlaps read as a blend.
+
+The origin is a display convention, not geometry: origin="bottom-left" (y up, the EDA convention)
+flips the image so larger y is higher; origin="top-left" (y down, the image convention) does not,
+so an image row reads directly as a layout y. Coordinates, shapes and every engine are the same
+under both; only the picture, the tick labels and the words for up and down change.
+pixel_mapping says how a pixel of an image maps back to layout units, for the text that goes
+with the image.
 
     render        Layout -> PIL image, optional layer subset / window / image_px / grid / ticks
     render_diff   target and current shapes -> PIL image: match grey, missing orange, extra blue
@@ -13,8 +19,9 @@ bottom-up and images top-down, so every image is flipped on the way out.
 
 Overlays, in layout units, drawn over the shapes: rulers ((x1, y1), (x2, y2), label) as a line
 with end bars and the label at its middle, and labels (x, y, text[, rect]) as tagged text
-(Set-of-Mark shape ids): centred on (x, y), or just above the rect when the tag does not fit
-inside it, and nudged off any tag drawn before it. Overlays outside the window are skipped.
+(Set-of-Mark shape ids): always outside the shape, just above the rect on screen (below it at
+the image's top edge), in a saturated tag colour no geometry uses, so a tag never reads as a hole
+or a feature; nudged off any tag drawn before it. Overlays outside the window are skipped.
 
 A window (x0, y0, x1, y1) crops in layout units; the output is scaled with nearest-neighbour so
 the longer side is image_px. A grid draws thin grey lines every grid units; ticks adds white
@@ -41,16 +48,31 @@ PAD = 14                        # room for the last labels, top and right
 TICK_LEN = 6
 
 RULER_RGB = (0, 0, 0)
-LABEL_BG = (255, 255, 210)
+LABEL_BG = (255, 215, 0)         # saturated yellow: not white, not a layer colour
+ORIGINS = ("bottom-left", "top-left")
 
 Window = tuple[int, int, int, int]
 Ruler = tuple[tuple[int, int], tuple[int, int], str]
 Label = tuple  # (x, y, text) or (x, y, text, Rect): the rect the tag should not hide
 
 
+def pixel_mapping(width: int, height: int, *, window: Window | None = None, image_px: int = 800,
+                  ticks: int | None = None, origin: str = "bottom-left") -> dict:
+    """How the pixels of an image rendered with these settings map to layout units: the plot
+    area's offset in the image (the tick margins), the scale, and the layout coordinates at the
+    plot's top-left pixel. Layout x = x_left + (px - left) / scale; layout y = y_top - (py - top)
+    / scale when y is up (bottom-left origin), y_top + (py - top) / scale when y is down."""
+    x0, y0, x1, y1 = window if window is not None else (0, 0, width, height)
+    scale = image_px / max(x1 - x0, y1 - y0)
+    y_up = origin == "bottom-left"
+    return {"left": MARGIN if ticks else 0, "top": PAD if ticks else 0, "scale": scale,
+            "x_left": x0, "y_top": y1 if y_up else y0, "y_up": y_up}
+
+
 def render(layout: Layout, *, layers: Sequence[str] | None = None, window: Window | None = None,
            image_px: int = 800, grid: int | None = None, ticks: int | None = None,
-           rulers: Sequence[Ruler] = (), labels: Sequence[Label] = ()) -> Image.Image:
+           rulers: Sequence[Ruler] = (), labels: Sequence[Label] = (),
+           origin: str = "bottom-left") -> Image.Image:
     eng = RasterEngine(layout.width, layout.height)
     names = list(layers) if layers is not None else list(layout.layers)
     painted = []
@@ -59,20 +81,20 @@ def render(layout: Layout, *, layers: Sequence[str] | None = None, window: Windo
             raise GeometryError(f"no layer {n!r}; layers are {', '.join(layout.layers) or 'none'}")
         painted.append((eng.region(layout.layers[n].shapes).bits, layout.layers[n].colour))
     return _finish(_compose(painted, layout.width, layout.height), layout.width, layout.height,
-                   window, image_px, grid, ticks, rulers, labels)
+                   window, image_px, grid, ticks, rulers, labels, origin)
 
 
 def render_diff(width: int, height: int, target: Iterable[Shape], current: Iterable[Shape], *,
                 window: Window | None = None, image_px: int = 800, grid: int | None = None,
                 ticks: int | None = None, rulers: Sequence[Ruler] = (),
-                labels: Sequence[Label] = ()) -> Image.Image:
+                labels: Sequence[Label] = (), origin: str = "bottom-left") -> Image.Image:
     eng = RasterEngine(width, height)
     t, c = eng.region(target).bits, eng.region(current).bits
     img = np.full((height, width, 3), 255, dtype=np.uint8)
     img[t & c] = MATCH_RGB
     img[t & ~c] = MISSING_RGB
     img[c & ~t] = EXTRA_RGB
-    return _finish(img, width, height, window, image_px, grid, ticks, rulers, labels)
+    return _finish(img, width, height, window, image_px, grid, ticks, rulers, labels, origin)
 
 
 def png_bytes(im: Image.Image) -> bytes:
@@ -95,20 +117,24 @@ def _compose(painted, width: int, height: int) -> np.ndarray:
 
 def _finish(img: np.ndarray, width: int, height: int, window: Window | None, image_px: int,
             grid: int | None, ticks: int | None, rulers: Sequence[Ruler] = (),
-            labels: Sequence[Label] = ()) -> Image.Image:
+            labels: Sequence[Label] = (), origin: str = "bottom-left") -> Image.Image:
+    if origin not in ORIGINS:
+        raise GeometryError(f"origin must be one of {', '.join(ORIGINS)}, got {origin!r}")
+    y_up = origin == "bottom-left"
     x0, y0, x1, y1 = window if window is not None else (0, 0, width, height)
     if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
         raise GeometryError(f"window {window} must lie inside the frame 0..{width} x 0..{height} "
                             f"with x0 < x1 and y0 < y1")
     scale = image_px / max(x1 - x0, y1 - y0)
     pw, ph = max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale))
-    im = Image.fromarray(np.flipud(img[y0:y1, x0:x1])).resize((pw, ph), Image.NEAREST)
+    crop = img[y0:y1, x0:x1]
+    im = Image.fromarray(np.flipud(crop) if y_up else crop).resize((pw, ph), Image.NEAREST)
 
     def col(x: float) -> int:
         return min(round((x - x0) * scale), pw - 1)
 
     def row(y: float) -> int:
-        return min(ph - round((y - y0) * scale), ph - 1)
+        return min(ph - round((y - y0) * scale) if y_up else round((y - y0) * scale), ph - 1)
 
     if grid:
         draw = ImageDraw.Draw(im)
@@ -131,7 +157,7 @@ def _finish(img: np.ndarray, width: int, height: int, window: Window | None, ima
         draw.text((cx, PAD + ph + TICK_LEN + 1), str(v), fill=(0, 0, 0), font=font, anchor="mt")
     for v in _steps(y0, y1, ticks):
         cy = PAD + row(v)
-        draw.line([(MARGIN - TICK_LEN, cy), (MARGIN, cy)], fill=(0, 0, 0))
+        draw.line([(MARGIN - TICK_LEN, cy), (MARGIN - 1, cy)], fill=(0, 0, 0))
         draw.text((MARGIN - TICK_LEN - 2, cy), str(v), fill=(0, 0, 0), font=font, anchor="rm")
     return out
 
@@ -177,10 +203,11 @@ def _overlay(im: Image.Image, window: Window, col, row, rulers: Sequence[Ruler],
         cx, cy = col(x), row(y)
         if rect:
             r = rect[0]
-            l, t, rr, b = draw.textbbox((0, 0), text, font=font, anchor="mm")
-            fits = (col(r.x1) - col(r.x)) >= (rr - l) + 8 and (row(r.y) - row(r.y1)) >= (b - t) + 6
-            if not fits:
-                cy = row(r.y1) - (b - t) / 2 - 4          # just above the rect
+            _, t, _, b = draw.textbbox((0, 0), text, font=font, anchor="mm")
+            half = (b - t) / 2 + 3
+            top, bottom = min(row(r.y), row(r.y1)), max(row(r.y), row(r.y1))
+            # outside the shape: above its top edge on screen, below it when that leaves the image
+            cy = top - half - 2 if top - 2 * half - 2 >= 0 else bottom + half + 2
         tag(cx, cy, text, avoid=True)
 
 
