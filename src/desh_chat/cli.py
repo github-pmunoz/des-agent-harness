@@ -24,6 +24,7 @@ from desh_chat.state import ChatHistory, Deadline, Settings, InferenceEngine, St
 from desh_chat.handlers import on_error, on_interrupt
 from desh_chat.toolset import current_time, ToolRegistry
 from desh_chat.coding import Workspace, edit_parameters, edit_preview, fold_edited, fold_written, project_tree
+from desh_chat.geo import GEO_TOOLS, GeoSession, arms_of, session_from_args
 from desh_chat.delegate import Delegate, CAP_CONTINUE_MSG, fold_brief, fold_brief_to_record
 from desh_chat.memory import Memories, Memory
 from desh_chat.ontology import ONTOLOGY
@@ -50,7 +51,8 @@ def selected_memories(args: argparse.Namespace) -> tuple[Memory, ...]:
 
 def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: Settings, *,
                 session_file: str | None = None, completions_log: Logger | None = None,
-                des_log: TextIO | None = None, prompts: Prompts = Prompts()) -> ToolRegistry:
+                des_log: TextIO | None = None, prompts: Prompts = Prompts(),
+                geo: GeoSession | None = None) -> ToolRegistry:
     """The toolsets are additive: each flag contributes its tools, none of them means no tools.
     The delegate tool is built from the RESOLVED session path, completions Logger and DES log file,
     never from the raw flags: a subagent writes to the same log objects the parent's engine does."""
@@ -97,6 +99,8 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
         # the parent's CURRENT settings travel with every call; the child derives its own from them
         tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"),
                           fold=fold_brief_to_record if args.delegate_records else fold_brief, target="task")
+    if geo is not None:
+        tools = geo.register(tools, arms_of(args))
     # the working memory itself lives on ChatState; its tools only get a dict for the call
     for m in memories:
         tools = m.register(tools)
@@ -166,6 +170,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--memory",    default="", help=f"memory tools to offer, comma-separated: {', '.join(MEMORIES)}")
     ap.add_argument("--scratchpad", action="store_true", help="same as --memory scratchpad")
     ap.add_argument("--current_time", action="store_true", help="offer the current time")
+    ap.add_argument("--geo",       default="", help="a layout task (JSON): offers geo_submit plus the --geo-tools arm, and adds the task's layout-language prompt; its prompt is the task unless --task is given")
+    ap.add_argument("--geo-tools", default="render", help=f"the geo arm, comma-separated: any of {', '.join(GEO_TOOLS)}; empty = geo_submit alone")
+    ap.add_argument("--geo-feedback", default="mismatch", help="what geo_submit reports: iou, or mismatch (iou plus the missing and extra parts as rects)")
+    ap.add_argument("--geo-snap",  type=int, default=15, help="snapping radius of geo_measure, in layout units")
+    ap.add_argument("--geo-image-px", type=int, default=800, help="longer side of a geo_render image, in pixels")
+    ap.add_argument("--geo-grid",  type=int, default=0, help="grid overlay spacing on renders, in layout units; 0 = none")
+    ap.add_argument("--geo-ticks", type=int, default=0, help="labelled tick spacing on renders, in layout units; 0 = none")
+    ap.add_argument("--geo-ruler-bias", type=int, default=0, help="causal-audit arm: add this to every length the instruments report")
+    ap.add_argument("--geo-out",   default="", help="where renders and submissions.jsonl go (default: WORKSPACE/.desh/geo/<time>-<task id>)")
     ap.add_argument("-tc",  "--tool-cap",       type=float, default=10.0, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
     ap.add_argument("-ct",  "--checkpoint-target", type=float, default=0.15, help="share of the context a mid-turn checkpoint summary may take")
     ap.add_argument("-mg",  "--memory-target",  type=float, default=0.10, help="share of the context one memory may take; a write past it is refused")
@@ -295,6 +308,11 @@ def run(args: argparse.Namespace, prompts: Prompts):
     # context works only when there is a memory to act on it with.
     memory = Memories.of(*prompts.memories(selected_memories(args)), frame=prompts.frame())
     base_prompt = args.system_prompt if args.system_prompt else "You are a helpful assistant. Reply concisely."
+    geo = session_from_args(args)
+    if geo is not None:
+        base_prompt += "\n\n" + geo.task.prompt_text()
+        if not args.task:
+            args.task = geo.task.prompt
     if args.tree:
         # after the role, before the mechanics: a stable prefix (the tree changes only when files
         # are added), so the cached part of every request stays long
@@ -320,7 +338,7 @@ def run(args: argparse.Namespace, prompts: Prompts):
         max_context=client.max_context()
     )
     completions_log = Logger(args.completions_log) if args.completions_log else None
-    tools = build_tools(args, inference, settings, session_file=session_file, completions_log=completions_log, des_log=des_log, prompts=prompts)
+    tools = build_tools(args, inference, settings, session_file=session_file, completions_log=completions_log, des_log=des_log, prompts=prompts, geo=geo)
     state = ChatState(
         settings=settings,
         inference=inference,

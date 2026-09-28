@@ -19,7 +19,7 @@ from desh.llama.stages import Seam, CodeFence, PyHighlight, Terminal, ToolProgre
 from desh.llama.wire import Completion, Request, ToolCall
 from desh.llama.esc_watcher import ESCWatcher
 from desh.llama.tokens import RESULT_CHARS_PER_TOKEN, estimate_result_tokens, estimate_tokens, turn_tokens
-from desh.tools import Tool
+from desh.tools import Tool, ToolOutput
 from desh_chat.state import CHECKPOINT_CLOSE, CHECKPOINT_PREFIX, RETRY_NUDGE, SALVAGE_STOPS, SUMMARY_CLOSE, ChatState, ChatHistory, PendingTurn, Round, ToolResult, StopReason
 from desh_chat.memory import Memories
 from desh_chat.display import DisplayStats, Error, Info, Warn
@@ -368,7 +368,7 @@ class ExecuteToolCalls(Event):
         # always runs, since it is what the note below asks for; after that, a call runs only
         # while one more result at its cap still fits.
         if self.index > 0 and not (tool is not None and state.memory.owns(tool.inject)):
-            used = estimate_result_tokens("".join(r.content for r in round.results))
+            used = sum(r.tokens() for r in round.results)
             worst = int(state.tools.max_result_chars / RESULT_CHARS_PER_TOKEN)
             budget = state.round_budget()
             if used + worst > budget:
@@ -411,8 +411,8 @@ class ExecuteToolCalls(Event):
                      DisplayStats(colour=Palette.TOOL_STATS),
                      NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
-        content, memory = run_call(state, tc)
-        result = ToolResult(tc.id, tc.name, content)
+        output, memory = run_call(state, tc)
+        result = ToolResult(tc.id, tc.name, output.text, output.images)
         pending = state.pending.add_results(result)
 
         # The call ran with its full arguments; what the round echoes back from now on is the tool's
@@ -428,8 +428,9 @@ class ExecuteToolCalls(Event):
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
 
-def run_call(state: ChatState, tc: ToolCall) -> tuple[str, Memories]:
-    """Run one call through the registry: the text that answers it, and the working memory after
+def run_call(state: ChatState, tc: ToolCall) -> tuple[ToolOutput, Memories]:
+    """Run one call through the registry: what answers it (text, and the images a tool showed),
+    and the working memory after
     it. What the harness supplies to tools that declared it (Tool.inject):
     - the settings, so a subagent inherits the parent's CURRENT settings, not the ones captured
       when the registry was built
@@ -443,9 +444,9 @@ def run_call(state: ChatState, tc: ToolCall) -> tuple[str, Memories]:
     tool = state.tools.get(tc.name)
     provided: dict[str, Any] = {"settings": state.settings, "deadline": state.deadline}
     slots = state.memory.provide(tool.inject) if tool is not None else {}
-    content = state.tools.invoke(tc.name, tc.arguments, **provided, **slots)
+    output = state.tools.call(tc.name, tc.arguments, **provided, **slots)
     memory, refused = state.memory.commit(slots, budget_tokens=state.memory_budget())
-    return (refused if refused is not None else content), memory
+    return (ToolOutput(refused) if refused is not None else output), memory
 
 
 def run_memory_calls(state: ChatState, calls: tuple[ToolCall, ...]) -> tuple[ChatState, list[str], list[ToolCall]]:

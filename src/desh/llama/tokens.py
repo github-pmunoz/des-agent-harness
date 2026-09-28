@@ -22,6 +22,12 @@ def estimate_tokens(text: str) -> int:
 # peak sat ~20% above the chars/4 line at every context, and the gap scaled with the result cap.
 RESULT_CHARS_PER_TOKEN = 3.3
 
+# What one image in a tool result costs before a usage frame prices it. llama-server resizes to
+# the vision encoder's budget: an 800 px layout render measured ~640 prompt tokens on Qwen3.8's
+# mmproj (400 px ~184). Rounded up, since the estimate guards the window.
+IMAGE_TOKENS = 800
+
+
 def estimate_result_tokens(text: str) -> int:
     """Pre-completion estimate for tool results and transcripts of them."""
     return int(len(text) / RESULT_CHARS_PER_TOKEN)

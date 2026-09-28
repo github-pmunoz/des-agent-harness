@@ -6,7 +6,8 @@ schemas, the engine needs the callables, neither is chat-specific.
     Tool          one callable + the OpenAI-shaped schema the model sees for it + its confirm policy
     Tool.define   derives the schema from signature + type hints + Google-style docstring; each
                   part has a hand-written override slot (name / description / parameters)
-    ToolRegistry  frozen tuple of Tools; schemas() for the request, invoke() for the engine
+    ToolRegistry  frozen tuple of Tools; schemas() for the request, call() / invoke() for the engine
+    ToolOutput    what a tool may return instead of a str: text plus image files the model sees
 
 Policy is data on the Tool, not logic in the harness: `confirm` says whether the operator is asked
 before the call runs. It defaults to True — a tool that was never thought about asks; only a tool
@@ -116,6 +117,16 @@ def parameters_schema(fn: Callable[..., Any], inject: tuple[str, ...] = ()) -> d
 # ---------------------------------------------------------------------------
 # Tool / ToolRegistry
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ToolOutput:
+    """A result with pictures: the text the model reads and the paths of image files that go out
+    with it, in order, as image parts of the same tool message. A tool that shows nothing returns a
+    plain str (or anything JSON-serialisable) instead. The bound applies to the text only; an image
+    costs what the server's vision encoder makes of it, whatever the file size."""
+    text: str
+    images: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class Tool:
@@ -262,6 +273,10 @@ class ToolRegistry:
         return str(decoded[tool.target])
 
     def invoke(self, name: str, arguments: str, **provided: Any) -> str:
+        """call() without the images: the text of the role:tool message."""
+        return self.call(name, arguments, **provided).text
+
+    def call(self, name: str, arguments: str, **provided: Any) -> ToolOutput:
         """Run the tool the model asked for and return the content of its role:tool message.
 
         `arguments` is the wire string from ToolCall.arguments — json.loads happens here, nowhere
@@ -271,9 +286,12 @@ class ToolRegistry:
         JSON, arguments the function rejects, or an exception inside the tool all come back as text
         the model reads and can recover from (the same rule CommandError follows). Engine.on_error
         is reserved for bugs in the harness, so nothing tool-side may propagate past this boundary.
-        The result is bounded to max_result_chars (head and tail kept).
+        The text is bounded to max_result_chars (head and tail kept); images pass as they are.
         """
-        return self.bound(self._invoke(name, arguments, provided))
+        out = self._invoke(name, arguments, provided)
+        if isinstance(out, ToolOutput):
+            return replace(out, text=self.bound(out.text))
+        return ToolOutput(self.bound(out))
 
     def bound(self, text: str) -> str:
         """text cut to max_result_chars: the head and the tail survive, the middle is replaced by a
@@ -286,7 +304,7 @@ class ToolRegistry:
         dropped = len(text) - head - tail
         return text[:head] + f"\n[... {dropped} characters truncated ...]\n" + text[-tail:]
 
-    def _invoke(self, name: str, arguments: str, provided: dict[str, Any]) -> str:
+    def _invoke(self, name: str, arguments: str, provided: dict[str, Any]) -> str | ToolOutput:
         tool = self.get(name)
         if tool is None:
             return f"Tool {name!r} is not available."
@@ -310,7 +328,7 @@ class ToolRegistry:
         except Exception as e:
             return f"Tool {name!r} raised {type(e).__name__}: {e}" +( f"\n{traceback.format_exc()}" if self.debug else "")
 
-        if isinstance(result, str):
+        if isinstance(result, (str, ToolOutput)):
             return result
         try:
             return json.dumps(result, ensure_ascii=False)

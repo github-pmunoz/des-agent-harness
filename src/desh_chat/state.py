@@ -4,10 +4,12 @@ from dataclasses import dataclass, field, replace
 from desh.llama.logger import Logger
 from desh.llama.server import LlamaServer
 from desh.llama.wire import ToolCall
-from desh.llama.tokens import RESULT_CHARS_PER_TOKEN, estimate_result_tokens, estimate_tokens
+from desh.llama.send_direct import image_to_base64
+from desh.llama.tokens import IMAGE_TOKENS, RESULT_CHARS_PER_TOKEN, estimate_result_tokens, estimate_tokens
 from desh.engine import State
 from desh.tools import ToolRegistry
 from desh_chat.memory import Memories
+from functools import lru_cache
 from typing import Any, Callable
 from enum import StrEnum
 
@@ -281,7 +283,10 @@ class ChatState(State):
         if p is None:
             return 0
         # the user message is prose, the latest results are tool output: different densities
-        unpriced = estimate_tokens(p.unpriced_text()) if not p.rounds else estimate_result_tokens(p.unpriced_text())
+        if not p.rounds:
+            unpriced = estimate_tokens(p.unpriced_text())
+        else:
+            unpriced = sum(r.tokens() for r in p.rounds[-1].results)
         return p.priced_tokens() + unpriced
 
     def round_budget(self) -> int:
@@ -385,20 +390,42 @@ class ChatState(State):
 @dataclass(frozen=True)
 class ToolResult:
     """What one tool call came back with. Content is text the model reads; an error or a denial
-    is still a result (the model must be able to see it and recover)."""
+    is still a result (the model must be able to see it and recover). Images are the paths of
+    image files that go out with the text as image parts of the same message (ToolOutput); the
+    record keeps the paths, the request carries the pixels."""
     tool_call_id: str
     name: str
     content: str
+    images: tuple[str, ...] = ()
 
     def message(self) -> dict:
-        return {"role": "tool", "tool_call_id": self.tool_call_id, "name": self.name, "content": self.content}
+        content: str | list[dict] = self.content
+        if self.images:
+            content = ([{"type": "text", "text": self.content}]
+                       + [{"type": "image_url", "image_url": {"url": data_uri(p)}} for p in self.images])
+        return {"role": "tool", "tool_call_id": self.tool_call_id, "name": self.name, "content": content}
+
+    def tokens(self) -> int:
+        """Pre-completion estimate of what this result adds to the prompt."""
+        return estimate_result_tokens(self.content) + IMAGE_TOKENS * len(self.images)
 
     def to_dict(self) -> dict:
-        return {"tool_call_id": self.tool_call_id, "name": self.name, "content": self.content}
+        d = {"tool_call_id": self.tool_call_id, "name": self.name, "content": self.content}
+        if self.images:
+            d["images"] = list(self.images)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> ToolResult:
-        return cls(tool_call_id=d["tool_call_id"], name=d["name"], content=d["content"])
+        return cls(tool_call_id=d["tool_call_id"], name=d["name"], content=d["content"],
+                   images=tuple(d.get("images", ())))
+
+
+@lru_cache(maxsize=256)
+def data_uri(path: str) -> str:
+    """An image file as a data URI. Every request of a turn re-sends the live results, so each
+    file is encoded once; a render is written once and never rewritten under the same path."""
+    return image_to_base64(path)
 
 
 # What a tool message says once its turn has ended and its result has left the context. Constant on
@@ -418,6 +445,11 @@ HIDDEN_STOPS = frozenset((StopReason.CANCELLED, StopReason.INTERRUPT, StopReason
 CONTINUED_STOPS = frozenset((StopReason.CAP, StopReason.REPEAT))
 
 CHECKPOINT_PREFIX = "Checkpoint of this turn so far, in place of the rounds before it: "
+
+
+def _image_note(result: ToolResult) -> str:
+    """How a result's images read in a plain-text transcript: named, since pixels cannot be."""
+    return "".join(f" [image {p}]" for p in result.images)
 
 # How much of a call's target a digest line shows: enough to recognise a path or a command,
 # never a dump — the digest stands in the request for as long as its checkpoint does.
@@ -463,7 +495,7 @@ class Round:
             } for tc in self.tool_calls]
         }]
         for result in self.results:
-            messages.append(replace(result, content=EXPIRED_RESULT).message() if stubbed else result.message())
+            messages.append(replace(result, content=EXPIRED_RESULT, images=()).message() if stubbed else result.message())
         return messages
 
     def transcript(self, stubbed: bool = False) -> str:
@@ -474,7 +506,7 @@ class Round:
             return f"EARLIER CHECKPOINT: {self.checkpoint_body()}"
         calls = ", ".join(f"{tc.name}({tc.arguments})" for tc in self.tool_calls)
         lines = [f"ASSISTANT (tool calls): {self.assistant + ' ' if self.assistant else ''}{calls}"]
-        lines += [f"TOOL {res.name}: {EXPIRED_RESULT if stubbed else res.content}" for res in self.results]
+        lines += [f"TOOL {res.name}: {EXPIRED_RESULT if stubbed else res.content + _image_note(res)}" for res in self.results]
         return "\n".join(lines)
 
     def checkpoint_body(self) -> str:

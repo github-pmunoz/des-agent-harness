@@ -11,6 +11,11 @@ bottom-up and images top-down, so every image is flipped on the way out.
     render_diff   target and current shapes -> PIL image: match grey, missing orange, extra blue
     png_bytes     PIL image -> PNG bytes (for a tool result or a file)
 
+Overlays, in layout units, drawn over the shapes: rulers ((x1, y1), (x2, y2), label) as a line
+with end bars and the label at its middle, and labels (x, y, text[, rect]) as tagged text
+(Set-of-Mark shape ids): centred on (x, y), or just above the rect when the tag does not fit
+inside it, and nudged off any tag drawn before it. Overlays outside the window are skipped.
+
 A window (x0, y0, x1, y1) crops in layout units; the output is scaled with nearest-neighbour so
 the longer side is image_px. A grid draws thin grey lines every grid units; ticks adds white
 margins with labelled ticks every ticks units instead (labels in layout units).
@@ -35,11 +40,17 @@ MARGIN = 44                     # tick margin in pixels, left and bottom
 PAD = 14                        # room for the last labels, top and right
 TICK_LEN = 6
 
+RULER_RGB = (0, 0, 0)
+LABEL_BG = (255, 255, 210)
+
 Window = tuple[int, int, int, int]
+Ruler = tuple[tuple[int, int], tuple[int, int], str]
+Label = tuple  # (x, y, text) or (x, y, text, Rect): the rect the tag should not hide
 
 
 def render(layout: Layout, *, layers: Sequence[str] | None = None, window: Window | None = None,
-           image_px: int = 800, grid: int | None = None, ticks: int | None = None) -> Image.Image:
+           image_px: int = 800, grid: int | None = None, ticks: int | None = None,
+           rulers: Sequence[Ruler] = (), labels: Sequence[Label] = ()) -> Image.Image:
     eng = RasterEngine(layout.width, layout.height)
     names = list(layers) if layers is not None else list(layout.layers)
     painted = []
@@ -48,19 +59,20 @@ def render(layout: Layout, *, layers: Sequence[str] | None = None, window: Windo
             raise GeometryError(f"no layer {n!r}; layers are {', '.join(layout.layers) or 'none'}")
         painted.append((eng.region(layout.layers[n].shapes).bits, layout.layers[n].colour))
     return _finish(_compose(painted, layout.width, layout.height), layout.width, layout.height,
-                   window, image_px, grid, ticks)
+                   window, image_px, grid, ticks, rulers, labels)
 
 
 def render_diff(width: int, height: int, target: Iterable[Shape], current: Iterable[Shape], *,
                 window: Window | None = None, image_px: int = 800, grid: int | None = None,
-                ticks: int | None = None) -> Image.Image:
+                ticks: int | None = None, rulers: Sequence[Ruler] = (),
+                labels: Sequence[Label] = ()) -> Image.Image:
     eng = RasterEngine(width, height)
     t, c = eng.region(target).bits, eng.region(current).bits
     img = np.full((height, width, 3), 255, dtype=np.uint8)
     img[t & c] = MATCH_RGB
     img[t & ~c] = MISSING_RGB
     img[c & ~t] = EXTRA_RGB
-    return _finish(img, width, height, window, image_px, grid, ticks)
+    return _finish(img, width, height, window, image_px, grid, ticks, rulers, labels)
 
 
 def png_bytes(im: Image.Image) -> bytes:
@@ -82,7 +94,8 @@ def _compose(painted, width: int, height: int) -> np.ndarray:
 
 
 def _finish(img: np.ndarray, width: int, height: int, window: Window | None, image_px: int,
-            grid: int | None, ticks: int | None) -> Image.Image:
+            grid: int | None, ticks: int | None, rulers: Sequence[Ruler] = (),
+            labels: Sequence[Label] = ()) -> Image.Image:
     x0, y0, x1, y1 = window if window is not None else (0, 0, width, height)
     if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
         raise GeometryError(f"window {window} must lie inside the frame 0..{width} x 0..{height} "
@@ -103,6 +116,8 @@ def _finish(img: np.ndarray, width: int, height: int, window: Window | None, ima
             draw.line([(col(v), 0), (col(v), ph - 1)], fill=GRID_RGB)
         for v in _steps(y0, y1, grid):
             draw.line([(0, row(v)), (pw - 1, row(v))], fill=GRID_RGB)
+    if rulers or labels:
+        _overlay(im, (x0, y0, x1, y1), col, row, rulers, labels)
     if not ticks:
         return im
     out = Image.new("RGB", (pw + MARGIN + PAD, ph + MARGIN + PAD), (255, 255, 255))
@@ -119,6 +134,58 @@ def _finish(img: np.ndarray, width: int, height: int, window: Window | None, ima
         draw.line([(MARGIN - TICK_LEN, cy), (MARGIN, cy)], fill=(0, 0, 0))
         draw.text((MARGIN - TICK_LEN - 2, cy), str(v), fill=(0, 0, 0), font=font, anchor="rm")
     return out
+
+
+def _overlay(im: Image.Image, window: Window, col, row, rulers: Sequence[Ruler],
+             labels: Sequence[Label]) -> None:
+    x0, y0, x1, y1 = window
+    draw = ImageDraw.Draw(im)
+    font = ImageFont.load_default(size=13)
+
+    def inside(x, y):
+        return x0 <= x <= x1 and y0 <= y <= y1
+
+    placed: list[tuple[float, float, float, float]] = []
+
+    def tag(cx, cy, text, avoid: bool = False):
+        l, t, r, b = draw.textbbox((cx, cy), text, font=font, anchor="mm")
+        box = (l - 2, t - 1, r + 2, b + 1)
+        if avoid:
+            step = box[3] - box[1] + 1
+            for _ in range(8):              # nudge up past the tags already drawn
+                if not any(_overlaps(box, q) for q in placed):
+                    break
+                cy -= step
+                box = (box[0], box[1] - step, box[2], box[3] - step)
+        placed.append(box)
+        draw.rectangle(list(box), fill=LABEL_BG, outline=RULER_RGB)
+        draw.text((cx, cy), text, fill=RULER_RGB, font=font, anchor="mm")
+
+    for (ax, ay), (bx, by), text in rulers:
+        if not (inside(ax, ay) or inside(bx, by)):
+            continue
+        pa, pb = (col(ax), row(ay)), (col(bx), row(by))
+        draw.line([pa, pb], fill=RULER_RGB, width=2)
+        horizontal = abs(pb[0] - pa[0]) >= abs(pb[1] - pa[1])
+        for px, py in (pa, pb):
+            bar = [(px, py - 5), (px, py + 5)] if horizontal else [(px - 5, py), (px + 5, py)]
+            draw.line(bar, fill=RULER_RGB, width=2)
+        tag((pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2, text)
+    for x, y, text, *rect in labels:
+        if not inside(x, y):
+            continue
+        cx, cy = col(x), row(y)
+        if rect:
+            r = rect[0]
+            l, t, rr, b = draw.textbbox((0, 0), text, font=font, anchor="mm")
+            fits = (col(r.x1) - col(r.x)) >= (rr - l) + 8 and (row(r.y) - row(r.y1)) >= (b - t) + 6
+            if not fits:
+                cy = row(r.y1) - (b - t) / 2 - 4          # just above the rect
+        tag(cx, cy, text, avoid=True)
+
+
+def _overlaps(a, b) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
 def _steps(lo: int, hi: int, step: int) -> range:
