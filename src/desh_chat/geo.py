@@ -26,9 +26,16 @@ arithmetic (measured: 17-31% fewer tokens at equal accuracy). Where layouts come
 EDA tool, the interface between the agent and the tool translates, not the agent. Every
 render result states how its pixels map to layout units. The polygon syntax is the operator's
 too (--geo-poly): steps from a start point (deltas, the OASIS form) or corners in order
-(points). Only the agent's submissions follow it; the task's own programs are always steps. --geo-ruler-bias k is the causal-audit arm: every length an
-instrument reports is off by k, so a final answer that follows the instrument can be told from
-one that ignores it.
+(points). Only the agent's submissions follow it; the task's own programs are always steps.
+
+--geo-ruler-bias k is the causal-audit arm: the instruments read the target translated by (k, k),
+a miscalibrated probe. Everything they report about the target (coordinates, edges, vertices,
+ambiguity alternatives, spans, shape bboxes, the rulers drawn on renders) is off by the same k
+and agrees with itself; lengths are true, and reads of the current submission are true. Below the
+eye's precision only the grading feedback can reveal the offset, so an answer that follows the
+instrument can be told from one that corrects it. (A first version biased the reported lengths
+alone; the true coordinates stayed in the edge text, and the model reconciled the contradiction
+instead of being tested.)
 
 Everything the run produces lands in the session's out dir: renders (render-NNN-view.png, never
 rewritten, since the request cites them by path) and submissions.jsonl, one line per geo_submit.
@@ -41,7 +48,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
-from desgeo import DslError, GeometryError, Layout, Metrology, RasterEngine, Rect, Ruler, render, render_diff, run
+from desgeo import DslError, GeometryError, Layout, Metrology, Polygon, RasterEngine, Rect, Ruler, render, render_diff, run
 from desgeo.render import pixel_mapping
 from desh_chat.markup import Markups
 from desh.tools import ToolOutput, ToolRegistry
@@ -135,7 +142,7 @@ class GeoSettings:
     image_px: int = 800
     grid: int = 0                           # overlay spacing in units; 0 = none (the operator's choice)
     ticks: int = 0                          # labelled tick spacing in units; 0 = none
-    ruler_bias: int = 0                     # causal-audit arm: added to every reported length
+    ruler_bias: int = 0                     # causal-audit arm: the instruments read the target shifted by (k, k)
     origin: str = "top-left"                # display convention: top-left (y down) or bottom-left (y up)
     poly: str = "deltas"                    # how the agent writes a polygon: deltas (steps) or points (corners)
 
@@ -169,6 +176,10 @@ class GeoSession:
         with open(os.path.join(self.out_dir, "task.json"), "w", encoding="utf-8") as f:
             json.dump({**t.__dict__, "layers": {k: list(v) for k, v in t.layers.items()}}, f, indent=2)
         self._metrology: dict[str, Metrology] = {}
+        k = self.settings.ruler_bias
+        if k and any(s.bbox.x + k < 0 or s.bbox.y + k < 0 or s.bbox.x1 + k > t.width or s.bbox.y1 + k > t.height
+                     for layer in self.target.layers.values() for s in layer.shapes):
+            raise ValueError(f"ruler bias {k} shifts the target of task {t.id!r} out of its frame")
 
     # ---- tools ---------------------------------------------------------------------------------
 
@@ -276,13 +287,10 @@ class GeoSession:
             return m
         r = m.measure(x1, y1, x2, y2, self.settings.snap, layer or None)
         self.rulers.append(r)
-        k = self.settings.ruler_bias
-        bx = r.b.x + (k if r.b.x >= r.a.x else -k) if r.dx else r.b.x
-        by = r.b.y + (k if r.b.y >= r.a.y else -k) if r.dy else r.b.y
-        dx, dy = abs(bx - r.a.x), abs(by - r.a.y)
+        dx, dy = r.dx, r.dy
         lines = [f"ruler {len(self.rulers)} on {on}:",
                  f"  from {r.a.describe(self.settings.y_up)}",
-                 f"  to   {_describe_at(r.b, bx, by, self.settings.y_up)}",
+                 f"  to   {r.b.describe(self.settings.y_up)}",
                  f"  dx = {dx}, dy = {dy}" + (f", distance = {(dx * dx + dy * dy) ** 0.5:.1f}" if dx and dy else "")]
         if r.others:
             lines.append("  ambiguous, also in range: " + "; ".join(o.describe(self.settings.y_up) for o in r.others))
@@ -305,13 +313,12 @@ class GeoSession:
             a = m.auto_measure(x, y, name)
         except (KeyError, ValueError) as e:
             return f"cannot measure: {e}"
-        k = self.settings.ruler_bias
         where = f"inside {name} shape {a['shape']}" if a["inside"] else f"in a gap on {name}"
         lines = [f"({x}, {y}) is {where} on {on}:"]
         for axis in ("x", "y"):
             s = a[axis]
             what = ("width" if axis == "x" else "height") if a["inside"] else "space"
-            text = f"  along {axis}: {what} {s['length'] + k} ({axis} {s['from']}..{s['to'] + k})"
+            text = f"  along {axis}: {what} {s['length']} ({axis} {s['from']}..{s['to']})"
             if not a["inside"]:
                 ends = [f"shape {i}" if i else "nothing" for i in s["between"]]
                 text += f", between {ends[0]} and {ends[1]}"
@@ -354,14 +361,16 @@ class GeoSession:
         if on == "current" and self.current is None:
             return "Nothing submitted yet: geo_submit a program first."
         if on not in self._metrology:
-            lay = self.target if on == "target" else self.current
+            if on == "target":
+                # the audit arm's miscalibrated probe: the whole target, shifted, so every read agrees
+                lay = _shifted(self.target, self.settings.ruler_bias)
+            else:
+                lay = self.current
             self._metrology[on] = Metrology(lay)
         return self._metrology[on]
 
     def _label(self, r: Ruler) -> str:
-        k = self.settings.ruler_bias
-        dx, dy = r.dx + (k if r.dx else 0), r.dy + (k if r.dy else 0)
-        return str(dx) if not dy else str(dy) if not dx else f"{dx},{dy}"
+        return r.label()
 
     def _log(self, record: dict) -> None:
         with open(os.path.join(self.out_dir, "submissions.jsonl"), "a", encoding="utf-8") as f:
@@ -427,10 +436,20 @@ def _mapping_text(m: dict) -> str:
             f"{scale} {top}")
 
 
-def _describe_at(s, x: int, y: int, y_up: bool = True) -> str:
-    """A snap described at the (possibly biased) position the ruler reports."""
-    d = s.describe(y_up)
-    return d.replace(f"({s.x}, {s.y})", f"({x}, {y})", 1) if (x, y) != (s.x, s.y) else d
+def _shifted(layout: Layout, k: int) -> Layout:
+    """A copy of the layout with every shape translated by (k, k); the layout itself when k is 0.
+    The frame is kept, so a shift that would push a shape out of it is refused at the first read."""
+    if not k:
+        return layout
+    out = Layout(layout.width, layout.height, layout.resolution)
+    for name, layer in layout.layers.items():
+        out.layer(name, layer.colour)
+        for s in layer.shapes:
+            if isinstance(s, Rect):
+                out.add(name, Rect(s.x + k, s.y + k, s.w, s.h))
+            else:
+                out.add(name, Polygon.of((s.origin.x + k, s.origin.y + k), s.deltas))
+    return out
 
 
 def session_from_args(args) -> GeoSession | None:

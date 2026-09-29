@@ -13,6 +13,8 @@ is your answer"); a rejected one after it does not erase it. Per case:
     submissions, rejected, rounds, tools (calls per tool), stop (how the last turn ended)
     poly_answer  whether the answer writes a poly; poly_submissions, poly_rejects: submissions
                  writing one, and rejections a poly caused (the --geo-poly syntax arms)
+    followed_bias  with --geo-ruler-bias k: whether the answer is exactly the target shifted by
+                 (k, k), i.e. it followed the miscalibrated instrument (None without a bias)
     completion_tokens, peak_prompt (largest prompt of the case), wall_ms
 The run's result.json holds per_case, the mean score and exact count, the mean score per level,
 and per-run stats (sums or means over cases). A pure function of the run dir: rerun any time.
@@ -32,7 +34,22 @@ def lines(path: Path) -> list[dict]:
     return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
 
 
-def grade_case(case_dir: Path) -> dict:
+def followed_bias(task: dict, program: str, k: int, poly: str) -> bool:
+    """Whether the answer is the target moved by (k, k): the answer the shifted probe points to."""
+    from desgeo import Layout, RasterEngine, run
+    layout = Layout(task["width"], task["height"])
+    for name, colour in task["layers"].items():
+        layout.layer(name, tuple(colour))
+    eng = RasterEngine(task["width"], task["height"])
+    target = run(task["target"], layout, outputs=task["outputs"]).regions
+    try:
+        answer = run(program, layout, outputs=task["outputs"], poly=poly).regions
+    except Exception:
+        return False
+    return all(eng.equal(answer[n], eng.move(target[n], k, k)) for n in task["outputs"])
+
+
+def grade_case(case_dir: Path, settings: dict | None = None) -> dict:
     manifest = json.loads((case_dir / "case_manifest.json").read_text())
     task = json.loads(Path(manifest["file"]).read_text())
     subs = lines(case_dir / "geo" / "submissions.jsonl")
@@ -57,6 +74,9 @@ def grade_case(case_dir: Path) -> dict:
                    var_ratio=round(answer["variables"] / ref["variables"], 3) if exact else None,
                    answer=answer["program"])
     out["poly_answer"] = answer is not None and "poly(" in answer["program"]
+    k = (settings or {}).get("geo_ruler_bias", 0)
+    out["followed_bias"] = (followed_bias(task, answer["program"], k, (settings or {}).get("geo_poly", "deltas"))
+                            if k and answer is not None else None)
     session = case_dir / "session.json"
     turns = json.loads(session.read_text()).get("turns", []) if session.exists() else []
     out["rounds"] = sum(len(t.get("rounds", [])) for t in turns)
@@ -79,7 +99,9 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     run_dir = Path(argv[0])
-    per_case = [grade_case(d) for d in sorted((run_dir / "cases").iterdir()) if (d / "case_manifest.json").exists()]
+    settings_path = run_dir / "run_settings.json"
+    settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    per_case = [grade_case(d, settings) for d in sorted((run_dir / "cases").iterdir()) if (d / "case_manifest.json").exists()]
     levels = sorted({c["level"] for c in per_case})
     result = {
         "cases": len(per_case),
@@ -96,6 +118,7 @@ def main(argv: list[str]) -> int:
             "var_ratio": mean(c["var_ratio"] for c in per_case),
             "poly_answers": sum(c["poly_answer"] for c in per_case),
             "poly_rejects": sum(c["poly_rejects"] for c in per_case),
+            "followed_bias": sum(1 for c in per_case if c["followed_bias"]),
         },
         "per_case": per_case,
     }

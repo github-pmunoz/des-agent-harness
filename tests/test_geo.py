@@ -149,14 +149,34 @@ class TestGeoSession:
         assert isinstance(out, ToolOutput) and "x 200..600" in out.text
         assert s.render_view("target", window=[0, 0, 900, 10]).startswith("window")
 
-    def test_measure_persists_rulers_and_the_bias_arm_shifts_lengths(self, tmp_path):
+    def test_measure_persists_rulers(self, tmp_path):
         s = GeoSession(u_task(), str(tmp_path))
         assert "dx = 74, dy = 0" in s.measure(240, 300, 305, 305)
         assert len(s.rulers) == 1
         assert "1 ruler(s)" in s.render_view("target").text
-        biased = GeoSession(u_task(), str(tmp_path / "b"), GeoSettings(ruler_bias=3))
-        assert "dx = 77, dy = 0" in biased.measure(240, 300, 305, 305)
-        assert "width 77" in biased.auto_measure(270, 300)
+
+    def test_the_bias_arm_is_a_consistent_shifted_probe(self, tmp_path):
+        """Every read of the target is off by k and agrees with itself: no true coordinate leaks
+        (the outer left edge is x=237, the slot's left edge x=311, the bottom y=143)."""
+        s = GeoSession(u_task(), str(tmp_path), GeoSettings(ruler_bias=3))
+        ruler = s.measure(243, 303, 308, 308)
+        assert "left edge x=240" in ruler and "right edge x=314" in ruler and "dx = 74, dy = 0" in ruler
+        width = s.auto_measure(273, 303)
+        assert "width 74 (x 240..314)" in width
+        shape = s.inspect(253, 153)
+        assert "bbox [240, 146, 318, 411]" in shape
+        for text in (ruler, width, shape):
+            assert not any(v in text for v in ("237", "311", "143"))
+        assert "1 ruler(s)" in s.render_view("target").text
+        # the picture and the grader are true: the true program is exact, and reads of it are true
+        assert s.submit(U_EXACT).startswith("submission 1: ALL EXACT")
+        assert "left edge x=237" in s.measure(240, 300, 305, 305, on="current")
+
+    def test_a_bias_that_leaves_the_frame_is_refused_at_start(self, tmp_path):
+        task = GeoTask(id="edge", width=100, height=100, layers={"M1": (0, 0, 0)},
+                       target="M1 = rect(10, 10, 89, 20)\n", outputs=("M1",))
+        with pytest.raises(ValueError, match="out of its frame"):
+            GeoSession(task, str(tmp_path), GeoSettings(ruler_bias=3))
 
     def test_auto_measure_and_inspect_read_the_target(self, tmp_path):
         s = GeoSession(u_task(), str(tmp_path))
