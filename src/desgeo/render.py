@@ -21,7 +21,10 @@ Overlays, in layout units, drawn over the shapes: rulers ((x1, y1), (x2, y2), la
 with end bars and the label at its middle, and labels (x, y, text[, rect]) as tagged text
 (Set-of-Mark shape ids): always outside the shape, just above the rect on screen (below it at
 the image's top edge), in a saturated tag colour no geometry uses, so a tag never reads as a hole
-or a feature; nudged off any tag drawn before it. Overlays outside the window are skipped.
+or a feature; nudged off any tag drawn before it. Markups (kind, name, coords) are an agent's own
+annotations, drawn in red: a point (x, y) as a dot, a segment (x1, y1, x2, y2) as a line with end
+dots, a box (x, y, w, h) as an outline, each with its name beside it. Overlays outside the window
+are skipped.
 
 A window (x0, y0, x1, y1) crops in layout units; the output is scaled with nearest-neighbour so
 the longer side is image_px. A grid draws thin grey lines every grid units; ticks adds white
@@ -49,11 +52,13 @@ TICK_LEN = 6
 
 RULER_RGB = (0, 0, 0)
 LABEL_BG = (255, 215, 0)         # saturated yellow: not white, not a layer colour
+MARKUP_RGB = (230, 0, 0)
 ORIGINS = ("bottom-left", "top-left")
 
 Window = tuple[int, int, int, int]
 Ruler = tuple[tuple[int, int], tuple[int, int], str]
 Label = tuple  # (x, y, text) or (x, y, text, Rect): the rect the tag should not hide
+Markup = tuple[str, str, tuple[int, ...]]  # (kind, name, coords): point | segment | box
 
 
 def pixel_mapping(width: int, height: int, *, window: Window | None = None, image_px: int = 800,
@@ -72,7 +77,7 @@ def pixel_mapping(width: int, height: int, *, window: Window | None = None, imag
 def render(layout: Layout, *, layers: Sequence[str] | None = None, window: Window | None = None,
            image_px: int = 800, grid: int | None = None, ticks: int | None = None,
            rulers: Sequence[Ruler] = (), labels: Sequence[Label] = (),
-           origin: str = "bottom-left") -> Image.Image:
+           origin: str = "bottom-left", markups: Sequence[Markup] = ()) -> Image.Image:
     eng = RasterEngine(layout.width, layout.height)
     names = list(layers) if layers is not None else list(layout.layers)
     painted = []
@@ -81,20 +86,21 @@ def render(layout: Layout, *, layers: Sequence[str] | None = None, window: Windo
             raise GeometryError(f"no layer {n!r}; layers are {', '.join(layout.layers) or 'none'}")
         painted.append((eng.region(layout.layers[n].shapes).bits, layout.layers[n].colour))
     return _finish(_compose(painted, layout.width, layout.height), layout.width, layout.height,
-                   window, image_px, grid, ticks, rulers, labels, origin)
+                   window, image_px, grid, ticks, rulers, labels, origin, markups)
 
 
 def render_diff(width: int, height: int, target: Iterable[Shape], current: Iterable[Shape], *,
                 window: Window | None = None, image_px: int = 800, grid: int | None = None,
                 ticks: int | None = None, rulers: Sequence[Ruler] = (),
-                labels: Sequence[Label] = (), origin: str = "bottom-left") -> Image.Image:
+                labels: Sequence[Label] = (), origin: str = "bottom-left",
+                markups: Sequence[Markup] = ()) -> Image.Image:
     eng = RasterEngine(width, height)
     t, c = eng.region(target).bits, eng.region(current).bits
     img = np.full((height, width, 3), 255, dtype=np.uint8)
     img[t & c] = MATCH_RGB
     img[t & ~c] = MISSING_RGB
     img[c & ~t] = EXTRA_RGB
-    return _finish(img, width, height, window, image_px, grid, ticks, rulers, labels, origin)
+    return _finish(img, width, height, window, image_px, grid, ticks, rulers, labels, origin, markups)
 
 
 def png_bytes(im: Image.Image) -> bytes:
@@ -117,7 +123,8 @@ def _compose(painted, width: int, height: int) -> np.ndarray:
 
 def _finish(img: np.ndarray, width: int, height: int, window: Window | None, image_px: int,
             grid: int | None, ticks: int | None, rulers: Sequence[Ruler] = (),
-            labels: Sequence[Label] = (), origin: str = "bottom-left") -> Image.Image:
+            labels: Sequence[Label] = (), origin: str = "bottom-left",
+            markups: Sequence[Markup] = ()) -> Image.Image:
     if origin not in ORIGINS:
         raise GeometryError(f"origin must be one of {', '.join(ORIGINS)}, got {origin!r}")
     y_up = origin == "bottom-left"
@@ -144,6 +151,8 @@ def _finish(img: np.ndarray, width: int, height: int, window: Window | None, ima
             draw.line([(0, row(v)), (pw - 1, row(v))], fill=GRID_RGB)
     if rulers or labels:
         _overlay(im, (x0, y0, x1, y1), col, row, rulers, labels)
+    if markups:
+        _markups(im, (x0, y0, x1, y1), col, row, markups)
     if not ticks:
         return im
     out = Image.new("RGB", (pw + MARGIN + PAD, ph + MARGIN + PAD), (255, 255, 255))
@@ -209,6 +218,43 @@ def _overlay(im: Image.Image, window: Window, col, row, rulers: Sequence[Ruler],
             # outside the shape: above its top edge on screen, below it when that leaves the image
             cy = top - half - 2 if top - 2 * half - 2 >= 0 else bottom + half + 2
         tag(cx, cy, text, avoid=True)
+
+
+def _markups(im: Image.Image, window: Window, col, row, markups: Sequence[Markup]) -> None:
+    x0, y0, x1, y1 = window
+    draw = ImageDraw.Draw(im)
+    font = ImageFont.load_default(size=13)
+
+    def inside(x, y):
+        return x0 <= x <= x1 and y0 <= y <= y1
+
+    def dot(px, py, r=4):
+        draw.ellipse([px - r, py - r, px + r, py + r], fill=MARKUP_RGB, outline=(255, 255, 255))
+
+    def name_at(px, py, text):
+        l, t, r, b = draw.textbbox((px + 7, py - 7), text, font=font, anchor="lb")
+        draw.rectangle([l - 2, t - 1, r + 2, b + 1], fill=(255, 255, 255), outline=MARKUP_RGB)
+        draw.text((px + 7, py - 7), text, fill=MARKUP_RGB, font=font, anchor="lb")
+
+    for kind, name, c in markups:
+        if kind == "point":
+            if inside(c[0], c[1]):
+                dot(col(c[0]), row(c[1]))
+                name_at(col(c[0]), row(c[1]), name)
+        elif kind == "segment":
+            if inside(c[0], c[1]) or inside(c[2], c[3]):
+                a, b = (col(c[0]), row(c[1])), (col(c[2]), row(c[3]))
+                draw.line([a, b], fill=MARKUP_RGB, width=2)
+                dot(*a, r=3)
+                dot(*b, r=3)
+                name_at((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, name)
+        elif kind == "box":
+            bx0, by0, bx1, by1 = c[0], c[1], c[0] + c[2], c[1] + c[3]
+            if bx1 >= x0 and bx0 <= x1 and by1 >= y0 and by0 <= y1:
+                pa, pb = (col(bx0), row(by0)), (col(bx1), row(by1))
+                box = [min(pa[0], pb[0]), min(pa[1], pb[1]), max(pa[0], pb[0]), max(pa[1], pb[1])]
+                draw.rectangle(box, outline=MARKUP_RGB, width=2)
+                name_at(box[0], box[1], name)
 
 
 def _overlaps(a, b) -> bool:

@@ -174,9 +174,10 @@ class TestGeoSession:
 
     def test_origin_changes_the_picture_the_prompt_and_the_words_not_the_geometry(self, tmp_path):
         down = GeoSession(u_task(), str(tmp_path / "d"), GeoSettings(origin="top-left"))
-        up = GeoSession(u_task(), str(tmp_path / "u"))
+        up = GeoSession(u_task(), str(tmp_path / "u"), GeoSettings(origin="bottom-left"))
         assert "y grows downward" in u_task().prompt_text("top-left") and "top-left corner (x, y)" in u_task().prompt_text("top-left")
-        assert "y grows upward" in u_task().prompt_text()
+        assert "y grows upward" in u_task().prompt_text("bottom-left")
+        assert "y grows downward" in u_task().prompt_text()                # the agent-facing default
         assert down.submit(U_EXACT).startswith("submission 1: ALL EXACT")
         a = Image.open(up.render_view("target").images[0])
         b = Image.open(down.render_view("target").images[0])
@@ -185,8 +186,9 @@ class TestGeoSession:
         assert "top edge y=143" in down.measure(300, 146, 300, 150)
 
     def test_render_text_states_the_pixel_mapping(self, tmp_path):
-        s = GeoSession(u_task(), str(tmp_path))
+        s = GeoSession(u_task(), str(tmp_path), GeoSettings(origin="bottom-left"))
         assert "layout x = px, y = 800 - py" in s.render_view("target").text
+        assert "layout x = px, y = py." in GeoSession(u_task(), str(tmp_path / "t")).render_view("target").text
         zoom = s.render_view("target", window=[200, 100, 600, 500]).text
         assert "x = 200 + px / 2, y = 500 - py / 2" in zoom and "1 layout unit = 2 px" in zoom
         down = GeoSession(u_task(), str(tmp_path / "d"), GeoSettings(origin="top-left", ticks=100))
@@ -260,3 +262,53 @@ class TestTaskCheck:
         assert s.unfinished() == NOT_SUBMITTED
         s.submit("M1 = rect(0, 0, 10, 10)")
         assert s.unfinished() is None
+
+
+class TestMarkup:
+    def test_markup_tools_place_move_delete_and_render_as_a_block(self):
+        from desh_chat import markup as mk
+        m = {}
+        assert mk.point("A", 10, 20, m, note="corner") == "placed A: point (10, 20) — corner"
+        assert mk.box("b", 5, 5, 0, 3, m).startswith("box width and height must be positive")
+        mk.segment("s", 0, 0, 30, 0, m)
+        assert mk.point("A", 11, 21, m) == "moved A: point (11, 21)"
+        assert mk.Markups.from_dict(m).render() == "s: segment (0, 0)-(30, 0)\nA: point (11, 21)"
+        assert mk.delete("s", m) == "'s' removed" and mk.delete("s", m) == "'s' not found"
+        assert mk.clear(m) == "cleared 1 markups" and m == {}
+
+    def test_render_draws_the_injected_markups(self, tmp_path):
+        import numpy as np
+        s = GeoSession(u_task(), str(tmp_path))
+        out = s.render_view("target", markup={"A": {"kind": "point", "coords": [700, 700], "note": ""}})
+        assert "1 markup(s)" in out.text
+        px = np.array(Image.open(out.images[0]))[700, 700]
+        assert tuple(px) == (230, 0, 0)
+        plain = np.array(Image.open(s.render_view("target").images[0]))[700, 700]
+        assert tuple(plain) == (255, 255, 255)
+
+    def test_a_render_reads_the_slot_but_is_not_a_memory_tool(self, make_state, tmp_path):
+        from desh_chat.markup import MARKUP
+        from desh_chat.memory import Memories
+        s = GeoSession(u_task(), str(tmp_path))
+        tools = MARKUP.register(s.register(ToolRegistry(), ("render",)))
+        memory = Memories.of(MARKUP)
+        assert tools.get("geo_render").inject == ("markup",)
+        assert not memory.owns(tools.get("geo_render")) and memory.owns(tools.get("markup_point"))
+        assert "markup" not in json.dumps(tools.get("geo_render").parameters)
+
+    def test_markups_reach_the_render_and_the_block_through_the_turn_loop(self, make_state, no_esc_watcher, tmp_path):
+        import numpy as np
+        from desh_chat.markup import MARKUP
+        from desh_chat.memory import Memories
+        s = GeoSession(u_task(), str(tmp_path))
+        tools = MARKUP.register(s.register(ToolRegistry(), ("render",)))
+        script = [
+            {"tool_calls": [{"name": "markup_point", "arguments": '{"name": "A", "x": 700, "y": 700}'},
+                            {"name": "geo_render", "arguments": '{"view": "target"}'}]},
+            {"content": "Done."},
+        ]
+        final, server = run_chat(make_state, script, ["mark it"], tools=tools, memory=Memories.of(MARKUP))
+        path = final.history.turns[0].rounds[0].results[1].images[0]
+        assert tuple(np.array(Image.open(path))[700, 700]) == (230, 0, 0)
+        block = server.calls[1][1].messages[-1]["content"]
+        assert "<markup" in block and "A: point (700, 700)" in block

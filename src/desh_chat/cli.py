@@ -30,11 +30,12 @@ from desh_chat.memory import Memories, Memory
 from desh_chat.ontology import ONTOLOGY
 from desh_chat.plan import PLAN
 from desh_chat.prompts import PromptError, Prompts, from_file
+from desh_chat.markup import MARKUP
 from desh_chat.scratchpad import SCRATCHPAD
 
 
 # The memories a run can register, by the name --memory takes. A new memory tool is one entry here.
-MEMORIES: dict[str, Memory] = {m.name: m for m in (SCRATCHPAD, PLAN, ONTOLOGY)}
+MEMORIES: dict[str, Memory] = {m.name: m for m in (SCRATCHPAD, PLAN, ONTOLOGY, MARKUP)}
 
 
 def selected_memories(args: argparse.Namespace) -> tuple[Memory, ...]:
@@ -178,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--geo-grid",  type=int, default=0, help="grid overlay spacing on renders, in layout units; 0 = none")
     ap.add_argument("--geo-ticks", type=int, default=0, help="labelled tick spacing on renders, in layout units; 0 = none")
     ap.add_argument("--geo-ruler-bias", type=int, default=0, help="causal-audit arm: add this to every length the instruments report")
-    ap.add_argument("--geo-origin", default="bottom-left", help="display convention: bottom-left (y up, EDA) or top-left (y down, as image pixels); geometry is the same under both")
+    ap.add_argument("--geo-origin", default="top-left", help="display convention the agent faces: top-left (y down, as image pixels; the default) or bottom-left (y up, EDA); geometry is the same under both")
     ap.add_argument("--max-nudges", type=int, default=0, help="a --task run with a task check (--geo: nothing submitted yet) is continued this many times when it answers with the task undone")
     ap.add_argument("--geo-out",   default="", help="where renders and submissions.jsonl go (default: WORKSPACE/.desh/geo/<time>-<task id>)")
     ap.add_argument("-tc",  "--tool-cap",       type=float, default=10.0, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")

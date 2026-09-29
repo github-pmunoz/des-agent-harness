@@ -17,7 +17,10 @@ single-unit reads (by eye, by instrument, or from the feedback).
     L3 minus       a notch, a U, a ring
     L4 xor         two or three overlapping rectangles xor-ed
     L5 compound    4-6 rectangles with a cut: a comb, stairs with a slot, a frame with a bar
-    L6 polygon     one rectilinear outline of 8-14 vertices, one with a hole
+    L6 polygon     one rectilinear outline of 8-10 vertices, an H with a hole
+    L7 dense       8-14 overlapping rects, an irregular union of 1-5 pieces
+    L8 near        features 1-3 units apart (gaps, a slot, a jog): inside the ruler's snap radius
+    L9 many        12-20 small separate rects
 """
 from __future__ import annotations
 
@@ -160,8 +163,60 @@ def l6(rng, k):
     return f"h = poly(({x}, {y}), [{pts}])\nM1 = h - {rect(hole)}\n", {"shapes": 1}
 
 
+def l7(rng, k):
+    """Dense: 8, 11 or 14 overlapping rects in a 520-unit square: an irregular union (1-5 pieces)."""
+    n = 8 + 3 * k
+    rs = []
+    for _ in range(n):
+        w, h = off(rng, 40, 200), off(rng, 40, 200)
+        rs.append((off(rng, 140, 660 - w), off(rng, 140, 660 - h), w, h))
+    names = [f"r{i}" for i in range(n)]
+    body = "".join(f"{nm} = {rect(r)}\n" for nm, r in zip(names, rs))
+    return body + f"M1 = {' | '.join(names)}\n", {}
+
+
+def l8(rng, k):
+    """Near-coincident: features 1-3 units apart, inside the ruler's snap radius."""
+    x, y = off(rng, 120, 200), off(rng, 150, 220)
+    if k == 0:                              # two blocks 2 apart, a third below with a 1-unit jog
+        w, h = off(rng, 150, 220), off(rng, 120, 180)
+        rs = [(x, y, w, h), (x + w + 2, y, off(rng, 150, 220), h), (x + 1, y + h + off(rng, 40, 70), 2 * w, off(rng, 80, 120))]
+        names = ["a", "b", "c"]
+        body = "".join(f"{nm} = {rect(r)}\n" for nm, r in zip(names, rs))
+        return body + "M1 = a | b | c\n", {"shapes": 3}
+    if k == 1:                              # a block with a 3-wide slot and a 2-wide notch
+        w, h = off(rng, 380, 460), off(rng, 300, 380)
+        slot = (x + off(rng, 100, 180), y + off(rng, 40, 80), 3, off(rng, 150, 220))
+        notch = (x + w - off(rng, 60, 90), y - 5, 2, off(rng, 60, 110))
+        body = f"outer = {rect((x, y, w, h))}\nslot = {rect(slot)}\nnotch = {rect(notch)}\n"
+        return body + "M1 = outer - slot - notch\n", {"shapes": 1}
+    # a comb whose teeth are 3 units apart
+    tw, t = off(rng, 21, 29), 6
+    teeth = [(x + i * (tw + 3), y, tw, off(rng, 180, 260)) for i in range(t)]
+    spine = (x, y - off(rng, 36, 44), t * tw + (t - 1) * 3, 50)      # across every tooth's end
+    body = f"spine = {rect(spine)}\n" + "".join(f"t{i} = {rect(r)}\n" for i, r in enumerate(teeth))
+    return body + "M1 = spine | " + " | ".join(f"t{i}" for i in range(t)) + "\n", {"shapes": 1}
+
+
+def l9(rng, k):
+    """Many: 12, 16 or 20 small separate rects, one per cell of a jittered grid."""
+    n = 12 + 4 * k
+    cols = 4 + k
+    rows = -(-n // cols)
+    cw, ch = 600 // cols, 600 // rows
+    rs = []
+    for i in range(n):
+        cx, cy = 100 + (i % cols) * cw, 100 + (i // cols) * ch
+        w, h = off(rng, 15, cw - 25), off(rng, 15, ch - 25)
+        rs.append((cx + off(rng, 5, cw - w - 8), cy + off(rng, 5, ch - h - 8), w, h))
+    names = [f"r{i}" for i in range(n)]
+    body = "".join(f"{nm} = {rect(r)}\n" for nm, r in zip(names, rs))
+    return body + f"M1 = {' | '.join(names)}\n", {"shapes": n}
+
+
 LEVELS = [("L0", "rect", l0), ("L1", "disjoint", l1), ("L2", "overlap", l2), ("L3", "minus", l3),
-          ("L4", "xor", l4), ("L5", "compound", l5), ("L6", "polygon", l6)]
+          ("L4", "xor", l4), ("L5", "compound", l5), ("L6", "polygon", l6),
+          ("L7", "dense", l7), ("L8", "near", l8), ("L9", "many", l9)]
 
 
 def main() -> int:

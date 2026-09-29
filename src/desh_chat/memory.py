@@ -13,7 +13,8 @@ from desh.tools import ToolRegistry
 #   announce what is about to expire, and the budget each memory may take of the window.
 # A plugin never explains context mechanics, and no event knows a memory by name: the slot name is
 # the tools' injected parameter (Tool.inject), the key on the state, the key in the session file
-# and the tag in the block.
+# and the tag in the block. Another tool may inject a slot to read it (a render drawing the
+# markups); what a memory tool is, is decided by which memory registered it (Memories.owns).
 
 
 class MemoryValue(Protocol):
@@ -130,11 +131,13 @@ class Memories:
 
     # -- a call ---------------------------------------------------------------------------------
 
-    def owns(self, inject: tuple[str, ...]) -> bool:
-        """Whether a tool declaring these injections is a memory tool of this run: it asked for a
-        registered slot. A memory tool of an unregistered slot is not — its call is left unrun at
-        the cap like any other, rather than answered with an error nobody reads."""
-        return any(name in self for name in inject)
+    def owns(self, tool) -> bool:
+        """Whether a tool is a memory tool of this run: one a registered memory brought (by name).
+        A memory tool of an unregistered slot is not — its call is left unrun at the cap like any
+        other, rather than answered with an error nobody reads. Nor is a tool that only READS a
+        slot (a render drawing the markups): it injects the slot, but it is not memory work, so the
+        cap, the loop guards and the round budget treat it like any other call."""
+        return tool.name in self.tool_names()
 
     def provide(self, inject: tuple[str, ...]) -> dict[str, dict]:
         """The dict forms of the slots a tool asked for, built for this one call."""

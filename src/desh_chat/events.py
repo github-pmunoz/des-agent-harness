@@ -294,7 +294,7 @@ class AppendRound(Event):
         # for it threw away every result the turn had (seen: a refused triplet retried twice).
         def is_memory(tc: ToolCall) -> bool:
             t = state.tools.get(tc.name)
-            return t is not None and state.memory.owns(t.inject)
+            return t is not None and state.memory.owns(t)
         def shape(calls: tuple[ToolCall, ...]) -> tuple[tuple[str, str], ...]:
             return tuple(sorted(state.tools.identity(tc.name, tc.arguments) for tc in calls if not is_memory(tc)))
         def contents(r: Round) -> list[str]:
@@ -340,7 +340,7 @@ def rereads(state: ChatState, tc: ToolCall) -> int:
     assert state.pending is not None
     tools = state.tools
     tool = tools.get(tc.name)
-    if tool is None or tool.acting or state.memory.owns(tool.inject):
+    if tool is None or tool.acting or state.memory.owns(tool):
         return 0
     key = tools.identity(tc.name, tc.arguments)
     n = 0
@@ -374,7 +374,7 @@ class ExecuteToolCalls(Event):
         # The first call always runs, or a round could make no progress at all; a memory call
         # always runs, since it is what the note below asks for; after that, a call runs only
         # while one more result at its cap still fits.
-        if self.index > 0 and not (tool is not None and state.memory.owns(tool.inject)):
+        if self.index > 0 and not (tool is not None and state.memory.owns(tool)):
             used = sum(r.tokens() for r in round.results)
             worst = int(state.tools.max_result_chars / RESULT_CHARS_PER_TOKEN)
             budget = state.round_budget()
@@ -466,7 +466,7 @@ def run_memory_calls(state: ChatState, calls: tuple[ToolCall, ...]) -> tuple[Cha
     rest: list[ToolCall] = []
     for tc in calls:
         tool = state.tools.get(tc.name)
-        if tool is None or not state.memory.owns(tool.inject):
+        if tool is None or not state.memory.owns(tool):
             rest.append(tc)
             continue
         _, memory = run_call(state, tc)

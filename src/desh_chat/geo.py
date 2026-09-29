@@ -18,9 +18,12 @@ else it gets is the arm, chosen by which tools are registered (--geo-tools), nev
 
 Instruments read the target by default (it is what the agent must perceive) or the current
 submission. The grid and tick overlays are the operator's, per run (--geo-grid, --geo-ticks);
-the model cannot turn them on. So is the origin (--geo-origin): bottom-left (y up, the EDA
-convention) or top-left (y down, as image pixels count); the geometry is the same under both, and
-only renders, the prompt's orientation sentence and the words top and bottom follow it. Every
+the model cannot turn them on. So is the origin (--geo-origin): top-left (y down, as image pixels
+count; the default) or bottom-left (y up, the EDA convention). The geometry is the same under both,
+and only renders, the prompt's orientation sentence and the words top and bottom follow it. The
+agent faces top-left by default: it reads coordinates straight off the image rows, with no
+arithmetic (measured: 17-31% fewer tokens at equal accuracy). Where layouts come from or go to an
+EDA tool, the interface between the agent and the tool translates, not the agent. Every
 render result states how its pixels map to layout units. --geo-ruler-bias k is the causal-audit arm: every length an
 instrument reports is off by k, so a final answer that follows the instrument can be told from
 one that ignores it.
@@ -38,6 +41,7 @@ from typing import Literal
 
 from desgeo import DslError, GeometryError, Layout, Metrology, RasterEngine, Rect, Ruler, render, render_diff, run
 from desgeo.render import pixel_mapping
+from desh_chat.markup import Markups
 from desh.tools import ToolOutput, ToolRegistry
 
 GEO_TOOLS = ("render", "measure", "auto_measure", "inspect")
@@ -101,7 +105,7 @@ class GeoTask:
     def input_layers(self) -> tuple[str, ...]:
         return tuple(n for n in self.layers if n not in self.outputs and self.inputs and n in _assigned(self.inputs))
 
-    def prompt_text(self, origin: str = "bottom-left") -> str:
+    def prompt_text(self, origin: str = "top-left") -> str:
         ins = self.input_layers()
         return GEO_PROMPT.format(
             width=self.width, height=self.height, resolution=self.resolution,
@@ -120,7 +124,7 @@ class GeoSettings:
     grid: int = 0                           # overlay spacing in units; 0 = none (the operator's choice)
     ticks: int = 0                          # labelled tick spacing in units; 0 = none
     ruler_bias: int = 0                     # causal-audit arm: added to every reported length
-    origin: str = "bottom-left"             # display convention: bottom-left (y up) or top-left (y down)
+    origin: str = "top-left"                # display convention: top-left (y down) or bottom-left (y up)
 
     @property
     def y_up(self) -> bool:
@@ -199,7 +203,7 @@ class GeoSession:
         return f"submission {n}: " + ("ALL EXACT. " if exact else "") + "\n".join(lines) + f"\n{tail}"
 
     def render_view(self, view: Literal["target", "current", "diff"] = "target", window: list[int] | None = None,
-                    labels: bool = False, layer: str = "") -> ToolOutput | str:
+                    labels: bool = False, layer: str = "", markup: dict | None = None) -> ToolOutput | str:
         """Render an image of the target layout, of your current submission, or of the diff between them.
 
         Args:
@@ -215,8 +219,10 @@ class GeoSession:
             return "window must be [x0, y0, x1, y1]"
         s = self.settings
         rulers = [((r.a.x, r.a.y), (r.b.x, r.b.y), self._label(r)) for r in self.rulers]
+        # the agent's markups (a memory slot the harness injects when the run registered it)
+        marks = Markups.from_dict(markup).overlay() if markup else []
         overlay = dict(window=win, image_px=s.image_px, grid=s.grid or None, ticks=s.ticks or None, rulers=rulers,
-                       origin=s.origin)
+                       origin=s.origin, markups=marks)
         try:
             if view == "diff":
                 name = layer or self.task.outputs[0]
@@ -237,7 +243,8 @@ class GeoSession:
         m = pixel_mapping(self.task.width, self.task.height, window=win, image_px=s.image_px,
                           ticks=s.ticks or None, origin=s.origin)
         return ToolOutput(f"{view} rendered: x {x0}..{x1}, y {y0}..{y1}, {im.size[0]} x {im.size[1]} px"
-                          + (f", {len(rulers)} ruler(s)" if rulers else "") + ".\n" + _mapping_text(m), (path,))
+                          + (f", {len(rulers)} ruler(s)" if rulers else "") + (f", {len(marks)} markup(s)" if marks else "")
+                          + ".\n" + _mapping_text(m), (path,))
 
     def measure(self, x1: int, y1: int, x2: int, y2: int, on: Literal["target", "current"] = "target",
                 layer: str = "") -> str:
@@ -360,7 +367,10 @@ class GeoSession:
         for arm in GEO_TOOLS:
             if arm in arms:
                 fn, target = methods[arm]
-                tools = tools.add(fn, name=f"geo_{arm}", confirm=False, target=target)
+                # a render reads the markup slot to draw it (supplied only when the run registered
+                # the markup memory); reading does not make it a memory tool (Memories.owns)
+                inject = ("markup",) if arm == "render" else ()
+                tools = tools.add(fn, name=f"geo_{arm}", confirm=False, target=target, inject=inject)
         return tools
 
 
