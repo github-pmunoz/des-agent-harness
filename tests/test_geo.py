@@ -214,6 +214,17 @@ class TestGeoSession:
         down = GeoSession(u_task(), str(tmp_path / "d"), GeoSettings(origin="top-left", ticks=100))
         assert "x = px - 44, y = py - 14" in down.render_view("target").text
 
+    def test_labels_can_be_taken_off_the_render(self, tmp_path):
+        import numpy as np
+        on = GeoSession(u_task(), str(tmp_path / "on"))
+        off = GeoSession(u_task(), str(tmp_path / "off"), GeoSettings(labels=False))
+        assert "labels" in on.register(ToolRegistry(), ("render",)).get("geo_render").parameters["properties"]
+        assert "labels" not in off.register(ToolRegistry(), ("render",)).get("geo_render").parameters["properties"]
+        tagged = np.array(Image.open(on.render_view("target", labels=True).images[0]))
+        plain = np.array(Image.open(off.render_view("target", labels=True).images[0]))
+        yellow = lambda im: ((im[..., 0] == 255) & (im[..., 1] == 215) & (im[..., 2] == 0)).any()
+        assert yellow(tagged) and not yellow(plain)
+
     def test_poly_syntax_follows_the_setting_for_submissions_only(self, tmp_path):
         text = u_task().prompt_text(poly="points")
         assert "through its corners in order" in text and "1 + 2 per corner of a poly" in text and "(dx, dy), ..." not in text

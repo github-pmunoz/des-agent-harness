@@ -182,6 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--geo-origin", default="top-left", help="display convention the agent faces: top-left (y down, as image pixels; the default) or bottom-left (y up, EDA); geometry is the same under both")
     ap.add_argument("--max-nudges", type=int, default=0, help="a --task run with a task check (--geo: nothing submitted yet) is continued this many times when it answers with the task undone")
     ap.add_argument("--geo-poly", default="deltas", help="how the agent writes a polygon: deltas (a start point and steps, the OASIS form) or points (the corners in order)")
+    ap.add_argument("--geo-no-labels", action="store_true", help="do not offer geo_render's shape-id tags: the labels parameter leaves its schema")
     ap.add_argument("--geo-out",   default="", help="where renders and submissions.jsonl go (default: WORKSPACE/.desh/geo/<time>-<task id>)")
     ap.add_argument("-tc",  "--tool-cap",       type=float, default=10.0, help="cap on one tool result, as a percentage of the context window (in chars, 4 per token); the rest is reachable by Read")
     ap.add_argument("-ct",  "--checkpoint-target", type=float, default=0.15, help="share of the context a mid-turn checkpoint summary may take")

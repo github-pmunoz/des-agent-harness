@@ -24,7 +24,9 @@ and only renders, the prompt's orientation sentence and the words top and bottom
 agent faces top-left by default: it reads coordinates straight off the image rows, with no
 arithmetic (measured: 17-31% fewer tokens at equal accuracy). Where layouts come from or go to an
 EDA tool, the interface between the agent and the tool translates, not the agent. Every
-render result states how its pixels map to layout units. The polygon syntax is the operator's
+render result states how its pixels map to layout units. --geo-no-labels takes the shape-id tags
+off geo_render altogether (they are a reading aid for the instruments' shape numbers, and on a
+target picture they can be mistaken for geometry). The polygon syntax is the operator's
 too (--geo-poly): steps from a start point (deltas, the OASIS form) or corners in order
 (points). Only the agent's submissions follow it; the task's own programs are always steps.
 
@@ -51,7 +53,7 @@ from typing import Literal
 from desgeo import DslError, GeometryError, Layout, Metrology, Polygon, RasterEngine, Rect, Ruler, render, render_diff, run
 from desgeo.render import pixel_mapping
 from desh_chat.markup import Markups
-from desh.tools import ToolOutput, ToolRegistry
+from desh.tools import ToolOutput, ToolRegistry, parameters_schema
 
 GEO_TOOLS = ("render", "measure", "auto_measure", "inspect")
 # The display convention (--geo-origin): how y is drawn and named. Geometry is the same under both.
@@ -145,6 +147,7 @@ class GeoSettings:
     ruler_bias: int = 0                     # causal-audit arm: the instruments read the target shifted by (k, k)
     origin: str = "top-left"                # display convention: top-left (y down) or bottom-left (y up)
     poly: str = "deltas"                    # how the agent writes a polygon: deltas (steps) or points (corners)
+    labels: bool = True                     # whether geo_render offers shape-id tags at all (--geo-no-labels)
 
     @property
     def y_up(self) -> bool:
@@ -238,6 +241,7 @@ class GeoSession:
         """
         if view != "target" and self.current is None:
             return "Nothing submitted yet: geo_submit a program first."
+        labels = labels and self.settings.labels
         win = tuple(window) if window else None
         if win is not None and len(win) != 4:
             return "window must be [x0, y0, x1, y1]"
@@ -392,7 +396,13 @@ class GeoSession:
                 # a render reads the markup slot to draw it (supplied only when the run registered
                 # the markup memory); reading does not make it a memory tool (Memories.owns)
                 inject = ("markup",) if arm == "render" else ()
-                tools = tools.add(fn, name=f"geo_{arm}", confirm=False, target=target, inject=inject)
+                extra = {}
+                if arm == "render" and not self.settings.labels:
+                    # the operator turned the shape tags off: the model is not offered them at all
+                    schema = parameters_schema(fn, inject)
+                    schema["properties"].pop("labels")
+                    extra["parameters"] = schema
+                tools = tools.add(fn, name=f"geo_{arm}", confirm=False, target=target, inject=inject, **extra)
         return tools
 
 
@@ -468,7 +478,7 @@ def session_from_args(args) -> GeoSession | None:
         raise SystemExit(f"--geo-origin must be one of {', '.join(ORIENTATION)}")
     settings = GeoSettings(feedback=args.geo_feedback, snap=args.geo_snap, image_px=args.geo_image_px,
                            grid=args.geo_grid, ticks=args.geo_ticks, ruler_bias=args.geo_ruler_bias,
-                           origin=args.geo_origin, poly=args.geo_poly)
+                           origin=args.geo_origin, poly=args.geo_poly, labels=not args.geo_no_labels)
     return GeoSession(task, os.path.abspath(os.path.expanduser(out)), settings)
 
 
