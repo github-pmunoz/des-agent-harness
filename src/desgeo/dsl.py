@@ -4,7 +4,8 @@ compiled to a canonical expression DAG that any engine can evaluate.
 
     w = 40                              numbers: int literals, + - * /, unary minus; / must be exact
     a = rect(0, 0, 100, 50)             rect(x, y, w, h)
-    p = poly((0, 0), [(100, 0), (0, 50), (-60, 0), (0, 30), (-40, 0)])   origin + deltas
+    p = poly((0, 0), [(100, 0), (0, 50), (-60, 0), (0, 30), (-40, 0)])   origin + deltas (poly="deltas")
+    p = poly([(0, 0), (100, 0), (100, 50), (40, 50), (40, 80), (0, 80)])  corners (poly="points")
     c = a - b                           regions: | union, & intersect, - subtract, ^ xor
     d = size(c, w/2)                    size(r, d) or size(r, dx, dy): grow > 0, shrink < 0
     e = move(d, 10, 0)                  move(r, dx, dy)
@@ -46,6 +47,12 @@ from desgeo.shapes import GeometryError, Polygon, Rect
 MAX_SOURCE = 100_000
 MAX_STATEMENTS = 1000
 FUNCTIONS = {"rect": (4,), "poly": (2,), "size": (2, 3), "move": (3,), "scale": (2, 3)}
+# How a program writes a polygon, chosen per compile: a start point and axis-aligned steps (the
+# OASIS form), or its corners in order. The two compile to the same node; only one is accepted.
+POLY_SYNTAX = {
+    "deltas": ("poly((x, y), [(dx, dy), ...]): a start point and axis-aligned steps", 2),
+    "points": ("poly([(x0, y0), (x1, y1), ...]): the corners in order", 1),
+}
 REGION_OPS = {ast.BitOr: "or", ast.BitAnd: "and", ast.BitXor: "xor", ast.Sub: "sub"}
 COMMUTATIVE = {"or", "and", "xor"}
 IDEMPOTENT = {"or", "and"}
@@ -118,16 +125,21 @@ class Result:
     layout: Layout                          # a copy with every output written as a layer
 
 
-def compile(src: str, layers: Iterable[str] = (), outputs: Iterable[str] | None = None) -> Program:
+def compile(src: str, layers: Iterable[str] = (), outputs: Iterable[str] | None = None,
+            poly: str = "deltas") -> Program:
     """Parse and compile. layers are the names readable as input geometry. outputs defaults to
-    the layer names the program assigns, else the last region statement."""
-    return _Compiler(set(layers)).run(src, list(outputs) if outputs is not None else None)
+    the layer names the program assigns, else the last region statement. poly is the polygon
+    syntax the program must use (POLY_SYNTAX)."""
+    if poly not in POLY_SYNTAX:
+        raise ValueError(f"poly syntax must be one of {', '.join(POLY_SYNTAX)}, got {poly!r}")
+    return _Compiler(set(layers), poly).run(src, list(outputs) if outputs is not None else None)
 
 
-def run(src: str, layout: Layout, outputs: Iterable[str] | None = None, engine=None) -> Result:
+def run(src: str, layout: Layout, outputs: Iterable[str] | None = None, engine=None,
+        poly: str = "deltas") -> Result:
     """Compile against the layout's layers, evaluate (raster oracle by default), and return a
     copy of the layout with each output written as a layer of canonical rects."""
-    program = compile(src, layout.layers, outputs)
+    program = compile(src, layout.layers, outputs, poly)
     engine = engine or RasterEngine(layout.width, layout.height)
     try:
         regions = program.evaluate(engine, layout)
@@ -142,8 +154,9 @@ def run(src: str, layout: Layout, outputs: Iterable[str] | None = None, engine=N
 # ---- compiler ----------------------------------------------------------------------------------
 
 class _Compiler:
-    def __init__(self, layers: set[str]):
+    def __init__(self, layers: set[str], poly: str = "deltas"):
         self.layers = layers
+        self.poly = poly
         self.env: dict[str, int | Node] = {}
         self.interned: dict[str, Node] = {}
         self.statements: list[tuple[str, int, Node]] = []
@@ -297,7 +310,11 @@ class _Compiler:
         fn = e.func.id
         if e.keywords:
             self.fail(f"{fn}() takes positional arguments only")
-        if len(e.args) not in FUNCTIONS[fn]:
+        if fn == "poly":
+            form, arity = POLY_SYNTAX[self.poly]
+            if len(e.args) != arity:
+                self.fail(f"poly is written {form}")
+        elif len(e.args) not in FUNCTIONS[fn]:
             self.fail(f"{fn}() takes {' or '.join(map(str, FUNCTIONS[fn]))} arguments, got {len(e.args)}")
         try:
             return getattr(self, f"call_{fn}")(e.args)
@@ -326,6 +343,12 @@ class _Compiler:
         return self.node("rect", (r.x, r.y, r.w, r.h))
 
     def call_poly(self, args) -> Node:
+        if self.poly == "points":
+            if not isinstance(args[0], (ast.Tuple, ast.List)) or \
+                    not all(isinstance(c, (ast.Tuple, ast.List)) for c in args[0].elts):
+                self.fail(f"poly is written {POLY_SYNTAX['points'][0]}")
+            p = Polygon.from_points([self.pair(c, "poly corner") for c in args[0].elts])
+            return self.node("poly", (tuple(p.origin), p.deltas))
         origin = self.pair(args[0], "poly origin")
         if not isinstance(args[1], (ast.Tuple, ast.List)):
             self.fail("poly deltas must be a list of (dx, dy) pairs")

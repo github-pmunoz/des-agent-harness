@@ -24,7 +24,9 @@ and only renders, the prompt's orientation sentence and the words top and bottom
 agent faces top-left by default: it reads coordinates straight off the image rows, with no
 arithmetic (measured: 17-31% fewer tokens at equal accuracy). Where layouts come from or go to an
 EDA tool, the interface between the agent and the tool translates, not the agent. Every
-render result states how its pixels map to layout units. --geo-ruler-bias k is the causal-audit arm: every length an
+render result states how its pixels map to layout units. The polygon syntax is the operator's
+too (--geo-poly): steps from a start point (deltas, the OASIS form) or corners in order
+(points). Only the agent's submissions follow it; the task's own programs are always steps. --geo-ruler-bias k is the causal-audit arm: every length an
 instrument reports is off by k, so a final answer that follows the instrument can be told from
 one that ignores it.
 
@@ -50,6 +52,15 @@ ORIENTATION = {
     "bottom-left": "The origin (0, 0) is the bottom-left corner; x grows to the right and y grows upward.",
     "top-left": "The origin (0, 0) is the top-left corner; x grows to the right and y grows downward.",
 }
+# How the agent writes a polygon (--geo-poly), and how its variables are counted in those terms.
+# Both forms compile to the same polygon and the same costs (2n + 1 variables for n corners);
+# the steps form is how OASIS stores it, the corners form is how the agent reads it off a picture.
+POLY_FORMS = {
+    "deltas": ("  p = poly((x, y), [(dx, dy), ...])   a rectilinear outline: a start point and axis-aligned steps, closing back to the start",
+               "3 + 2 per step of a poly"),
+    "points": ("  p = poly([(x0, y0), (x1, y1), ...])   a rectilinear outline through its corners in order, closing back to the first; consecutive corners share x or y",
+               "1 + 2 per corner of a poly"),
+}
 FEEDBACK = ("iou", "mismatch")
 MAX_MISMATCH_RECTS = 8
 # What a run is told when it answers with no accepted submission (GeoSession.unfinished).
@@ -63,14 +74,14 @@ Your answer is a program in the layout language, submitted with geo_submit. It m
 The layout language: one statement per line, `name = expression`. Only these forms exist:
   w = 40                          numbers: integers with + - * / (a division must be exact)
   a = rect(x, y, w, h)            {corner} corner (x, y), width w, height h
-  p = poly((x, y), [(dx, dy), ...])   a rectilinear outline: a start point and axis-aligned steps, closing back to the start
+{poly_line}
   c = a | b                       union      c = a & b    intersection
   c = a - b                       difference c = a ^ b    xor
   d = size(a, 5)                  grow every edge outward by 5 (negative: shrink); size(a, dx, dy) per axis
   e = move(a, dx, dy)             translate
   f = scale(a, 2) or scale(a, 3, 2)   scale about the origin by an integer or a fraction
 A layer name{input_note} is a region like any other name; assigning an output layer name writes that layer.
-Each submission reports two costs: operations (each rect, poly, input layer and operator) and variables (the numbers and names the program fixes: 5 per rect, 3 + 2 per step of a poly, 1 per operator plus its numeric arguments). Among exact programs, lower costs are better."""
+Each submission reports two costs: operations (each rect, poly, input layer and operator) and variables (the numbers and names the program fixes: 5 per rect, {poly_cost}, 1 per operator plus its numeric arguments). Among exact programs, lower costs are better."""
 
 
 @dataclass(frozen=True)
@@ -105,7 +116,7 @@ class GeoTask:
     def input_layers(self) -> tuple[str, ...]:
         return tuple(n for n in self.layers if n not in self.outputs and self.inputs and n in _assigned(self.inputs))
 
-    def prompt_text(self, origin: str = "top-left") -> str:
+    def prompt_text(self, origin: str = "top-left", poly: str = "deltas") -> str:
         ins = self.input_layers()
         return GEO_PROMPT.format(
             width=self.width, height=self.height, resolution=self.resolution,
@@ -113,7 +124,8 @@ class GeoTask:
             layers=", ".join(self.layers),
             inputs=f" Input layer{'s' if len(ins) > 1 else ''} {', '.join(ins)} {'are' if len(ins) > 1 else 'is'} given and can be read by name." if ins else "",
             s="s" if len(self.outputs) > 1 else "", outputs=", ".join(self.outputs),
-            input_note=" (input or output)" if ins else "")
+            input_note=" (input or output)" if ins else "",
+            poly_line=POLY_FORMS[poly][0], poly_cost=POLY_FORMS[poly][1])
 
 
 @dataclass
@@ -125,6 +137,7 @@ class GeoSettings:
     ticks: int = 0                          # labelled tick spacing in units; 0 = none
     ruler_bias: int = 0                     # causal-audit arm: added to every reported length
     origin: str = "top-left"                # display convention: top-left (y down) or bottom-left (y up)
+    poly: str = "deltas"                    # how the agent writes a polygon: deltas (steps) or points (corners)
 
     @property
     def y_up(self) -> bool:
@@ -169,7 +182,7 @@ class GeoSession:
         n = self.submissions
         record: dict = {"n": n, "time": time.time(), "program": program}
         try:
-            res = run(program, self.base, outputs=self.task.outputs)
+            res = run(program, self.base, outputs=self.task.outputs, poly=self.settings.poly)
         except DslError as e:
             record.update(ok=False, error=str(e))
             self._log(record)
@@ -430,11 +443,13 @@ def session_from_args(args) -> GeoSession | None:
                                        f"{time.strftime('%Y%m%d-%H%M%S')}-{task.id}")
     if args.geo_feedback not in FEEDBACK:
         raise SystemExit(f"--geo-feedback must be one of {', '.join(FEEDBACK)}")
+    if args.geo_poly not in POLY_FORMS:
+        raise SystemExit(f"--geo-poly must be one of {', '.join(POLY_FORMS)}")
     if args.geo_origin not in ORIENTATION:
         raise SystemExit(f"--geo-origin must be one of {', '.join(ORIENTATION)}")
     settings = GeoSettings(feedback=args.geo_feedback, snap=args.geo_snap, image_px=args.geo_image_px,
                            grid=args.geo_grid, ticks=args.geo_ticks, ruler_bias=args.geo_ruler_bias,
-                           origin=args.geo_origin)
+                           origin=args.geo_origin, poly=args.geo_poly)
     return GeoSession(task, os.path.abspath(os.path.expanduser(out)), settings)
 
 

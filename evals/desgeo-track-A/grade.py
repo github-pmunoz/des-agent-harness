@@ -11,6 +11,8 @@ is your answer"); a rejected one after it does not erase it. Per case:
     ops, variables and their ratios to the reference program (ops_ratio, var_ratio, on exact
                  answers only: < 1 beats the reference, > 1 is a longer program than needed)
     submissions, rejected, rounds, tools (calls per tool), stop (how the last turn ended)
+    poly_answer  whether the answer writes a poly; poly_submissions, poly_rejects: submissions
+                 writing one, and rejections a poly caused (the --geo-poly syntax arms)
     completion_tokens, peak_prompt (largest prompt of the case), wall_ms
 The run's result.json holds per_case, the mean score and exact count, the mean score per level,
 and per-run stats (sums or means over cases). A pure function of the run dir: rerun any time.
@@ -39,7 +41,9 @@ def grade_case(case_dir: Path) -> dict:
     ref = task["reference"]
     out = {"id": task["id"], "level": task["level"], "status": manifest["status"],
            "wall_ms": manifest["elapsed_ms"], "submissions": len(subs), "rejected": len(subs) - len(ok),
-           "ref_ops": ref["ops"], "ref_variables": ref["variables"]}
+           "ref_ops": ref["ops"], "ref_variables": ref["variables"],
+           "poly_submissions": sum("poly(" in s["program"] for s in subs),
+           "poly_rejects": sum(1 for s in subs if not s.get("ok") and "poly" in s.get("error", ""))}
     if answer is None:
         out.update(score=0.0, exact=False, iou=0.0, first_exact=None, ops=None, variables=None,
                    ops_ratio=None, var_ratio=None)
@@ -52,6 +56,7 @@ def grade_case(case_dir: Path) -> dict:
                    ops_ratio=round(answer["ops"] / ref["ops"], 3) if exact else None,
                    var_ratio=round(answer["variables"] / ref["variables"], 3) if exact else None,
                    answer=answer["program"])
+    out["poly_answer"] = answer is not None and "poly(" in answer["program"]
     session = case_dir / "session.json"
     turns = json.loads(session.read_text()).get("turns", []) if session.exists() else []
     out["rounds"] = sum(len(t.get("rounds", [])) for t in turns)
@@ -89,6 +94,8 @@ def main(argv: list[str]) -> int:
             "peak_prompt": max((c["peak_prompt"] for c in per_case), default=0),
             "ops_ratio": mean(c["ops_ratio"] for c in per_case),
             "var_ratio": mean(c["var_ratio"] for c in per_case),
+            "poly_answers": sum(c["poly_answer"] for c in per_case),
+            "poly_rejects": sum(c["poly_rejects"] for c in per_case),
         },
         "per_case": per_case,
     }

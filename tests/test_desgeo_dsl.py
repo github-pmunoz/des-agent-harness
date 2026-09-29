@@ -165,3 +165,38 @@ def test_width_rule_as_a_program_flags_a_narrow_neck():
 def test_run_turns_frame_errors_into_dsl_errors():
     with pytest.raises(DslError, match="frame"):
         run("r = size(rect(0, 0, 10, 10), 5)", Layout(100, 100))
+
+
+# ---- polygon syntax ---------------------------------------------------------------------------
+
+U_DELTAS = "r = poly((0, 0), [(40, 0), (0, 40), (-10, 0), (0, -30), (-20, 0), (0, 30), (-10, 0)])"
+U_POINTS = "r = poly([(0, 0), (40, 0), (40, 40), (30, 40), (30, 10), (10, 10), (10, 40), (0, 40)])"
+
+
+def test_points_and_deltas_are_one_polygon_with_one_cost():
+    d, p = compile(U_DELTAS), compile(U_POINTS, poly="points")
+    assert d.canonical() == p.canonical() and (d.ops, d.variables) == (p.ops, p.variables) == (1, 17)
+    closed = "r = poly([(0, 0), (40, 0), (40, 40), (30, 40), (30, 10), (10, 10), (10, 40), (0, 40), (0, 0)])"
+    clockwise = "r = poly([(0, 0), (0, 40), (10, 40), (10, 10), (30, 10), (30, 40), (40, 40), (40, 0)])"
+    for src in (closed, clockwise):
+        assert compile(src, poly="points").canonical() == d.canonical()
+
+
+def test_each_syntax_is_rejected_under_the_other():
+    with pytest.raises(DslError, match=r"line 1: poly is written poly\(\[\(x0, y0\)"):
+        compile(U_DELTAS, poly="points")
+    with pytest.raises(DslError, match=r"line 1: poly is written poly\(\(x, y\), \[\(dx, dy\)"):
+        compile(U_POINTS)
+    with pytest.raises(DslError, match="poly is written poly\\(\\[\\(x0, y0\\)"):
+        compile("r = poly((0, 0))", poly="points")
+    with pytest.raises(ValueError, match="poly syntax"):
+        compile(U_POINTS, poly="corners")
+
+
+def test_points_errors_name_the_corners():
+    with pytest.raises(DslError, match=r"corners 1 \(40, 0\) and 2 \(30, 40\) are not axis-aligned"):
+        compile("r = poly([(0, 0), (40, 0), (30, 40), (0, 40)])", poly="points")
+    with pytest.raises(DslError, match=r"closes back to corner 0"):
+        compile("r = poly([(0, 0), (40, 0), (40, 40), (10, 40), (10, 20)])", poly="points")
+    with pytest.raises(DslError, match="at least 4 corners"):
+        compile("r = poly([(0, 0), (40, 0), (40, 40)])", poly="points")

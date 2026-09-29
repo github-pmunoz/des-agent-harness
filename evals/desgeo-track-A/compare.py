@@ -6,7 +6,7 @@ Usage:
 
 Reads <SET_DIR>/<sweep>/summary.json for every sweep named in <SET_DIR>/sweep.json, writes
 <SET_DIR>/compare.json, and prints two tables: score, exact, level means, parsimony, rounds,
-tokens and wall per sweep; then the exact rate of every case per sweep.
+submissions, poly answers and poly rejections (per run), tokens and wall per sweep; then the exact rate of every case per sweep.
 """
 from __future__ import annotations
 
@@ -38,13 +38,14 @@ def main(argv: list[str]) -> int:
     levels = list(next(iter(graded.values()))["levels"])
     width = max(len(n) for n in graded) + 2
     print(f"{'sweep':{width}} runs  score         exact  " + " ".join(f"{lv:>5}" for lv in levels)
-          + "  ops_r  var_r  rounds  subs  compl_tok  wall_s")
+          + "  ops_r  var_r  rounds  subs  poly_a  poly_rej  compl_tok  wall_s")
     for name, s in graded.items():
         sc, st = s["score"], s["stats"]
         print(f"{name:{width}} {s['graded']:>4}  {sc['mean']:.3f}±{sc['stdev']:.3f}  {s['exact']['mean']:5.1f}  "
               + " ".join(fmt(s["levels"].get(lv), "5.2f") for lv in levels)
               + f"  {fmt(st['ops_ratio'], '5.2f')}  {fmt(st['var_ratio'], '5.2f')}  {fmt(st['rounds'], '6.1f')}"
-              f"  {fmt(st['submissions'], '4.1f')}  {st['completion_tokens']:9.0f}  {st['wall_ms'] / 1000:6.0f}")
+              f"  {fmt(st['submissions'], '4.1f')}  {fmt(st.get('poly_answers'), '6.1f')}  {fmt(st.get('poly_rejects'), '8.1f')}"
+              f"  {st['completion_tokens']:9.0f}  {st['wall_ms'] / 1000:6.0f}")
     print()
     cases = list(next(iter(graded.values()))["exact_rate"])
     print(f"{'exact rate':20} " + " ".join(f"{n[:12]:>12}" for n in graded))

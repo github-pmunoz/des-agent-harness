@@ -71,7 +71,8 @@ class Rect:
 @dataclass(frozen=True)
 class Polygon:
     """A simple rectilinear polygon: origin plus axis-aligned deltas, closed back to the origin.
-    Use Polygon.of(origin, deltas); the fields hold the normalised form."""
+    Use Polygon.of(origin, deltas) or Polygon.from_points(corners); the fields hold the normalised
+    form, the same whichever way the polygon was written."""
     origin: Point
     deltas: tuple[tuple[int, int], ...]
 
@@ -101,6 +102,25 @@ class Polygon:
         pts = pts[k:] + pts[:k]
         deltas = tuple((b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
         return cls(Point(*pts[0]), deltas)
+
+    @classmethod
+    def from_points(cls, points) -> Polygon:
+        """The polygon through these corners in order, closing back to the first (which may be
+        repeated at the end). Consecutive corners, the closing pair included, must share x or y."""
+        pts = [(_int(f"corner {i} x", p[0]), _int(f"corner {i} y", p[1])) for i, p in enumerate(points)]
+        if len(pts) > 1 and pts[-1] == pts[0]:
+            pts.pop()
+        if len(pts) < 4:
+            raise GeometryError(f"a polygon needs at least 4 corners, got {len(pts)}")
+        n = len(pts)
+        for i in range(n):
+            a, b = pts[i], pts[(i + 1) % n]
+            if a[0] != b[0] and a[1] != b[1]:
+                j = (i + 1) % n
+                raise GeometryError(f"corners {i} {a} and {j} {b} are not axis-aligned: consecutive "
+                                    f"corners must share x or y" + (" (the outline closes back to corner 0)" if j == 0 else ""))
+        deltas = [(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:] + pts[:1])]
+        return cls.of(pts[0], deltas)
 
     @property
     def vertices(self) -> list[Point]:

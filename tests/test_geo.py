@@ -194,6 +194,16 @@ class TestGeoSession:
         down = GeoSession(u_task(), str(tmp_path / "d"), GeoSettings(origin="top-left", ticks=100))
         assert "x = px - 44, y = py - 14" in down.render_view("target").text
 
+    def test_poly_syntax_follows_the_setting_for_submissions_only(self, tmp_path):
+        text = u_task().prompt_text(poly="points")
+        assert "through its corners in order" in text and "1 + 2 per corner of a poly" in text and "(dx, dy), ..." not in text
+        assert "3 + 2 per step of a poly" in u_task().prompt_text()
+        points = "M1 = poly([(237, 143), (555, 143), (555, 554), (481, 554), (481, 260), (311, 260), (311, 554), (237, 554)])"
+        s = GeoSession(u_task(), str(tmp_path / "p"), GeoSettings(poly="points"))   # the target is still steps
+        assert s.submit(points).startswith("submission 1: ALL EXACT")
+        assert "poly is written poly([(x0, y0)" in s.submit("M1 = poly((237, 143), [(318, 0), (0, 411), (-318, 0)])")
+        assert "poly is written poly((x, y)" in GeoSession(u_task(), str(tmp_path / "d")).submit(points)
+
     def test_prompt_states_frame_outputs_and_inputs_but_no_image(self):
         text = via_task().prompt_text()
         assert "600 x 400" in text and "output layer VIA" in text and "Input layer M1 is given" in text
