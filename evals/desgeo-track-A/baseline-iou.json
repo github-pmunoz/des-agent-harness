@@ -12,7 +12,7 @@
   "cont": true,
   "debug": false,
   "system_prompt": "You are a layout engineer. You reproduce layouts exactly in the layout language, and you check your work with the tools you have.",
-  "geo_tools": "render, instruments, measure, auto_measure",
+  "geo_tools": "render, measure, auto_measure",
   "geo_feedback": "iou",
   "geo_snap": 15,
   "geo_image_px": 800,
