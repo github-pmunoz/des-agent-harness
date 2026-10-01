@@ -92,7 +92,7 @@ def test_numbers_fold_and_division_must_be_exact():
     ("r = rect(0, 0, 1.5, 1)", "only integer literals"),
     ("r = rect(0, 0, True, 1)", "only integer literals"),
     ("r = rect(x=0, y=0, w=1, h=1)", "positional arguments only"),
-    ("r = rect(0, 0, 1)", "rect() takes 4 arguments, got 3"),
+    ("r = rect(0, 0, 1)", "rect is written rect(x, y, w, h)"),
     ("r = rect(0, 0, 0, 1)", "rect: rect width and height must be positive"),
     ("r = rect(0, 0, 5, 5) + rect(1, 1, 5, 5)", "use | for union"),
     ("r = rect(0, 0, 5, 5) | 3", "cannot mix a region and a number"),
@@ -200,3 +200,28 @@ def test_points_errors_name_the_corners():
         compile("r = poly([(0, 0), (40, 0), (40, 40), (10, 40), (10, 20)])", poly="points")
     with pytest.raises(DslError, match="at least 4 corners"):
         compile("r = poly([(0, 0), (40, 0), (40, 40)])", poly="points")
+
+
+# ---- rect syntax ------------------------------------------------------------------------------
+
+def test_rect_points_are_any_two_opposite_corners():
+    d = compile("r = rect(10, 20, 30, 40)")
+    for corners in ("(10, 20), (40, 60)", "(40, 60), (10, 20)", "(10, 60), (40, 20)", "[40, 20], [10, 60]"):
+        p = compile(f"r = rect({corners})", poly="points")
+        assert p.canonical() == d.canonical() and (p.ops, p.variables) == (d.ops, d.variables) == (1, 5)
+
+
+def test_rect_syntax_is_rejected_under_the_other():
+    with pytest.raises(DslError, match=r"line 1: rect is written rect\(\(x0, y0\), \(x1, y1\)\): two opposite corners"):
+        compile("r = rect(10, 20, 30, 40)", poly="points")
+    with pytest.raises(DslError, match=r"line 1: rect is written rect\(x, y, w, h\)"):
+        compile("r = rect((10, 20), (40, 60))")
+    with pytest.raises(DslError, match="rect corner must be a pair"):
+        compile("r = rect(10, (40, 60))", poly="points")
+
+
+def test_rect_corners_must_be_opposite():
+    with pytest.raises(DslError, match=r"corners \(10, 20\) and \(10, 60\) share an x"):
+        compile("r = rect((10, 20), (10, 60))", poly="points")
+    with pytest.raises(DslError, match=r"corners \(10, 20\) and \(40, 20\) share a y"):
+        compile("r = rect((10, 20), (40, 20))", poly="points")

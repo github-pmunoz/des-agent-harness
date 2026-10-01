@@ -26,9 +26,12 @@ arithmetic (measured: 17-31% fewer tokens at equal accuracy). Where layouts come
 EDA tool, the interface between the agent and the tool translates, not the agent. Every
 render result states how its pixels map to layout units. --geo-no-labels takes the shape-id tags
 off geo_render altogether (they are a reading aid for the instruments' shape numbers, and on a
-target picture they can be mistaken for geometry). The polygon syntax is the operator's
-too (--geo-poly): steps from a start point (deltas, the OASIS form) or corners in order
-(points). Only the agent's submissions follow it; the task's own programs are always steps.
+target picture they can be mistaken for geometry). The coordinate form is the operator's
+too (--geo-poly): a start point and lengths (deltas, the OASIS form: a rect's corner, width and
+height, a polygon's steps) or coordinates only (points: a rect's two opposite corners, a
+polygon's corners in order), so the agent writes what it reads off a picture with no arithmetic.
+The agent's submissions and the rects reported back to it (mismatch feedback, inspect) follow
+it; the task's own programs are always deltas.
 
 --geo-ruler-bias k is the causal-audit arm: the instruments read the target translated by (k, k),
 a miscalibrated probe. Everything they report about the target (coordinates, edges, vertices,
@@ -61,9 +64,14 @@ ORIENTATION = {
     "bottom-left": "The origin (0, 0) is the bottom-left corner; x grows to the right and y grows upward.",
     "top-left": "The origin (0, 0) is the top-left corner; x grows to the right and y grows downward.",
 }
-# How the agent writes a polygon (--geo-poly), and how its variables are counted in those terms.
-# Both forms compile to the same polygon and the same costs (2n + 1 variables for n corners);
-# the steps form is how OASIS stores it, the corners form is how the agent reads it off a picture.
+# How the agent writes a rect and a polygon (--geo-poly), and how a polygon's variables are counted
+# in those terms. Both forms compile to the same shapes and the same costs (a rect 5 variables, a
+# polygon 2n + 1 for n corners); deltas is how OASIS stores them, points is how the agent reads
+# them off a picture.
+RECT_FORMS = {
+    "deltas": "  a = rect(x, y, w, h)            {corner} corner (x, y), width w, height h",
+    "points": "  a = rect((x0, y0), (x1, y1))    a rectangle given by two opposite corners",
+}
 POLY_FORMS = {
     "deltas": ("  p = poly((x, y), [(dx, dy), ...])   a rectilinear outline: a start point and axis-aligned steps, closing back to the start",
                "3 + 2 per step of a poly"),
@@ -82,7 +90,7 @@ Your answer is a program in the layout language, submitted with geo_submit. It m
 
 The layout language: one statement per line, `name = expression`. Only these forms exist:
   w = 40                          numbers: integers with + - * / (a division must be exact)
-  a = rect(x, y, w, h)            {corner} corner (x, y), width w, height h
+{rect_line}
 {poly_line}
   c = a | b                       union      c = a & b    intersection
   c = a - b                       difference c = a ^ b    xor
@@ -129,7 +137,8 @@ class GeoTask:
         ins = self.input_layers()
         return GEO_PROMPT.format(
             width=self.width, height=self.height, resolution=self.resolution,
-            orientation=ORIENTATION[origin], corner="top-left" if origin == "top-left" else "lower-left",
+            orientation=ORIENTATION[origin],
+            rect_line=RECT_FORMS[poly].format(corner="top-left" if origin == "top-left" else "lower-left"),
             layers=", ".join(self.layers),
             inputs=f" Input layer{'s' if len(ins) > 1 else ''} {', '.join(ins)} {'are' if len(ins) > 1 else 'is'} given and can be read by name." if ins else "",
             s="s" if len(self.outputs) > 1 else "", outputs=", ".join(self.outputs),
@@ -146,7 +155,7 @@ class GeoSettings:
     ticks: int = 0                          # labelled tick spacing in units; 0 = none
     ruler_bias: int = 0                     # causal-audit arm: the instruments read the target shifted by (k, k)
     origin: str = "top-left"                # display convention: top-left (y down) or bottom-left (y up)
-    poly: str = "deltas"                    # how the agent writes a polygon: deltas (steps) or points (corners)
+    poly: str = "deltas"                    # how the agent writes and reads rects and polygons: deltas or points
     labels: bool = True                     # whether geo_render offers shape-id tags at all (--geo-no-labels)
 
     @property
@@ -218,8 +227,9 @@ class GeoSession:
                 continue
             line = f"{name}: IoU {iou:.3f}, area {self.engine.area(c)} vs target {self.engine.area(t)}"
             if self.settings.feedback == "mismatch":
-                line += (f"; missing {m}{_rect_list(self.engine.rects(missing))}"
-                         f"; extra {x}{_rect_list(self.engine.rects(extra))}")
+                form = self.settings.poly
+                line += (f"; missing {m}{_rect_list(self.engine.rects(missing), form)}"
+                         f"; extra {x}{_rect_list(self.engine.rects(extra), form)}")
             lines.append(line)
         p = res.program
         tail = (f"cost: {p.ops} operation{'s' if p.ops != 1 else ''}, {p.variables} variables"
@@ -347,11 +357,12 @@ class GeoSession:
         hits = m.inspect(x, y)
         if not hits:
             return f"nothing at ({x}, {y}) on {on}"
-        out = []
+        out, form = [], self.settings.poly
+        # deltas keeps the text earlier runs saw; points says what its four numbers are
+        fields = f" {RECT_FIELDS[form]}" if form == "points" else ""
         for h in hits:
-            b = h["bbox"]
-            out.append(f"{h['layer']} shape {h['shape']}: bbox [{b.x}, {b.y}, {b.w}, {b.h}], area {h['area']}, "
-                       f"{h['vertices']} vertices, rects{_rect_list(h['rects'], cap=16)}")
+            out.append(f"{h['layer']} shape {h['shape']}: bbox {_rect_text(h['bbox'], form)}{fields}, area {h['area']}, "
+                       f"{h['vertices']} vertices, rects{_rect_list(h['rects'], form, cap=16)}")
         return "\n".join(out)
 
     def unfinished(self) -> str | None:
@@ -415,12 +426,20 @@ def _assigned(program: str) -> set[str]:
         return set()
 
 
-def _rect_list(rects: list[Rect], cap: int = MAX_MISMATCH_RECTS) -> str:
+RECT_FIELDS = {"deltas": "[x, y, w, h]", "points": "[x0, y0, x1, y1]"}
+
+
+def _rect_text(r: Rect, form: str) -> str:
+    """A rect as the agent writes it (--geo-poly): corner and size, or two opposite corners."""
+    return f"[{r.x}, {r.y}, {r.x1}, {r.y1}]" if form == "points" else f"[{r.x}, {r.y}, {r.w}, {r.h}]"
+
+
+def _rect_list(rects: list[Rect], form: str = "deltas", cap: int = MAX_MISMATCH_RECTS) -> str:
     if not rects:
         return ""
-    shown = ", ".join(f"[{r.x}, {r.y}, {r.w}, {r.h}]" for r in rects[:cap])
+    shown = ", ".join(_rect_text(r, form) for r in rects[:cap])
     more = f" and {len(rects) - cap} more" if len(rects) > cap else ""
-    return f" in {len(rects)} rect{'s' if len(rects) > 1 else ''} [x, y, w, h]: {shown}{more}"
+    return f" in {len(rects)} rect{'s' if len(rects) > 1 else ''} {RECT_FIELDS[form]}: {shown}{more}"
 
 
 def _mapping_text(m: dict) -> str:

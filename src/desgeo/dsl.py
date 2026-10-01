@@ -3,7 +3,8 @@ dsl.py — the geometry language: named statements, a whitelisted subset of Pyth
 compiled to a canonical expression DAG that any engine can evaluate.
 
     w = 40                              numbers: int literals, + - * /, unary minus; / must be exact
-    a = rect(0, 0, 100, 50)             rect(x, y, w, h)
+    a = rect(0, 0, 100, 50)             corner + size, rect(x, y, w, h) (poly="deltas")
+    a = rect((0, 0), (100, 50))         two opposite corners (poly="points")
     p = poly((0, 0), [(100, 0), (0, 50), (-60, 0), (0, 30), (-40, 0)])   origin + deltas (poly="deltas")
     p = poly([(0, 0), (100, 0), (100, 50), (40, 50), (40, 80), (0, 80)])  corners (poly="points")
     c = a - b                           regions: | union, & intersect, - subtract, ^ xor
@@ -47,11 +48,17 @@ from desgeo.shapes import GeometryError, Polygon, Rect
 MAX_SOURCE = 100_000
 MAX_STATEMENTS = 1000
 FUNCTIONS = {"rect": (4,), "poly": (2,), "size": (2, 3), "move": (3,), "scale": (2, 3)}
-# How a program writes a polygon, chosen per compile: a start point and axis-aligned steps (the
-# OASIS form), or its corners in order. The two compile to the same node; only one is accepted.
+# How a program writes its leaves, chosen per compile: a start point and lengths (deltas: a rect's
+# corner and size, a polygon's axis-aligned steps, the OASIS form), or coordinates only (points: a
+# rect's two opposite corners, a polygon's corners in order). Both compile to the same nodes; only
+# the chosen form is accepted.
 POLY_SYNTAX = {
     "deltas": ("poly((x, y), [(dx, dy), ...]): a start point and axis-aligned steps", 2),
     "points": ("poly([(x0, y0), (x1, y1), ...]): the corners in order", 1),
+}
+RECT_SYNTAX = {
+    "deltas": ("rect(x, y, w, h): a corner, width and height", 4),
+    "points": ("rect((x0, y0), (x1, y1)): two opposite corners", 2),
 }
 REGION_OPS = {ast.BitOr: "or", ast.BitAnd: "and", ast.BitXor: "xor", ast.Sub: "sub"}
 COMMUTATIVE = {"or", "and", "xor"}
@@ -128,8 +135,8 @@ class Result:
 def compile(src: str, layers: Iterable[str] = (), outputs: Iterable[str] | None = None,
             poly: str = "deltas") -> Program:
     """Parse and compile. layers are the names readable as input geometry. outputs defaults to
-    the layer names the program assigns, else the last region statement. poly is the polygon
-    syntax the program must use (POLY_SYNTAX)."""
+    the layer names the program assigns, else the last region statement. poly is the form the
+    program must write its rects and polygons in (RECT_SYNTAX, POLY_SYNTAX)."""
     if poly not in POLY_SYNTAX:
         raise ValueError(f"poly syntax must be one of {', '.join(POLY_SYNTAX)}, got {poly!r}")
     return _Compiler(set(layers), poly).run(src, list(outputs) if outputs is not None else None)
@@ -310,10 +317,10 @@ class _Compiler:
         fn = e.func.id
         if e.keywords:
             self.fail(f"{fn}() takes positional arguments only")
-        if fn == "poly":
-            form, arity = POLY_SYNTAX[self.poly]
+        if fn in ("rect", "poly"):
+            form, arity = (RECT_SYNTAX if fn == "rect" else POLY_SYNTAX)[self.poly]
             if len(e.args) != arity:
-                self.fail(f"poly is written {form}")
+                self.fail(f"{fn} is written {form}")
         elif len(e.args) not in FUNCTIONS[fn]:
             self.fail(f"{fn}() takes {' or '.join(map(str, FUNCTIONS[fn]))} arguments, got {len(e.args)}")
         try:
@@ -339,6 +346,13 @@ class _Compiler:
         return self.number(e.elts[0], what), self.number(e.elts[1], what)
 
     def call_rect(self, args) -> Node:
+        if self.poly == "points":
+            (ax, ay), (bx, by) = (self.pair(c, "rect corner") for c in args)
+            if ax == bx or ay == by:
+                self.fail(f"corners ({ax}, {ay}) and ({bx}, {by}) share {'an x' if ax == bx else 'a y'}; "
+                          f"a rect is given by two opposite corners")
+            r = Rect(min(ax, bx), min(ay, by), abs(bx - ax), abs(by - ay))
+            return self.node("rect", (r.x, r.y, r.w, r.h))
         r = Rect(*(self.number(a, "rect argument") for a in args))
         return self.node("rect", (r.x, r.y, r.w, r.h))
 

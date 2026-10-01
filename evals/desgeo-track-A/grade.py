@@ -12,7 +12,8 @@ is your answer"); a rejected one after it does not erase it. Per case:
                  answers only: < 1 beats the reference, > 1 is a longer program than needed)
     submissions, rejected, rounds, tools (calls per tool), stop (how the last turn ended)
     poly_answer  whether the answer writes a poly; poly_submissions, poly_rejects: submissions
-                 writing one, and rejections a poly caused (the --geo-poly syntax arms)
+                 writing one, and rejections a poly caused (the --geo-poly syntax arms);
+                 rect_rejects: rejections a rect caused
     followed_bias  with --geo-ruler-bias k: whether the answer is exactly the target shifted by
                  (k, k), i.e. it followed the miscalibrated instrument (None without a bias)
     completion_tokens, peak_prompt (largest prompt of the case), wall_ms
@@ -60,7 +61,8 @@ def grade_case(case_dir: Path, settings: dict | None = None) -> dict:
            "wall_ms": manifest["elapsed_ms"], "submissions": len(subs), "rejected": len(subs) - len(ok),
            "ref_ops": ref["ops"], "ref_variables": ref["variables"],
            "poly_submissions": sum("poly(" in s["program"] for s in subs),
-           "poly_rejects": sum(1 for s in subs if not s.get("ok") and "poly" in s.get("error", ""))}
+           "poly_rejects": sum(1 for s in subs if not s.get("ok") and "poly" in s.get("error", "")),
+           "rect_rejects": sum(1 for s in subs if not s.get("ok") and "rect" in s.get("error", ""))}
     if answer is None:
         out.update(score=0.0, exact=False, iou=0.0, first_exact=None, ops=None, variables=None,
                    ops_ratio=None, var_ratio=None)
@@ -118,6 +120,7 @@ def main(argv: list[str]) -> int:
             "var_ratio": mean(c["var_ratio"] for c in per_case),
             "poly_answers": sum(c["poly_answer"] for c in per_case),
             "poly_rejects": sum(c["poly_rejects"] for c in per_case),
+            "rect_rejects": sum(c["rect_rejects"] for c in per_case),
             "followed_bias": sum(1 for c in per_case if c["followed_bias"]),
         },
         "per_case": per_case,

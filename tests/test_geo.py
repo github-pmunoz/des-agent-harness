@@ -130,7 +130,8 @@ class TestGeoSession:
 
     def test_rejected_program_names_the_line(self, tmp_path):
         s = GeoSession(u_task(), str(tmp_path))
-        assert s.submit("M1 = rect(1, 1, 1)") == "submission 1 rejected: line 1: rect() takes 4 arguments, got 3"
+        assert s.submit("M1 = rect(1, 1, 1)") == ("submission 1 rejected: line 1: rect is written "
+                                                  "rect(x, y, w, h): a corner, width and height")
         assert s.submit("x = rect(1, 1, 1, 1)").startswith("submission 2 rejected: output 'M1' is never assigned")
 
     def test_inputs_are_readable_and_rendered_with_the_target(self, tmp_path):
@@ -234,6 +235,25 @@ class TestGeoSession:
         assert s.submit(points).startswith("submission 1: ALL EXACT")
         assert "poly is written poly([(x0, y0)" in s.submit("M1 = poly((237, 143), [(318, 0), (0, 411), (-318, 0)])")
         assert "poly is written poly((x, y)" in GeoSession(u_task(), str(tmp_path / "d")).submit(points)
+
+    def test_points_form_covers_rects_and_the_rects_reported_back(self, tmp_path):
+        text = u_task().prompt_text(poly="points")
+        assert "rect((x0, y0), (x1, y1))    a rectangle given by two opposite corners" in text and "width w" not in text
+        assert "rect(x, y, w, h)            top-left corner (x, y), width w, height h" in u_task().prompt_text()
+        s = GeoSession(u_task(), str(tmp_path / "p"), GeoSettings(poly="points"))   # the target is still deltas
+        assert s.submit("M1 = rect((237, 143), (555, 554)) - rect((481, 554), (311, 260))").startswith("submission 1: ALL EXACT")
+        assert "rect is written rect((x0, y0), (x1, y1))" in s.submit(U_EXACT)
+        near_points = "M1 = rect((240, 140), (560, 550)) - rect((310, 260), (480, 560))"
+        near_deltas = "M1 = rect(240, 140, 320, 410) - rect(310, 260, 170, 300)"
+        corners = GeoSession(u_task(), str(tmp_path / "c"), GeoSettings(poly="points")).submit(near_points)
+        sizes = GeoSession(u_task(), str(tmp_path / "s")).submit(near_deltas)
+        assert "missing 2103 in 5 rects [x0, y0, x1, y1]: " in corners and "[x, y, w, h]" not in corners
+        assert "missing 2103 in 5 rects [x, y, w, h]: " in sizes
+        for out in (corners, sizes):            # the same rects, each in its own form
+            assert out.split("cost:")[0].count("[") == sizes.split("cost:")[0].count("[")
+        ins = s.inspect(240, 300)
+        assert "bbox [237, 143, 555, 554] [x0, y0, x1, y1]" in ins
+        assert "bbox [237, 143, 318, 411], area" in GeoSession(u_task(), str(tmp_path / "d")).inspect(240, 300)
 
     def test_prompt_states_frame_outputs_and_inputs_but_no_image(self):
         text = via_task().prompt_text()
