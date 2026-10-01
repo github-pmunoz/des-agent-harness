@@ -23,7 +23,7 @@ class StopReason(StrEnum):
     DEADLINE = "deadline"       # the run's wall-clock budget ran out; the model's text so far is the answer, and unlike CAP the turn is never continued
     ERROR = "error"             # a mid-turn exception
     REPEAT = "repeat"           # the same calls asked a third time with identical results; the record is the answer, and the repeat prompt may continue the turn once
-    LENGTH = "length"           # the completion hit its token limit before it finished (a tool call left unclosed, say); the text so far and a note are the answer, and the length prompt may continue the turn once
+    LENGTH = "length"           # the completion hit its token limit before it finished (a tool call left unclosed, say); the text so far and a note are the answer, and the length prompt may continue the turn
     CANCELLED = "cancelled"     # the operator pressed ESC or cancelled at a confirmation prompt
     INTERRUPT = "interrupt"     # Ctrl+C in auto mode
     SETTING = "setting"         # not a conversation turn: a settings change made by a /command
@@ -115,6 +115,8 @@ Keep: the one thing the assistant was about to do next, as a single concrete act
 SUMMARY_CLOSE = "\n\nWrite the summary now."
 CHECKPOINT_CLOSE = "\n\nWrite the checkpoint now."
 RETRY_NUDGE = "\n\nAn empty reply is not an answer: write it now."
+DEADLINE_NOTE = ("[Time check: about {left} s of this task's {budget} s remain. Stop exploring and finish with what "
+                 "you have: an answer not delivered by the deadline is lost.]")
 
 
 @dataclass(frozen=True)
@@ -217,13 +219,20 @@ class Deadline:
     reader can make sense of; an instant rather than a budget is what a check can compare."""
     at: float           # time.monotonic() value after which no further tool round starts
     budget: float       # the seconds it was set from, as given on the command line
+    warn: float = 0.0   # the fraction of the budget after which the run is told time is short; 0 = never
 
     @classmethod
-    def in_seconds(cls, budget: float) -> "Deadline":
-        return cls(at=time.monotonic() + budget, budget=budget)
+    def in_seconds(cls, budget: float, warn: float = 0.0) -> "Deadline":
+        return cls(at=time.monotonic() + budget, budget=budget, warn=warn)
 
     def passed(self) -> bool:
         return time.monotonic() > self.at
+
+    def remaining(self) -> float:
+        return self.at - time.monotonic()
+
+    def warn_due(self) -> bool:
+        return 0 < self.warn and self.remaining() <= (1 - self.warn) * self.budget
 
 
 @dataclass(frozen=True)
@@ -243,9 +252,10 @@ class ChatState(State):
     # with before either — None means a capped turn is never continued automatically.
     operator: bool = True
     auto_prompt: str | None = None
-    # The message a turn cut at the token limit (StopReason.LENGTH) is continued with, once: the
-    # model wrote past what a reply may hold — a call carrying a whole file, most often — and is
-    # told so. None means such a turn is never continued automatically. Two in a row end the run.
+    # The message a turn cut at the token limit (StopReason.LENGTH) is continued with: the model
+    # wrote past what a reply may hold — a call carrying a whole file, or a runaway of reasoning —
+    # and is told so. None means such a turn is never continued automatically. A cut right after a
+    # cut, with no tool round between, ends the run; so do more cuts in a row than max_cap_continues.
     length_prompt: str | None = None
     # The message a turn ended by the repeat guard (StopReason.REPEAT) is continued with, once:
     # the calls it looped on will not say anything new, and the task goes on from the record.
@@ -256,10 +266,11 @@ class ChatState(State):
     # here; a memory tool only sees a dict built from its slot for the one call. Rendered last in
     # every request, and snapshotted onto each finished Turn so a session restores it.
     memory: Memories = field(default_factory=Memories)
-    # A task-level check for a run without an operator: after a turn that ends with an answer,
-    # TurnStart asks it whether the task is done. A message back means it is not, and the task is
-    # continued with that message, at most max_nudges times in the run. Supplied by a plugin that
-    # knows what done means (a geo task: an accepted submission); None means the answer is final.
+    # A task-level check for a run without an operator: after a turn that ends with an answer, or
+    # with a cut or a repeat stop that is not continued, TurnStart asks it whether the task is done.
+    # A message back means it is not, and the task is continued with that message, at most
+    # max_nudges times in the run. Supplied by a plugin that knows what done means (a geo task: an
+    # accepted submission); None means the answer is final.
     task_check: Callable[[], str | None] | None = field(default=None, repr=False)
     max_nudges: int = 0
     nudges: int = 0
@@ -270,6 +281,11 @@ class ChatState(State):
     # the next tool round starts, so a run overshoots it by at most one completion. A subagent
     # inherits the parent's (Tool.inject), so no child outlives the run that spawned it.
     deadline: Deadline | None = None
+    # What the run is told once its deadline's warn fraction has passed, appended to the last
+    # result of the round that crosses it ({left}, {budget}: seconds); None tells it nothing.
+    # deadline_warned makes it edge-triggered: one note per run.
+    deadline_note: str | None = None
+    deadline_warned: bool = False
 
     def change_setting(self, setting: str, value: Any) -> ChatState:
         return replace(self, settings=replace(self.settings, **{setting: value}))

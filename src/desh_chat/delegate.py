@@ -280,7 +280,7 @@ def answer(state: ChatState) -> str:
                            the model's text so far is the answer
       DEADLINE             the run's wall-clock budget ran out; the model's text so far is the answer
       REPEAT               the repeated-round guard ended the turn
-      LENGTH               the reply hit the token limit twice running; the text so far and the record are the answer
+      LENGTH               a reply cut at the token limit that was not continued; the text so far and the record are the answer
       ANSWER               the answer, verbatim ("(no answer)" when the model said nothing)
     Every case must come back as text the parent can act on — it cannot see the child's history.
     A turn that ended by overflow, deadline, error or repeat carries what it got down as its answer

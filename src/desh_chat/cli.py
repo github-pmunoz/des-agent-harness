@@ -180,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--geo-ticks", type=int, default=0, help="labelled tick spacing on renders, in layout units; 0 = none")
     ap.add_argument("--geo-ruler-bias", type=int, default=0, help="causal-audit arm: the instruments read the target shifted by (k, k), consistently; reads of the current submission stay true")
     ap.add_argument("--geo-origin", default="top-left", help="display convention the agent faces: top-left (y down, as image pixels; the default) or bottom-left (y up, EDA); geometry is the same under both")
+    ap.add_argument("--deadline-warn", type=float, default=0, help="with --task-timeout: once this fraction of the budget has passed (e.g. 0.8), the next tool round's results end with a note of the time left; 0 = never")
     ap.add_argument("--max-nudges", type=int, default=0, help="a --task run with a task check (--geo: nothing submitted yet) is continued this many times when it answers with the task undone")
     ap.add_argument("--geo-poly", default="deltas", help="how the agent writes rects and polygons: deltas (a start point and lengths, the OASIS form: rect(x, y, w, h), poly steps) or points (coordinates only: rect by two opposite corners, poly corners in order)")
     ap.add_argument("--geo-no-labels", action="store_true", help="do not offer geo_render's shape-id tags: the labels parameter leaves its schema")
@@ -342,6 +343,8 @@ def run(args: argparse.Namespace, prompts: Prompts):
         models=client.models(),
         max_context=client.max_context()
     )
+    if not 0 <= args.deadline_warn < 1:
+        raise SystemExit(f"--deadline-warn must be a fraction in [0, 1), got {args.deadline_warn}")
     completions_log = Logger(args.completions_log) if args.completions_log else None
     tools = build_tools(args, inference, settings, session_file=session_file, completions_log=completions_log, des_log=des_log, prompts=prompts, geo=geo)
     state = ChatState(
@@ -361,7 +364,8 @@ def run(args: argparse.Namespace, prompts: Prompts):
         task_check=geo.unfinished if geo is not None else None,
         max_nudges=args.max_nudges,
         # the clock starts here, before the session loads and the router loads the model: both are run time
-        deadline=Deadline.in_seconds(args.task_timeout) if args.task and args.task_timeout > 0 else None,
+        deadline=Deadline.in_seconds(args.task_timeout, args.deadline_warn) if args.task and args.task_timeout > 0 else None,
+        deadline_note=prompts.get("deadline_note") if args.deadline_warn > 0 else None,
     )
     log_header = {
         "model": args.model,

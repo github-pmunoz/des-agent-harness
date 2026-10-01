@@ -55,8 +55,8 @@ class TurnStart(Event):
     """Opens the next turn. The only creator of state.pending: the turn exists, empty, before its
     message is known, and the message source fills it (UserMessage). Which source is this event's
     policy, read from the state: a capped turn is continued with `auto_prompt` when one is set, a
-    turn cut at the token limit or ended by the repeat guard with `length_prompt` or
-    `repeat_prompt`, once; otherwise an operator is prompted, or a run without one returns.
+    turn cut at the token limit with `length_prompt` (while it makes progress) or ended by the
+    repeat guard with `repeat_prompt`, once; otherwise an operator is prompted, or a run without one returns.
 
     `message` is the seed form: a caller that already has the first message (a delegated task, a
     queue-fed harness) opens the turn and delivers it in one step, skipping the policy.
@@ -76,12 +76,17 @@ class TurnStart(Event):
         if last is not None and last.stop == StopReason.CAP and state.auto_prompt is not None \
                 and state.history.trailing_continues() <= state.settings.max_cap_continues:
             return opened, [Info("Checkpoint: round cap reached, continuing the task."), UserMessage(state.auto_prompt)]
-        # A turn cut at the token limit is continued once, told why: the reply it must write
-        # differently is in the history. A second cut in a row is the model not taking the hint,
-        # and the run ends on the record rather than spend a third completion.
+        # A turn cut at the token limit is continued, told why: the reply it must write differently
+        # is in the history. A cut on the continuation's very first reply is the model not taking
+        # the hint, and the run ends on the record rather than spend another completion. A turn
+        # that ran tool rounds before its cut did take it (seen: a continued geo turn made four
+        # measuring rounds, was cut again mid-reasoning, and the run ended with nothing submitted),
+        # so it is continued too, up to max_cap_continues cuts in a row.
         previous = [t for t in state.history.before(last) if not t.summary] if last is not None else []
         if last is not None and last.stop == StopReason.LENGTH and state.length_prompt is not None:
-            if not previous or previous[-1].stop != StopReason.LENGTH:
+            cuts = 1 + next((i for i, t in enumerate(reversed(previous)) if t.stop != StopReason.LENGTH), len(previous))
+            progressed = any(not r.summary for r in last.rounds)
+            if cuts == 1 or (progressed and cuts <= state.settings.max_cap_continues):
                 return opened, [Info("Reply cut at the token limit, continuing the task."), UserMessage(state.length_prompt)]
         # A turn the repeat guard ended is continued the same way, once, from its salvaged record:
         # a loop on one detail is not the end of the task (seen: an orchestrator with every
@@ -93,8 +98,10 @@ class TurnStart(Event):
                 return opened, [Info("Repeated round stopped, continuing the task."), UserMessage(state.repeat_prompt)]
         # A turn that answered is checked against the task, when the run has a check and no
         # operator: an answer that leaves the task undone (a geo task with nothing submitted) is
-        # continued with what is missing, a bounded number of times in the run.
-        if last is not None and last.stop == StopReason.ANSWER and not state.operator \
+        # continued with what is missing, a bounded number of times in the run. So is a turn whose
+        # cut or repeat stop was not continued above: it ends the run just as surely as an answer,
+        # and with the task undone it was scored as nothing. A deadline is not checked: no time.
+        if last is not None and last.stop in (StopReason.ANSWER, StopReason.LENGTH, StopReason.REPEAT) and not state.operator \
                 and state.task_check is not None and state.nudges < state.max_nudges:
             if (nudge := state.task_check()) is not None:
                 return replace(opened, nudges=state.nudges + 1), [Info("Task check: not done, continuing the task."), UserMessage(nudge)]
@@ -419,7 +426,15 @@ class ExecuteToolCalls(Event):
                      NextRound() if last else ExecuteToolCalls(self.index + 1)])
 
         output, memory = run_call(state, tc)
-        result = ToolResult(tc.id, tc.name, output.text, output.images)
+        text, warned = output.text, state.deadline_warned
+        # The round that crosses the deadline's warn fraction carries the time note, once, after
+        # its last result: the place the model reads next, and new text, so no cached prefix moves.
+        if last and not warned and state.deadline_note is not None and state.deadline is not None \
+                and state.deadline.warn_due():
+            d = state.deadline
+            text = f"{text}\n\n{state.deadline_note.format(left=max(0, int(d.remaining() + 0.5)), budget=f'{d.budget:g}')}"
+            warned = True
+        result = ToolResult(tc.id, tc.name, text, output.images)
         pending = state.pending.add_results(result)
 
         # The call ran with its full arguments; what the round echoes back from now on is the tool's
@@ -429,7 +444,7 @@ class ExecuteToolCalls(Event):
             pending = pending.fold_call(self.index, folded_arguments(tool, tc.arguments))
 
         # the echo is for the operator's eye, so it is short; the model gets the full result
-        return (replace(state, pending=pending, memory=memory),
+        return (replace(state, pending=pending, memory=memory, deadline_warned=warned),
                 [Info(shorten(result.content), colour=Palette.TOOL_RESULT),
                  DisplayStats(colour=Palette.TOOL_STATS),
                  NextRound() if last else ExecuteToolCalls(self.index + 1)])

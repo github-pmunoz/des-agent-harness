@@ -308,6 +308,15 @@ class TestTaskCheck:
         assert [t.user for t in final.history.turns] == ["reproduce M1", NOT_SUBMITTED]
         assert final.nudges == 1 and "ALL EXACT" in final.history.turns[1].rounds[0].results[0].content
 
+    def test_a_cut_that_ends_the_run_with_nothing_submitted_is_nudged(self, make_state, no_esc_watcher, tmp_path):
+        cut = {"content": "Let me reason about the outline...", "finish_reason": "length",
+               "usage": {"completion_tokens": 300, "prompt_tokens": 100}}
+        script = [cut, cut, {"tool_calls": [{"name": "geo_submit", "arguments": json.dumps({"program": U_EXACT})}]},
+                  {"content": "Done."}]
+        final, _ = self.run_task(make_state, script, tmp_path, max_nudges=1, length_prompt="Your reply was cut.")
+        assert [t.user for t in final.history.turns] == ["reproduce M1", "Your reply was cut.", NOT_SUBMITTED]
+        assert final.nudges == 1 and "ALL EXACT" in final.history.turns[2].rounds[0].results[0].content
+
     def test_no_nudge_without_budget_or_once_submitted(self, make_state, no_esc_watcher, tmp_path):
         final, _ = self.run_task(make_state, [{"content": "It is a U."}], tmp_path / "a", max_nudges=0)
         assert len(final.history.turns) == 1

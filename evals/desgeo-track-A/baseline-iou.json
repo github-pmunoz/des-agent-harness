@@ -22,6 +22,7 @@
   "geo_origin": "top-left",
   "max_continues": 3,
   "max_nudges": 1,
+  "deadline_warn": 0,
   "memory": "",
   "geo_poly": "deltas",
   "geo_no_labels": false,

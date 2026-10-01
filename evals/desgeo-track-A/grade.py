@@ -17,6 +17,7 @@ is your answer"); a rejected one after it does not erase it. Per case:
     followed_bias  with --geo-ruler-bias k: whether the answer is exactly the target shifted by
                  (k, k), i.e. it followed the miscalibrated instrument (None without a bias)
     completion_tokens, peak_prompt (largest prompt of the case), wall_ms
+    post_exact_tokens  completion tokens spent after the first exact submission (None if never exact)
 The run's result.json holds per_case, the mean score and exact count, the mean score per level,
 and per-run stats (sums or means over cases). A pure function of the run dir: rerun any time.
 """
@@ -26,6 +27,7 @@ import json
 import statistics
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 
@@ -85,8 +87,16 @@ def grade_case(case_dir: Path, settings: dict | None = None) -> dict:
     out["stop"] = turns[-1]["stop"] if turns else "none"
     out["tools"] = dict(Counter(tc["function"]["name"] for t in turns for r in t.get("rounds", [])
                                 for tc in r.get("tool_calls", [])))
-    usage = [(c.get("response") or {}).get("usage") or {} for c in lines(case_dir / "completions.jsonl")]
+    completions = lines(case_dir / "completions.jsonl")
+    usage = [(c.get("response") or {}).get("usage") or {} for c in completions]
     out["completion_tokens"] = sum(u.get("completion_tokens", 0) for u in usage)
+    # spent after the answer was already exact (chasing a lower cost): the completions logged after
+    # the first exact submission ran. A completion is logged before the calls it asked for run, so
+    # the one that wrote the exact submission counts before it.
+    first = next((s["time"] for s in ok if s["exact"]), None)
+    out["post_exact_tokens"] = None if first is None else sum(
+        u.get("completion_tokens", 0) for c, u in zip(completions, usage)
+        if datetime.fromisoformat(c["timestamp"]).timestamp() > first)
     out["peak_prompt"] = max((u.get("prompt_tokens", 0) for u in usage), default=0)
     return out
 
@@ -118,6 +128,7 @@ def main(argv: list[str]) -> int:
             "peak_prompt": max((c["peak_prompt"] for c in per_case), default=0),
             "ops_ratio": mean(c["ops_ratio"] for c in per_case),
             "var_ratio": mean(c["var_ratio"] for c in per_case),
+            "post_exact_tokens": sum(c["post_exact_tokens"] or 0 for c in per_case),
             "poly_answers": sum(c["poly_answer"] for c in per_case),
             "poly_rejects": sum(c["poly_rejects"] for c in per_case),
             "rect_rejects": sum(c["rect_rejects"] for c in per_case),

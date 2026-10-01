@@ -12,6 +12,7 @@ legitimate tool message the model can recover from; the loop shape is independen
 Real-tool dispatch is covered in test_tools.py.
 """
 import json
+from dataclasses import replace
 
 from conftest import MAX_CONTEXT, MODELS, PORT, FakeServer, pad_of
 
@@ -302,6 +303,21 @@ class TestAppendRoundDeadline:
         state = make_state(settings=settings, pending=pending, deadline=Deadline(at=time.monotonic() - 1, budget=5))
         _, events = AppendRound(assistant="", tool_calls=(TIME,), tokens=10).execute(state)
         assert isinstance(events[1], TurnEnd) and events[1].stop == "deadline"
+
+    def test_the_round_past_the_warn_fraction_carries_the_time_note_once(self, make_state):
+        note = "[{left} s of {budget} s left]"
+        pending = PendingTurn("q").add_round(Round("", (WEATHER,)))
+        early = make_state(pending=pending, deadline=Deadline.in_seconds(100, warn=0.8), deadline_note=note)
+        s, _ = ExecuteToolCalls().execute(early)
+        assert "s left]" not in s.pending.rounds[-1].results[-1].content and not s.deadline_warned
+        late = make_state(pending=pending, deadline=Deadline(at=time.monotonic() + 15, budget=100, warn=0.8), deadline_note=note)
+        s, _ = ExecuteToolCalls().execute(late)
+        assert s.pending.rounds[-1].results[-1].content.endswith("\n\n[15 s of 100 s left]") and s.deadline_warned
+        again = replace(s, pending=s.pending.add_round(Round("", (WEATHER,))))
+        s2, _ = ExecuteToolCalls().execute(again)
+        assert "s left]" not in s2.pending.rounds[-1].results[-1].content     # edge-triggered: one note per run
+        off = make_state(pending=pending, deadline=Deadline(at=time.monotonic() + 15, budget=100), deadline_note=note)
+        assert "s left]" not in ExecuteToolCalls().execute(off)[0].pending.rounds[-1].results[-1].content
 
     def test_a_timed_out_turn_is_not_continued_by_the_auto_prompt(self, make_state):
         history = ChatHistory().append(Turn(user="q", assistant="so far", stop=StopReason.DEADLINE))
@@ -633,6 +649,19 @@ class TestLengthStop:
         answered_between = make_state(history=ChatHistory().append(cut).append(Turn("c", "a", stop=StopReason.ANSWER))
                                       .append(Turn("q2", "partial", stop=StopReason.LENGTH)), length_prompt="Your reply was cut.", operator=False)
         assert len(TurnStart().execute(answered_between)[1]) == 2     # not in a row: continued
+
+    def test_a_cut_after_tool_rounds_is_continued_up_to_the_continue_budget(self, make_state):
+        # seen: a continued geo turn made four measuring rounds, was cut again mid-reasoning, and
+        # the run ended with nothing submitted: that turn took the hint, so it goes on
+        def history(worked: int) -> ChatHistory:
+            h = ChatHistory().append(Turn("q", "partial", stop=StopReason.LENGTH))
+            for _ in range(worked):
+                h = h.append(Turn("Your reply was cut.", "partial again", stop=StopReason.LENGTH, rounds=(ROUND,)))
+            return h
+        def continued(h: ChatHistory) -> bool:
+            return len(TurnStart().execute(make_state(history=h, length_prompt="Your reply was cut.", operator=False))[1]) == 2
+        assert continued(history(1)) and continued(history(2))         # 2 and 3 cuts in a row, max_cap_continues 3
+        assert not continued(history(3))                               # a 4th cut in a row ends the run
 
     def test_without_a_length_prompt_the_turn_is_not_continued(self, make_state):
         state = make_state(history=ChatHistory().append(Turn("q", "partial", stop=StopReason.LENGTH)), operator=False)
