@@ -197,7 +197,22 @@ class TestStreamCompletionRouting:
         # defensive: a finish_reason claiming tool calls with nothing folded must not open a round
         server = FakeServer(script=[{"content": "", "finish_reason": "tool_calls"}])
         _, events = StreamCompletion(request=self.REQ).execute(with_server(make_state, server))
-        assert isinstance(events[0], TurnEnd)
+        end = next(e for e in events if isinstance(e, TurnEnd))
+        assert end.stop == StopReason.EMPTY and not any(isinstance(e, AppendRound) for e in events)
+
+    def test_a_reply_with_no_text_and_no_call_ends_empty_not_answered(self, make_state, no_esc_watcher):
+        # seen: reasoning that breaks off mid-sentence, finish_reason stop, nothing after it
+        server = FakeServer(script=[{"content": "", "finish_reason": "stop", "usage": {"completion_tokens": 31704, "prompt_tokens": 100}}])
+        _, events = StreamCompletion(request=self.REQ).execute(with_server(make_state, server))
+        end = next(e for e in events if isinstance(e, TurnEnd))
+        assert end.stop == StopReason.EMPTY and end.assistant == ""
+        assert any(isinstance(e, Warn) and "31704 tokens" in e.text for e in events)
+        spaces = FakeServer(script=[{"content": "  \n", "finish_reason": "stop"}])
+        assert next(e for e in StreamCompletion(request=self.REQ).execute(with_server(make_state, spaces))[1]
+                    if isinstance(e, TurnEnd)).stop == StopReason.EMPTY
+        said = FakeServer(script=[{"content": "Done.", "finish_reason": "stop"}])
+        assert next(e for e in StreamCompletion(request=self.REQ).execute(with_server(make_state, said))[1]
+                    if isinstance(e, TurnEnd)).stop == StopReason.ANSWER
 
     def test_cancelled_finish_ends_the_turn_cancelled_even_with_calls(self, make_state, no_esc_watcher):
         server = FakeServer(script=[{"finish_reason": "cancelled", "tool_calls": [{"name": "get_weather"}]}])
@@ -662,6 +677,20 @@ class TestLengthStop:
             return len(TurnStart().execute(make_state(history=h, length_prompt="Your reply was cut.", operator=False))[1]) == 2
         assert continued(history(1)) and continued(history(2))         # 2 and 3 cuts in a row, max_cap_continues 3
         assert not continued(history(3))                               # a 4th cut in a row ends the run
+
+    def test_an_empty_stop_is_continued_up_to_the_continue_budget(self, make_state):
+        def history(n: int) -> ChatHistory:
+            h = ChatHistory().append(Turn("q", "", stop=StopReason.EMPTY))
+            for _ in range(n - 1):
+                h = h.append(Turn("Your reply ended empty.", "", stop=StopReason.EMPTY))
+            return h
+        def events(h: ChatHistory, **kw):
+            return TurnStart().execute(make_state(history=h, operator=False, **kw))[1]
+        first = events(history(1), empty_prompt="Your reply ended empty.")
+        assert [type(e).__name__ for e in first] == ["Info", "UserMessage"] and first[1].message == "Your reply ended empty."
+        assert len(events(history(3), empty_prompt="Your reply ended empty.")) == 2   # 3 in a row, max_cap_continues 3
+        assert events(history(4), empty_prompt="Your reply ended empty.") == []      # a 4th ends the run
+        assert events(history(1)) == []                                               # no prompt: never continued
 
     def test_without_a_length_prompt_the_turn_is_not_continued(self, make_state):
         state = make_state(history=ChatHistory().append(Turn("q", "partial", stop=StopReason.LENGTH)), operator=False)

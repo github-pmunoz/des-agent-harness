@@ -96,6 +96,7 @@ def build_tools(args: argparse.Namespace, inference: InferenceEngine, settings: 
                             result_chars=max_result_chars, memory=Memories.of(*child_memories, frame=prompts.frame()),
                             system_prompt=prompts.get("delegate.system"), cap_continue=prompts.get("cap_continue"),
                             length_continue=prompts.get("length_continue"), repeat_continue=prompts.get("repeat_continue"),
+                            empty_continue=prompts.get("empty_continue"),
                             records=args.delegate_records)
         # the parent's CURRENT settings travel with every call; the child derives its own from them
         tools = tools.add(delegate.delegate, name="delegate", inject=("settings", "deadline"),
@@ -360,6 +361,7 @@ def run(args: argparse.Namespace, prompts: Prompts):
         auto_prompt=prompts.get("cap_continue") if args.cont else None,
         length_prompt=prompts.get("length_continue") if args.cont else None,
         repeat_prompt=prompts.get("repeat_continue") if args.cont else None,
+        empty_prompt=prompts.get("empty_continue") if args.cont else None,
         memory=memory,
         task_check=geo.unfinished if geo is not None else None,
         max_nudges=args.max_nudges,

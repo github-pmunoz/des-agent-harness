@@ -71,6 +71,12 @@ REPEAT_CONTINUE_MSG = ("Your last turn was stopped: it asked for the same tool c
                        "note is what you have. Continue the task from there with a different next step, or reply with your "
                        "final answer.")
 
+# The message a turn whose reply ended empty is continued with (ChatState.empty_prompt): the reply
+# had no text and no call, and the record below it is what the turn got done.
+EMPTY_CONTINUE_MSG = ("Your last reply ended with nothing in it: no answer and no tool call, so your reasoning stopped "
+                      "before you acted. The record below is what you have done so far. Continue from there: make your "
+                      "next tool call, or reply with your final answer.")
+
 BRIEF_HEAD_CHARS = 400
 
 # Where a delegation's record lives, under the root so Read reaches it (Delegate.records): one
@@ -152,6 +158,7 @@ class Delegate:
     cap_continue: str = CAP_CONTINUE_MSG
     length_continue: str = LENGTH_CONTINUE_MSG
     repeat_continue: str = REPEAT_CONTINUE_MSG
+    empty_continue: str = EMPTY_CONTINUE_MSG
     # Keep every delegation's brief and whole answer under RECORD_DIR and end each answer with
     # their paths: a later brief can point at findings instead of retyping them, and a brief the
     # fold dropped can be sent again. Off, only an answer over the cap is saved (_spilled).
@@ -201,6 +208,7 @@ class Delegate:
             auto_prompt=self.cap_continue,  # checkpoint: a capped turn is continued, not returned
             length_prompt=self.length_continue,
             repeat_prompt=self.repeat_continue,
+            empty_prompt=self.empty_continue,
             memory=memory,
             deadline=deadline,              # the parent's, injected like settings: no child outlives the run
         )
@@ -281,6 +289,7 @@ def answer(state: ChatState) -> str:
       DEADLINE             the run's wall-clock budget ran out; the model's text so far is the answer
       REPEAT               the repeated-round guard ended the turn
       LENGTH               a reply cut at the token limit that was not continued; the text so far and the record are the answer
+      EMPTY                replies that ended with no text and no call, past the continues; the record is the answer
       ANSWER               the answer, verbatim ("(no answer)" when the model said nothing)
     Every case must come back as text the parent can act on — it cannot see the child's history.
     A turn that ended by overflow, deadline, error or repeat carries what it got down as its answer
@@ -302,6 +311,7 @@ def answer(state: ChatState) -> str:
         StopReason.CAP: "[Subagent hit the tool round cap]",
         StopReason.REPEAT: "[Subagent ran into a repeat loop]",
         StopReason.LENGTH: "[Subagent's reply was cut at the token limit]",
+        StopReason.EMPTY: "[Subagent's reply ended with nothing in it]",
     }
     if turn.stop in notes:
         return f"{child_msg}\n{notes[turn.stop]}"

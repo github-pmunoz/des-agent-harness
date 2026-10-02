@@ -24,6 +24,7 @@ class StopReason(StrEnum):
     ERROR = "error"             # a mid-turn exception
     REPEAT = "repeat"           # the same calls asked a third time with identical results; the record is the answer, and the repeat prompt may continue the turn once
     LENGTH = "length"           # the completion hit its token limit before it finished (a tool call left unclosed, say); the text so far and a note are the answer, and the length prompt may continue the turn
+    EMPTY = "empty"             # the reply ended with no text and no tool call (its reasoning broke off); the record is the answer, and the empty prompt may continue the turn
     CANCELLED = "cancelled"     # the operator pressed ESC or cancelled at a confirmation prompt
     INTERRUPT = "interrupt"     # Ctrl+C in auto mode
     SETTING = "setting"         # not a conversation turn: a settings change made by a /command
@@ -261,6 +262,10 @@ class ChatState(State):
     # the calls it looped on will not say anything new, and the task goes on from the record.
     # None means such a turn is never continued. Two in a row end the run.
     repeat_prompt: str | None = None
+    # The message a turn whose reply ended empty (StopReason.EMPTY) is continued with: no text and
+    # no call is not an answer, and the turn goes on from its record. None means such a turn is
+    # never continued. More empty stops in a row than max_cap_continues end the run.
+    empty_prompt: str | None = None
     # The model's working memory: the memories the run registered and the value each holds; empty
     # when none is offered. Every write goes through ExecuteToolCalls, which commits the new value
     # here; a memory tool only sees a dict built from its slot for the one call. Rendered last in
@@ -458,7 +463,7 @@ EXPIRED_RESULT = "[expired: this result is no longer in context]"
 # the window overflowed, the run's deadline passed, an error cut the turn, a repeated round, a
 # completion cut at its token limit. A capped turn is not one —
 # the cap message continues it — and an interrupt is the operator's, who wants no answer.
-SALVAGE_STOPS = frozenset((StopReason.OVERFLOW, StopReason.DEADLINE, StopReason.ERROR, StopReason.REPEAT, StopReason.LENGTH))
+SALVAGE_STOPS = frozenset((StopReason.OVERFLOW, StopReason.DEADLINE, StopReason.ERROR, StopReason.REPEAT, StopReason.LENGTH, StopReason.EMPTY))
 # The stops that keep a turn out of the conversation (Turn.visible): it is on the record and in the
 # session file, but not in the view, the token totals or the compaction transcript. A repeat stop
 # is not one: the turn it continues into reads the task and the salvaged record from it.

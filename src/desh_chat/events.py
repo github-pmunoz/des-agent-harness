@@ -55,8 +55,8 @@ class TurnStart(Event):
     """Opens the next turn. The only creator of state.pending: the turn exists, empty, before its
     message is known, and the message source fills it (UserMessage). Which source is this event's
     policy, read from the state: a capped turn is continued with `auto_prompt` when one is set, a
-    turn cut at the token limit with `length_prompt` (while it makes progress) or ended by the
-    repeat guard with `repeat_prompt`, once; otherwise an operator is prompted, or a run without one returns.
+    turn cut at the token limit with `length_prompt` (while it makes progress), ended by the
+    repeat guard with `repeat_prompt` (once) or by an empty reply with `empty_prompt`; otherwise an operator is prompted, or a run without one returns.
 
     `message` is the seed form: a caller that already has the first message (a delegated task, a
     queue-fed harness) opens the turn and delivers it in one step, skipping the policy.
@@ -83,8 +83,10 @@ class TurnStart(Event):
         # measuring rounds, was cut again mid-reasoning, and the run ended with nothing submitted),
         # so it is continued too, up to max_cap_continues cuts in a row.
         previous = [t for t in state.history.before(last) if not t.summary] if last is not None else []
+        def in_a_row(stop: StopReason) -> int:      # the last turn and the ones before it that ended the same way
+            return 1 + next((i for i, t in enumerate(reversed(previous)) if t.stop != stop), len(previous))
         if last is not None and last.stop == StopReason.LENGTH and state.length_prompt is not None:
-            cuts = 1 + next((i for i, t in enumerate(reversed(previous)) if t.stop != StopReason.LENGTH), len(previous))
+            cuts = in_a_row(StopReason.LENGTH)
             progressed = any(not r.summary for r in last.rounds)
             if cuts == 1 or (progressed and cuts <= state.settings.max_cap_continues):
                 return opened, [Info("Reply cut at the token limit, continuing the task."), UserMessage(state.length_prompt)]
@@ -96,12 +98,16 @@ class TurnStart(Event):
                 and state.history.trailing_continues() <= state.settings.max_cap_continues:
             if not previous or previous[-1].stop != StopReason.REPEAT:
                 return opened, [Info("Repeated round stopped, continuing the task."), UserMessage(state.repeat_prompt)]
+        # A reply that ended empty is continued from the record, up to max_cap_continues in a row.
+        if last is not None and last.stop == StopReason.EMPTY and state.empty_prompt is not None \
+                and in_a_row(StopReason.EMPTY) <= state.settings.max_cap_continues:
+            return opened, [Info("Reply ended empty, continuing the task."), UserMessage(state.empty_prompt)]
         # A turn that answered is checked against the task, when the run has a check and no
         # operator: an answer that leaves the task undone (a geo task with nothing submitted) is
         # continued with what is missing, a bounded number of times in the run. So is a turn whose
-        # cut or repeat stop was not continued above: it ends the run just as surely as an answer,
+        # cut, repeat or empty stop was not continued above: it ends the run just as surely as an answer,
         # and with the task undone it was scored as nothing. A deadline is not checked: no time.
-        if last is not None and last.stop in (StopReason.ANSWER, StopReason.LENGTH, StopReason.REPEAT) and not state.operator \
+        if last is not None and last.stop in (StopReason.ANSWER, StopReason.LENGTH, StopReason.REPEAT, StopReason.EMPTY) and not state.operator \
                 and state.task_check is not None and state.nudges < state.max_nudges:
             if (nudge := state.task_check()) is not None:
                 return replace(opened, nudges=state.nudges + 1), [Info("Task check: not done, continuing the task."), UserMessage(nudge)]
@@ -248,6 +254,14 @@ class StreamCompletion(Event):
             new_events.append(TurnEnd(assistant=f"{completion.content.rstrip()}\n{note}".strip(), tokens=tokens, stop=StopReason.LENGTH))
         elif completion.finish_reason == "tool_calls" and completion.tool_calls:
             new_events.append(AppendRound(assistant=completion.content, tool_calls=tuple(completion.tool_calls), tokens=tokens))
+        elif not completion.content.strip() and not completion.tool_calls:
+            # No text and no call is not an answer: the reasoning stopped before the model acted
+            # (seen on the hardest geo cases: thinking that breaks off mid-sentence, 3K to 49K
+            # tokens in, behind every miss of a sweep). The turn ends on its record, and the empty
+            # prompt may continue it.
+            generated = (completion.usage or {}).get("completion_tokens") or 0
+            new_events.append(Warn(f"Reply ended empty after {generated} tokens: no answer and no tool call."))
+            new_events.append(TurnEnd(assistant="", tokens=tokens, stop=StopReason.EMPTY))
         else:
             new_events.append(TurnEnd(assistant=completion.content, tokens=tokens, stop=StopReason.ANSWER))
         if state.completions_log is not None:
