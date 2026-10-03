@@ -334,6 +334,38 @@ class TestAppendRoundDeadline:
         off = make_state(pending=pending, deadline=Deadline(at=time.monotonic() + 15, budget=100), deadline_note=note)
         assert "s left]" not in ExecuteToolCalls().execute(off)[0].pending.rounds[-1].results[-1].content
 
+    def test_the_answer_still_runs_at_a_passed_deadline_and_nothing_else_does(self, make_state):
+        delivered = []
+        def submit(program: str) -> str:
+            """Submit the answer.
+
+            Args:
+                program: The answer.
+            """
+            delivered.append(program)
+            return "submission 1: ALL EXACT."
+        tools = ToolRegistry().add(submit, confirm=False, answer=True)
+        late = call(2, name="submit", arguments=json.dumps({"program": "M1 = rect(0, 0, 1, 1)"}))
+        state = make_state(pending=PendingTurn("q"), tools=tools, deadline=Deadline(at=time.monotonic() - 1, budget=900))
+        new_state, events = AppendRound(assistant="at last", tool_calls=(TIME, late), tokens=10).execute(state)
+        assert delivered == ["M1 = rect(0, 0, 1, 1)"] and new_state.pending == state.pending   # ran, unrecorded
+        assert isinstance(events[0], Warn) and "get_time not run" in events[0].text and "submit" not in events[0].text
+        assert any(isinstance(e, Info) and "Ran at the deadline: submit: submission 1: ALL EXACT." in e.text for e in events)
+        assert isinstance(events[-1], TurnEnd) and events[-1].stop == StopReason.DEADLINE
+        _, only = AppendRound(assistant="", tool_calls=(late,), tokens=10).execute(state)
+        assert "only the answer ran" in only[0].text
+
+    def test_nothing_is_continued_past_the_deadline(self, make_state):
+        passed = Deadline(at=time.monotonic() - 1, budget=900)
+        for stop in (StopReason.LENGTH, StopReason.EMPTY, StopReason.CAP, StopReason.REPEAT):
+            history = ChatHistory().append(Turn("q", "", stop=stop))
+            state = make_state(history=history, operator=False, deadline=passed, auto_prompt="go on",
+                               length_prompt="cut", repeat_prompt="loop", empty_prompt="empty")
+            new_state, events = TurnStart().execute(state)
+            assert new_state.pending is None and [type(e).__name__ for e in events] == ["Info"], stop
+            ahead = replace(state, deadline=Deadline.in_seconds(60))
+            assert [type(e).__name__ for e in TurnStart().execute(ahead)[1]] == ["Info", "UserMessage"], stop
+
     def test_a_timed_out_turn_is_not_continued_by_the_auto_prompt(self, make_state):
         history = ChatHistory().append(Turn(user="q", assistant="so far", stop=StopReason.DEADLINE))
         state = make_state(history=history, operator=False, auto_prompt="go on")

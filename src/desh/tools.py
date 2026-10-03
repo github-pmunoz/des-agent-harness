@@ -157,6 +157,10 @@ class Tool:
     # read rather than reading again. None -> the confirm policy decides (a confirmed tool acts).
     # Declared False for a confirmed tool that is used mostly to look (Bash: grep, sed, git log).
     acts: Optional[bool] = None
+    # whether a call DELIVERS the task's answer (a geo submission): such a call still runs in the
+    # reply that crosses the run's deadline, when every other call is refused — the answer written
+    # at the bell is the run's answer, not a call to drop.
+    answer: bool = False
 
     @property
     def acting(self) -> bool:
@@ -167,14 +171,15 @@ class Tool:
                parameters: Optional[dict] = None, confirm: bool = True,
                preview: Optional[Callable[[dict], str]] = None, inject: tuple[str, ...] = (),
                identity: tuple[str, ...] = (), fold: Optional[Callable[[dict], dict]] = None,
-               target: str = "", acts: Optional[bool] = None) -> Tool:
+               target: str = "", acts: Optional[bool] = None, answer: bool = False) -> Tool:
         """Derive the schema from fn's signature, type hints and docstring. Each keyword is an override
         slot that replaces the derived part verbatim — `parameters` is the hand-written JSON Schema escape
         hatch for a signature the derivation cannot express. `confirm=False` declares the tool read-only;
         `preview` renders the call for the operator (an Edit as a diff) instead of the generic listing;
         `inject` names the parameters the harness fills in, which the derived schema leaves out;
         `identity` names the arguments that identify a call for the repetition guard; `target` names
-        the one argument a mention of the call shows."""
+        the one argument a mention of the call shows; `answer` marks a call that delivers the task's
+        answer, run even past the deadline."""
         summary, _ = parse_docstring(fn.__doc__)
         name = name or fn.__name__
         schema = {
@@ -185,7 +190,7 @@ class Tool:
                 "parameters": parameters if parameters is not None else parameters_schema(fn, inject),
             },
         }
-        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview, inject=inject, identity=identity, fold=fold, target=target, acts=acts)
+        return cls(name=name, fn=fn, schema=schema, confirm=confirm, preview=preview, inject=inject, identity=identity, fold=fold, target=target, acts=acts, answer=answer)
 
     @property
     def description(self) -> str:

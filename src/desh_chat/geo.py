@@ -398,7 +398,7 @@ class GeoSession:
         unknown = [a for a in arms if a not in GEO_TOOLS]
         if unknown:
             raise ValueError(f"unknown geo tool {', '.join(unknown)}; one of {', '.join(GEO_TOOLS)}")
-        tools = tools.add(self.submit, name="geo_submit", confirm=False, acts=True, target="program")
+        tools = tools.add(self.submit, name="geo_submit", confirm=False, acts=True, target="program", answer=True)
         methods = {"render": (self.render_view, "view"), "measure": (self.measure, ""),
                    "auto_measure": (self.auto_measure, ""), "inspect": (self.inspect, "")}
         for arm in GEO_TOOLS:

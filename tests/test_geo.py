@@ -10,7 +10,7 @@ from test_turn_loop import run_chat
 from desgeo import Layout, Metrology, Rect
 from desh.tools import ToolOutput, ToolRegistry
 from desh_chat.geo import NOT_SUBMITTED, GeoSession, GeoSettings, GeoTask
-from desh_chat.state import EXPIRED_RESULT, Round, ToolResult
+from desh_chat.state import EXPIRED_RESULT, Round, StopReason, ToolResult
 from desh.llama.wire import ToolCall
 
 U_TARGET = "outer = rect(237, 143, 318, 411)\nslot = rect(311, 260, 170, 294)\nM1 = outer - slot\n"
@@ -324,6 +324,15 @@ class TestTaskCheck:
         final, _ = self.run_task(make_state, script, tmp_path, max_nudges=1, empty_prompt="Your reply ended empty.")
         assert [t.user for t in final.history.turns] == ["reproduce M1", "Your reply ended empty."]
         assert final.nudges == 0 and "ALL EXACT" in final.history.turns[1].rounds[0].results[0].content
+
+    def test_a_submission_written_at_the_deadline_is_the_answer(self, make_state, no_esc_watcher, tmp_path):
+        import time
+        from desh_chat.state import Deadline
+        script = [{"tool_calls": [{"name": "geo_submit", "arguments": json.dumps({"program": U_EXACT})}]}]
+        final, _ = self.run_task(make_state, script, tmp_path, deadline=Deadline(at=time.monotonic() - 1, budget=900))
+        assert final.history.turns[-1].stop == StopReason.DEADLINE
+        rec = json.loads((tmp_path / "submissions.jsonl").read_text().splitlines()[-1])
+        assert rec["ok"] and rec["exact"]
 
     def test_no_nudge_without_budget_or_once_submitted(self, make_state, no_esc_watcher, tmp_path):
         final, _ = self.run_task(make_state, [{"content": "It is a U."}], tmp_path / "a", max_nudges=0)

@@ -72,6 +72,13 @@ class TurnStart(Event):
         opened = state if state.pending is not None else replace(state, pending=PendingTurn())
         if self.message is not None:
             return opened, [UserMessage(self.message)]
+        # Past the deadline nothing is continued: every call the next reply asked for would be
+        # refused, so a continue only spends wall clock (seen: two continues after the deadline
+        # took a run 445 s over its 900 s budget).
+        if state.deadline is not None and state.deadline.passed():
+            if state.operator:
+                return opened, [DisplayStats(), PromptUser()]
+            return state, [Info("Task deadline passed: no continue, the run ends on its record.")]
         last = state.history.last_non_summary()
         if last is not None and last.stop == StopReason.CAP and state.auto_prompt is not None \
                 and state.history.trailing_continues() <= state.settings.max_cap_continues:
@@ -285,8 +292,17 @@ class AppendRound(Event):
         # so far as the answer and the calls named in the warning. The deadline comes first: a run
         # out of time must not be continued, and a capped turn would be (TurnStart's policy).
         if state.deadline is not None and state.deadline.passed():
-            return state, [Warn(f"Task deadline reached ({state.deadline.budget:g}s); {names} not run."),
-                           TurnEnd(assistant=self.assistant, tokens=self.tokens, stop=StopReason.DEADLINE)]
+            # The calls that deliver the answer are the exception: a reply that started before the
+            # deadline and ends in a submission has written the run's answer (seen: 9 of 96 hard geo
+            # cases refused theirs, one of them exact). They run, unrecorded like the memory calls at
+            # the cap — nobody reads the round after it — and the turn ends.
+            state, ran, rest = run_answer_calls(state, self.tool_calls)
+            shown: list[Event] = [Info(f"Ran at the deadline: {text}", colour=Palette.TOOL_RESULT) for text in ran]
+            if rest:
+                shown.insert(0, Warn(f"Task deadline reached ({state.deadline.budget:g}s); {', '.join(tc.name for tc in rest)} not run."))
+            else:
+                shown.insert(0, Warn(f"Task deadline reached ({state.deadline.budget:g}s); only the answer ran."))
+            return state, shown + [TurnEnd(assistant=self.assistant, tokens=self.tokens, stop=StopReason.DEADLINE)]
         if state.pending.non_summary_rounds() >= state.settings.max_tool_rounds:
             # This event only knows the cap was hit and the calls were not run. Whether the turn is
             # over or a checkpoint is the idle event's business (Continue says so when it goes on).
@@ -502,6 +518,22 @@ def run_memory_calls(state: ChatState, calls: tuple[ToolCall, ...]) -> tuple[Cha
         state = replace(state, memory=memory)
         kept.append(f"{tc.name} {state.tools.target(tc.name, tc.arguments)}".strip())
     return state, kept, rest
+
+
+def run_answer_calls(state: ChatState, calls: tuple[ToolCall, ...]) -> tuple[ChatState, list[str], list[ToolCall]]:
+    """Run the calls that deliver the task's answer (Tool.answer), in order, and return the state
+    after them, each one's result shortened for the operator, and the calls left unrun."""
+    ran: list[str] = []
+    rest: list[ToolCall] = []
+    for tc in calls:
+        tool = state.tools.get(tc.name)
+        if tool is None or not tool.answer:
+            rest.append(tc)
+            continue
+        output, memory = run_call(state, tc)
+        state = replace(state, memory=memory)
+        ran.append(f"{tc.name}: {shorten(output.text).strip()}")
+    return state, ran, rest
 
 
 def folded_arguments(tool: Tool, arguments: str) -> str:
