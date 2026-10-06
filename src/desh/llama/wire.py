@@ -95,7 +95,6 @@ class Completion:
     id: str
     model: str
     created: int
-    system_fingerprint: str
     content: str
     reasoning: str
     finish_reason: str
@@ -112,7 +111,6 @@ class Completion:
             id=d["id"],
             model=d["model"],
             created=d["created"],
-            system_fingerprint=d.get("system_fingerprint", ""),
             content=msg.get("content") or "",
             reasoning=msg.get("reasoning_content") or "",
             finish_reason=d["choices"][0].get("finish_reason") or "unknown",
@@ -136,7 +134,7 @@ class Completion:
         Streaming: fold the SSE frames (already parsed, [DONE] excluded) into one Completion.
 
         Frame anatomy (llama-server b10643)
-          - every frame carries the envelope: id, model, created, system_fingerprint
+          - every frame carries the envelope: id, model, created
           - content frames:   choices[0].delta.content            (never with reasoning in the same frame)
           - reasoning frames: choices[0].delta.reasoning_content
           - finish frame:     choices[0].finish_reason != null, delta == {}
@@ -187,7 +185,6 @@ class Completion:
             id=frames[0]["id"],
             model=frames[0]["model"],
             created=frames[0]["created"],
-            system_fingerprint=frames[0]["system_fingerprint"],
             content=content,
             reasoning=reasoning,
             finish_reason=finish_reason,
@@ -206,7 +203,6 @@ class Completion:
             "object": "chat.completion",
             "created": self.created,
             "model": self.model,
-            "system_fingerprint": self.system_fingerprint,
             "choices": [{
                 "index": 0,
                 "finish_reason": self.finish_reason,
