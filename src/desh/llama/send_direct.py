@@ -53,6 +53,8 @@ def image_to_base64(image_path: str) -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Send one request directly to a llama-server.")
+    ap.add_argument("-a", "--address", default="", help="full URL of llama-server (overrides -h/-p)")
+    ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("-p", "--port", type=int, default=8012)
     ap.add_argument("-t", "--temperature", type=float, default=0.7)
     ap.add_argument("-mt", "--max-tokens", type=int, default=256)
@@ -87,7 +89,15 @@ def main(argv=None) -> int:
         print(json.dumps(req.payload(), indent=2))
         return 0
 
-    server = LlamaServer(f"http://127.0.0.1:{a.port}", timeout=a.timeout)
+    if a.address:
+        parsed_url = urlparse(a.address)
+        if not parsed_url.scheme or not parsed_url.netloc:
+            print(f"Error: Invalid URL provided: {a.address}", file=sys.stderr)
+            return 1
+        base_url = a.address.rstrip("/")
+    else:
+        base_url = f"http://{a.host}:{a.port}"
+    server = LlamaServer(base_url, timeout=a.timeout)
     try:
         if a.stream:
             sink = Terminal(out=sys.stdout, colour=not a.output)
