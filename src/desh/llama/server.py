@@ -110,7 +110,7 @@ class LlamaServer:
                 renderer.feed(channel, text)
         renderer.flush()
         completion = Completion.from_frames(frames) if frames else Completion(
-            id="", model=req.model or "", created=0, system_fingerprint="",
+            id="", model=req.model or "", created=0,
             content="", reasoning="", finish_reason="cancelled",
             usage=None, timings=None, streamed=True,
         )

@@ -58,7 +58,7 @@ class FakeServer:
             renderer.feed("content", content)
         renderer.flush()
         return Completion(
-            id="fake-stream", model=req.model or "", created=0, system_fingerprint="",
+            id="fake-stream", model=req.model or "", created=0,
             content=content, reasoning=reasoning, finish_reason=finish_reason,
             usage=usage, timings=None, streamed=True, tool_calls=calls,
         )
@@ -67,7 +67,7 @@ class FakeServer:
         self.calls.append(("complete", req))
         content, finish_reason, reasoning, usage, calls = self._next("summary", "stop")
         return Completion(
-            id="fake-complete", model=req.model or "", created=0, system_fingerprint="",
+            id="fake-complete", model=req.model or "", created=0,
             content=content, reasoning=reasoning, finish_reason=finish_reason,
             usage=usage, timings=None, streamed=False, tool_calls=calls,
         )

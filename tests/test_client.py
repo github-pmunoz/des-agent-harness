@@ -6,7 +6,7 @@ have a regression net. No network: LlamaServer._open / urlopen are monkeypatched
 fake responses built from the SSE text below.
 
 Frame anatomy under test (llama-server b10643, see Completion.from_frames):
-  - every frame carries the envelope: id, model, created, system_fingerprint
+  - every frame carries the envelope: id, model, created
   - content frames:   choices[0].delta.content
   - reasoning frames: choices[0].delta.reasoning_content
   - finish frame:     choices[0].finish_reason != null, delta == {}
@@ -30,7 +30,7 @@ from desh.llama.wire import Completion, Request, ToolCall, events, parse_sse
 
 ENVELOPE = {
     "id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1700000000,
-    "model": "model-a", "system_fingerprint": "b10643-abc",
+    "model": "model-a",
 }
 USAGE = {"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19}
 TIMINGS = {"prompt_ms": 10.0, "predicted_ms": 40.0}
@@ -166,8 +166,7 @@ class TestFromFrames:
 
     def test_envelope_comes_from_first_frame(self):
         c = Completion.from_frames(FULL_STREAM)
-        assert (c.id, c.model, c.created, c.system_fingerprint) == (
-            ENVELOPE["id"], ENVELOPE["model"], ENVELOPE["created"], ENVELOPE["system_fingerprint"])
+        assert (c.id, c.model, c.created) == (ENVELOPE["id"], ENVELOPE["model"], ENVELOPE["created"])
 
     def test_no_finish_frame_leaves_finish_reason_unknown(self):
         c = Completion.from_frames([frame({"content": "partial"})])
@@ -297,7 +296,7 @@ class TestFromResponse:
     def test_missing_optional_fields_default(self):
         d = {"id": "x", "model": "m", "created": 1, "choices": [{"message": {"content": None}}]}
         c = Completion.from_response(d)
-        assert (c.content, c.reasoning, c.finish_reason, c.system_fingerprint) == ("", "", "unknown", "")
+        assert (c.content, c.reasoning, c.finish_reason) == ("", "", "unknown")
         assert c.usage is None and c.timings is None
 
     def test_streamed_and_non_streamed_fold_to_the_same_content(self):

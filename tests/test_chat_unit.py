@@ -151,7 +151,7 @@ class TestLogCompletion:
         log_path = tmp_path / "completions.jsonl"
         state = make_state(completions_log=Logger(str(log_path)))
         req = Request(messages=[{"role": "user", "content": "hi"}], model=MODELS[0])
-        completion = Completion(id="x", model=MODELS[0], created=0, system_fingerprint="",
+        completion = Completion(id="x", model=MODELS[0], created=0,
                                  content="hello", reasoning="", finish_reason="stop",
                                  usage=None, timings=None, streamed=False)
         new_state, events = LogCompletion(request=req, completion=completion, port=PORT).execute(state)
@@ -164,7 +164,7 @@ class TestLogCompletion:
     def test_no_op_when_no_logger_configured(self, make_state):
         state = make_state(completions_log=None)
         req = Request(messages=[{"role": "user", "content": "hi"}], model=MODELS[0])
-        completion = Completion(id="x", model=MODELS[0], created=0, system_fingerprint="",
+        completion = Completion(id="x", model=MODELS[0], created=0,
                                  content="hello", reasoning="", finish_reason="stop",
                                  usage=None, timings=None, streamed=False)
         new_state, events = LogCompletion(request=req, completion=completion, port=PORT).execute(state)
